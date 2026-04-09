@@ -1,0 +1,56 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+venv/
+.venv/
+env/
+__pycache__/
+*/__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+.uv-python/
+.tmp/
+.tmp-test/
+.coverage
+htmlcov/
+
+# Frontend dependencies and caches
+frontend/node_modules/
+frontend/.vite/
+
+# Rust build output
+walkgraph/target/
+
+# Local pipeline caches and generated map outputs
+.livability_cache/
+cache/
+*.pmtiles
+*.pkl
+*.pkl.gz
+
+# Local-only historical reference files
+legacy/
+
+# Large local geospatial inputs
+osm/*.osm.pbf
+boundaries/*.geojson
+
+# Local databases, logs, and temporary files
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.tmp
+*.bak
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

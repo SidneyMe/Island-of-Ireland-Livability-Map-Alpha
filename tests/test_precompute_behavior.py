@@ -1,0 +1,986 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from unittest import TestCase, mock
+
+import numpy as np
+from shapely.geometry import Point, Polygon, box
+
+import config
+import precompute
+import render_from_db
+import study_area
+from network.loader import WalkGraphIndex
+
+
+class _FakeVertexSeq:
+    def __init__(self, latitudes: list[float], longitudes: list[float]) -> None:
+        self.indices = list(range(len(latitudes)))
+        self._attrs = {
+            "lat": list(latitudes),
+            "lon": list(longitudes),
+            "osmid": list(range(len(latitudes))),
+        }
+
+    def __getitem__(self, key: str):
+        return self._attrs[key]
+
+    def __setitem__(self, key: str, value) -> None:
+        self._attrs[key] = list(value)
+
+
+class _FakeEdgeSeq:
+    def __init__(self, length_m: list[float] | None = None) -> None:
+        self._attrs = {"length_m": list(length_m or [1.0])}
+
+    def __getitem__(self, key: str):
+        return self._attrs[key]
+
+    def __setitem__(self, key: str, value) -> None:
+        self._attrs[key] = list(value)
+
+
+class _FakeGraph:
+    def __init__(
+        self,
+        distance_lookup: dict[tuple[int, int], float],
+        *,
+        latitudes: list[float] | None = None,
+        longitudes: list[float] | None = None,
+        edge_lengths: list[float] | None = None,
+    ) -> None:
+        latitudes = latitudes or [53.0, 53.001, 53.002]
+        longitudes = longitudes or [-6.0, -6.0, -6.0]
+        self.vs = _FakeVertexSeq(latitudes, longitudes)
+        self.es = _FakeEdgeSeq(edge_lengths)
+        self._distance_lookup = {
+            (int(src), int(dst)): float(distance)
+            for (src, dst), distance in distance_lookup.items()
+        }
+        self._graph_attrs: dict[str, object] = {}
+
+    def attributes(self) -> list[str]:
+        return list(self._graph_attrs)
+
+    def __getitem__(self, key: str):
+        return self._graph_attrs[key]
+
+    def __setitem__(self, key: str, value) -> None:
+        self._graph_attrs[key] = value
+
+    def vcount(self) -> int:
+        return len(self.vs.indices)
+
+    def ecount(self) -> int:
+        return len(self.es["length_m"])
+
+    def distances(self, source, target, weights=None, mode="out"):
+        del weights, mode
+        matrix = []
+        for src in source:
+            row = []
+            for dst in target:
+                row.append(self._distance_lookup.get((int(src), int(dst)), float("inf")))
+            matrix.append(row)
+        return matrix
+
+
+def _tracker_mock() -> mock.Mock:
+    tracker = mock.Mock()
+    tracker.phase_callback.return_value = lambda *args, **kwargs: None
+    return tracker
+
+
+def _polygon_z(minx: float, miny: float, maxx: float, maxy: float, z: float = 7.0) -> Polygon:
+    return Polygon(
+        [
+            (minx, miny, z),
+            (maxx, miny, z),
+            (maxx, maxy, z),
+            (minx, maxy, z),
+            (minx, miny, z),
+        ]
+    )
+
+
+def _empty_amenity_data() -> dict[str, list[tuple[float, float]]]:
+    return {category: [] for category in precompute.TAGS}
+
+
+def _grid_cell(
+    cell_id: str,
+    *,
+    geometry=None,
+    centre: tuple[float, float] = (53.0, -6.0),
+    metric_bounds: tuple[float, float, float, float] = (0.0, 0.0, 1.0, 1.0),
+    include_geometry: bool = True,
+    clip_required: bool = False,
+) -> dict[str, object]:
+    cell = {
+        "cell_id": cell_id,
+        "centre": centre,
+        "metric_bounds": metric_bounds,
+        "clip_required": clip_required,
+        "counts": {},
+        "scores": {},
+        "total": 0.0,
+    }
+    if include_geometry:
+        cell["geometry"] = geometry if geometry is not None else box(0.0, 0.0, 1.0, 1.0)
+    return cell
+
+
+def _clear_state_cache(cache_dir: Path) -> None:
+    precompute._STATE.tier_valid.pop(cache_dir, None)
+    precompute._STATE.tiers_building.discard(cache_dir)
+    precompute._STATE.study_area_metric = None
+    precompute._STATE.study_area_wgs84 = None
+
+
+def _workflow_kwargs(**overrides):
+    hashes = SimpleNamespace(
+        build_key="build-key-123",
+        config_hash="config-hash-123",
+        import_fingerprint="import-fingerprint-123",
+    )
+    source_state = SimpleNamespace(
+        extract_path=Path("extract.osm.pbf"),
+        extract_fingerprint="extract-fingerprint-123",
+        import_fingerprint="import-fingerprint-123",
+    )
+    tracker = _tracker_mock()
+    defaults = {
+        "cache_dir": Path(".livability_cache"),
+        "current_normalization_scope_hash": mock.Mock(return_value="norm-scope-123"),
+        "build_engine": mock.Mock(return_value=mock.sentinel.engine),
+        "ensure_database_ready": mock.Mock(),
+        "resolve_source_state": mock.Mock(return_value=source_state),
+        "activate_build_hashes": mock.Mock(),
+        "print_cache_status": mock.Mock(),
+        "validate_all_tiers": mock.Mock(),
+        "phase_geometry": mock.Mock(return_value=(box(0.0, 0.0, 1.0, 1.0), box(0.0, 0.0, 1.0, 1.0))),
+        "phase_amenities": mock.Mock(return_value=(_empty_amenity_data(), [])),
+        "phase_grids": mock.Mock(return_value={1000: []}),
+        "score_grid_fast_path_candidate": mock.Mock(return_value=False),
+        "has_complete_build": mock.Mock(return_value=False),
+        "import_payload_ready": mock.Mock(return_value=True),
+        "ensure_local_osm_import": mock.Mock(),
+        "tracker_factory": mock.Mock(return_value=tracker),
+        "walk_rows": mock.Mock(return_value=[]),
+        "amenity_rows": mock.Mock(return_value=[]),
+        "publish_precomputed_artifacts": mock.Mock(),
+        "summary_json": mock.Mock(return_value={"summary": True}),
+        "package_snapshot": mock.Mock(return_value={"package": "1.0"}),
+        "python_version": mock.Mock(return_value="3.12.0"),
+        "get_hashes": mock.Mock(side_effect=lambda: hashes),
+        "set_source_state": mock.Mock(),
+    }
+    defaults.update(overrides)
+    return defaults
+
+
+class PrecomputeReachabilityTests(TestCase):
+    def test_snap_amenities_uses_compact_vertex_ids(self) -> None:
+        graph = _FakeGraph({})
+        amenity_data = {
+            "shops": [(53.0, -6.0), (53.0, -6.0)],
+            "transport": [],
+            "healthcare": [],
+            "parks": [(53.002, -6.0)],
+        }
+
+        nodes_by_category = precompute.snap_amenities(graph, amenity_data)
+
+        self.assertEqual(nodes_by_category["shops"], [0, 0])
+        self.assertEqual(nodes_by_category["parks"], [2])
+
+    def test_precompute_walk_counts_by_origin_node_counts_duplicate_amenities(self) -> None:
+        graph = _FakeGraph(
+            {
+                (0, 0): 0.0,
+                (0, 2): 2.0,
+                (1, 0): 1.0,
+                (1, 2): 1.0,
+                (2, 0): 2.0,
+                (2, 2): 0.0,
+            }
+        )
+        nodes_by_category = {
+            "shops": [0, 0],
+            "transport": [],
+            "healthcare": [],
+            "parks": [2],
+        }
+
+        with mock.patch.object(precompute._network, "ig", object()):
+            counts_by_node = precompute.precompute_walk_counts_by_origin_node(
+                graph,
+                nodes_by_category,
+                [0, 1, 2],
+                cutoff=1.0,
+            )
+
+        self.assertEqual(counts_by_node[0], {"shops": 2})
+        self.assertEqual(counts_by_node[1], {"shops": 2, "parks": 1})
+        self.assertEqual(counts_by_node[2], {"parks": 1})
+
+    def test_score_cells_missing_nodes_default_to_zero_counts(self) -> None:
+        cells = [{"cell_id": "cell-1"}]
+
+        precompute.score_cells(cells, {}, ["missing-node"])
+
+        self.assertEqual(cells[0]["counts"], {})
+        self.assertEqual(cells[0]["scores"], {category: 0.0 for category in precompute.CAPS})
+        self.assertEqual(cells[0]["total"], 0.0)
+
+    def test_phase_reachability_reuses_cached_nodes_and_only_rebuilds_missing_walk_origins(self) -> None:
+        walk_graph = mock.Mock()
+        walk_graph.vcount.return_value = 3
+        walk_nodes_by_category = {
+            "shops": [0],
+            "transport": [],
+            "healthcare": [],
+            "parks": [],
+        }
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            precompute.cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
+            precompute.cache_save_large(
+                "walk_counts_by_origin_node",
+                {0: {"shops": 1}},
+                cache_dir,
+            )
+
+            tracker = _tracker_mock()
+            with (
+                mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir),
+                mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False),
+                mock.patch.object(
+                    precompute,
+                    "snap_amenities",
+                    side_effect=AssertionError("cached amenity snaps should be reused"),
+                ),
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_counts_by_origin_node",
+                    return_value={1: {"shops": 1}},
+                ) as walk_counts_mock,
+            ):
+                _, walk_counts_by_node = precompute.phase_reachability(
+                    walk_graph,
+                    amenity_data={},
+                    tracker=tracker,
+                    walk_origin_node_ids=[0, 1],
+                )
+                cached_walk_counts = precompute.cache_load_large("walk_counts_by_origin_node", cache_dir)
+
+            _clear_state_cache(cache_dir)
+
+        walk_counts_mock.assert_called_once()
+        self.assertEqual(walk_counts_mock.call_args.args[2], (1,))
+        self.assertEqual(walk_counts_by_node, {0: {"shops": 1}, 1: {"shops": 1}})
+        self.assertEqual(cached_walk_counts, walk_counts_by_node)
+
+    def test_precompute_walk_counts_by_origin_node_uses_rust_bridge_for_walkgraph_index(self) -> None:
+        graph = WalkGraphIndex(
+            graph_dir=Path("cache/walk_graph"),
+            meta={"node_count": 3, "edge_count": 2},
+            node_latitudes=np.array([53.0, 53.1, 53.2], dtype=np.float64),
+            node_longitudes=np.array([-6.3, -6.2, -6.1], dtype=np.float64),
+        )
+        nodes_by_category = {
+            "shops": [0, 0],
+            "transport": [1],
+            "healthcare": [],
+            "parks": [],
+        }
+
+        def _fake_rust_run(
+            graph_dir,
+            origins_bin,
+            amenity_weights_bin,
+            output_bin,
+            *,
+            category_count,
+            cutoff_m,
+            walkgraph_bin,
+            progress_cb,
+        ) -> None:
+            del graph_dir, origins_bin, amenity_weights_bin, category_count, cutoff_m, walkgraph_bin, progress_cb
+            np.asarray([2, 0, 2, 1], dtype=np.uint32).tofile(output_bin)
+
+        with mock.patch.object(precompute._network, "run_walkgraph_reachability", side_effect=_fake_rust_run):
+            counts_by_node = precompute.precompute_walk_counts_by_origin_node(
+                graph,
+                nodes_by_category,
+                [0, 1],
+                cutoff=500.0,
+            )
+
+        self.assertEqual(counts_by_node[0], {"shops": 2})
+        self.assertEqual(counts_by_node[1], {"shops": 2, "transport": 1})
+
+    def test_reach_tier_finalization_uses_walk_origin_count_cache(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            precompute.cache_save("walk_nodes_by_cat", _empty_amenity_data(), cache_dir)
+            precompute.cache_save_large("walk_counts_by_origin_node", {0: {}}, cache_dir)
+
+            with mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir):
+                can_finalize = precompute._can_finalize_reach_tier(_empty_amenity_data())
+
+            _clear_state_cache(cache_dir)
+
+        self.assertTrue(can_finalize)
+
+    def test_validate_tier_reuses_recoverable_building_reach_cache(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            precompute.cache_save("amenities", [{"category": "shops", "lat": 53.0, "lon": -6.0}], cache_dir)
+            precompute._tiers.write_tier_manifest(
+                cache_dir,
+                "reach",
+                "reach-hash-123",
+                "building",
+                "amenities",
+                manifest_name="manifest.json",
+                cache_schema_version=config.CACHE_SCHEMA_VERSION,
+                python_version=lambda: "3.12.0",
+                package_snapshot=config.package_snapshot,
+                render_hash="render-hash-123",
+            )
+
+            is_valid = precompute._tiers.validate_tier(
+                cache_dir,
+                "reach-hash-123",
+                "reach",
+                force_recompute=False,
+                manifest_name="manifest.json",
+                cache_schema_version=config.CACHE_SCHEMA_VERSION,
+                recoverable_check=lambda tier_dir: precompute._tiers._has_recoverable_reach_artefacts(
+                    tier_dir,
+                    cache_load_for_finalize=precompute._cache_load_for_finalize,
+                    cache_load_large_for_finalize=precompute._cache_load_large_for_finalize,
+                ),
+            )
+
+            _clear_state_cache(cache_dir)
+
+        self.assertTrue(is_valid)
+
+
+class WorkflowTests(TestCase):
+    def test_precompute_skips_before_geometry_and_import_when_complete_build_exists(self) -> None:
+        kwargs = _workflow_kwargs(has_complete_build=mock.Mock(return_value=True))
+
+        build_key = precompute._workflow.run_precompute_impl(**kwargs)
+
+        self.assertEqual(build_key, "build-key-123")
+        kwargs["phase_geometry"].assert_not_called()
+        kwargs["ensure_local_osm_import"].assert_not_called()
+        kwargs["tracker_factory"].assert_not_called()
+        kwargs["print_cache_status"].assert_not_called()
+        kwargs["validate_all_tiers"].assert_not_called()
+
+    def test_precompute_skips_when_complete_build_and_pmtiles_present(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            pmtiles_path = Path(tmp_name) / "livability.pmtiles"
+            pmtiles_path.write_bytes(b"PMTILESFAKE")
+            bake_mock = mock.Mock()
+            kwargs = _workflow_kwargs(has_complete_build=mock.Mock(return_value=True))
+
+            build_key = precompute._workflow.run_precompute_impl(
+                bake_pmtiles=bake_mock,
+                pmtiles_output_path=pmtiles_path,
+                **kwargs,
+            )
+
+        self.assertEqual(build_key, "build-key-123")
+        bake_mock.assert_not_called()
+        kwargs["phase_geometry"].assert_not_called()
+        kwargs["publish_precomputed_artifacts"].assert_not_called()
+
+    def test_precompute_rebakes_pmtiles_only_when_complete_build_but_archive_missing(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            pmtiles_path = Path(tmp_name) / "livability.pmtiles"
+            self.assertFalse(pmtiles_path.exists())
+            bake_mock = mock.Mock()
+            kwargs = _workflow_kwargs(has_complete_build=mock.Mock(return_value=True))
+
+            build_key = precompute._workflow.run_precompute_impl(
+                bake_pmtiles=bake_mock,
+                pmtiles_output_path=pmtiles_path,
+                **kwargs,
+            )
+
+        self.assertEqual(build_key, "build-key-123")
+        bake_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            "build-key-123",
+            pmtiles_path,
+        )
+        kwargs["phase_geometry"].assert_not_called()
+        kwargs["publish_precomputed_artifacts"].assert_not_called()
+
+    def test_precompute_propagates_pmtiles_bake_failure(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            pmtiles_path = Path(tmp_name) / "livability.pmtiles"
+            bake_mock = mock.Mock(side_effect=RuntimeError("tippecanoe exploded"))
+            kwargs = _workflow_kwargs(phase_grids=mock.Mock(return_value={1000: []}))
+
+            with self.assertRaisesRegex(RuntimeError, "tippecanoe exploded"):
+                precompute._workflow.run_precompute_impl(
+                    bake_pmtiles=bake_mock,
+                    pmtiles_output_path=pmtiles_path,
+                    **kwargs,
+                )
+
+        bake_mock.assert_called_once()
+        kwargs["publish_precomputed_artifacts"].assert_called_once()
+
+    def test_precompute_fails_fast_when_import_is_missing_and_auto_refresh_is_disabled(self) -> None:
+        kwargs = _workflow_kwargs(import_payload_ready=mock.Mock(return_value=False))
+
+        with self.assertRaisesRegex(RuntimeError, "Run the import-refresh workflow first"):
+            precompute._workflow.run_precompute_impl(**kwargs)
+
+        kwargs["phase_geometry"].assert_not_called()
+        kwargs["ensure_local_osm_import"].assert_not_called()
+
+    def test_precompute_runs_import_when_auto_refresh_is_enabled_and_import_is_missing(self) -> None:
+        kwargs = _workflow_kwargs(
+            import_payload_ready=mock.Mock(return_value=False),
+            phase_grids=mock.Mock(return_value={1000: []}),
+        )
+
+        build_key = precompute._workflow.run_precompute_impl(
+            auto_refresh_import=True,
+            **kwargs,
+        )
+
+        self.assertEqual(build_key, "build-key-123")
+        kwargs["phase_geometry"].assert_called_once()
+        kwargs["ensure_local_osm_import"].assert_called_once()
+        self.assertFalse(kwargs["ensure_local_osm_import"].call_args.kwargs["force_refresh"])
+        kwargs["publish_precomputed_artifacts"].assert_called_once()
+
+    def test_successful_rebuild_preserves_walk_only_publish_payloads(self) -> None:
+        walk_payload = [{"kind": "walk"}]
+        amenity_payload = [{"kind": "amenity"}]
+        summary_payload = {"summary": True}
+        kwargs = _workflow_kwargs(
+            phase_grids=mock.Mock(return_value={1000: []}),
+            walk_rows=mock.Mock(return_value=walk_payload),
+            amenity_rows=mock.Mock(return_value=amenity_payload),
+            summary_json=mock.Mock(return_value=summary_payload),
+        )
+
+        precompute._workflow.run_precompute_impl(force_precompute=True, **kwargs)
+
+        publish_kwargs = kwargs["publish_precomputed_artifacts"].call_args.kwargs
+        self.assertEqual(publish_kwargs["walk_rows"], walk_payload)
+        self.assertEqual(publish_kwargs["amenity_rows"], amenity_payload)
+        self.assertEqual(publish_kwargs["summary_json"], summary_payload)
+        self.assertNotIn("drive_rows", publish_kwargs)
+        self.assertNotIn("hotspot_rows", publish_kwargs)
+
+    def test_refresh_local_import_workflow_runs_import_without_full_scoring(self) -> None:
+        kwargs = _workflow_kwargs(import_payload_ready=mock.Mock(return_value=False))
+
+        build_key = precompute._workflow.run_import_refresh_impl(
+            force_refresh=True,
+            cache_dir=kwargs["cache_dir"],
+            current_normalization_scope_hash=kwargs["current_normalization_scope_hash"],
+            build_engine=kwargs["build_engine"],
+            ensure_database_ready=kwargs["ensure_database_ready"],
+            resolve_source_state=kwargs["resolve_source_state"],
+            activate_build_hashes=kwargs["activate_build_hashes"],
+            phase_geometry=kwargs["phase_geometry"],
+            import_payload_ready=kwargs["import_payload_ready"],
+            ensure_local_osm_import=kwargs["ensure_local_osm_import"],
+            tracker_factory=kwargs["tracker_factory"],
+            get_hashes=kwargs["get_hashes"],
+            set_source_state=kwargs["set_source_state"],
+        )
+
+        self.assertEqual(build_key, "build-key-123")
+        kwargs["phase_geometry"].assert_called_once()
+        kwargs["ensure_local_osm_import"].assert_called_once()
+        kwargs["tracker_factory"].assert_called_once()
+        kwargs["publish_precomputed_artifacts"].assert_not_called()
+
+
+class GridArtifactTests(TestCase):
+    def test_load_or_build_walk_origin_nodes_reuses_cached_score_artifact(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            origin_key = precompute._phases._walk_origin_nodes_cache_key([1000])
+            precompute.cache_save(origin_key, [7], cache_dir)
+
+            with mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False):
+                walk_origin_nodes, built = precompute._phases._load_or_build_walk_origin_nodes(
+                    [1000],
+                    {1000: [0, 1, 0]},
+                    cache_dir=cache_dir,
+                    cache_load=precompute.cache_load,
+                    cache_save=precompute.cache_save,
+                    normalize_origin_node_ids=precompute.normalize_origin_node_ids,
+                )
+
+            _clear_state_cache(cache_dir)
+
+        self.assertFalse(built)
+        self.assertEqual(walk_origin_nodes, [7])
+
+    def test_phase_grids_deduplicates_walk_origins_across_sizes_and_caches_artifact(self) -> None:
+        tracker = _tracker_mock()
+        walk_graph = mock.Mock()
+        walk_graph.vcount.return_value = 3
+        grid_1000 = [_grid_cell("1000-a"), _grid_cell("1000-b")]
+        grid_500 = [_grid_cell("500-a")]
+        phase_reachability_mock = mock.Mock(
+            return_value=(
+                {},
+                {
+                    10: {"shops": 1},
+                    20: {"parks": 1},
+                },
+            )
+        )
+
+        def snap_side_effect(graph, cells, key, cache_dir):
+            del graph, cells, cache_dir
+            mapping = {
+                "walk_cell_nodes_1000": [10, 10],
+                "walk_cell_nodes_500": [20],
+            }
+            return list(mapping[key])
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            with (
+                mock.patch.object(precompute, "GRID_SIZES_M", [1000, 500]),
+                mock.patch.object(precompute._STATE, "score_cache_dir", cache_dir),
+                mock.patch.object(precompute, "phase_networks", return_value=walk_graph),
+                mock.patch.object(precompute, "phase_reachability", phase_reachability_mock),
+                mock.patch.object(precompute, "build_grid", side_effect=[grid_1000, grid_500]),
+                mock.patch.object(precompute, "snap_cells_to_nodes", side_effect=snap_side_effect),
+                mock.patch.object(precompute, "_mark_building"),
+                mock.patch.object(precompute, "_mark_complete"),
+            ):
+                walk_grids = precompute.phase_grids(
+                    mock.sentinel.engine,
+                    box(0.0, 0.0, 1.0, 1.0),
+                    _empty_amenity_data(),
+                    tracker,
+                )
+
+            with mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False):
+                cached_origin_nodes = precompute.cache_load(
+                    "walk_origin_nodes__sizes_500_1000",
+                    cache_dir,
+                )
+
+            _clear_state_cache(cache_dir)
+
+        self.assertEqual(cached_origin_nodes, [10, 20])
+        self.assertEqual(
+            phase_reachability_mock.call_args.kwargs["walk_origin_node_ids"],
+            [10, 20],
+        )
+        self.assertEqual(sorted(walk_grids), [500, 1000])
+
+
+class StudyAreaAndPublishTests(TestCase):
+    def test_clean_union_strips_z_from_boundary_geometry(self) -> None:
+        unioned = study_area.clean_union([_polygon_z(-1.0, -1.0, 1.0, 1.0)])
+
+        self.assertFalse(unioned.has_z)
+
+    def test_phase_geometry_uses_shared_study_area_loader(self) -> None:
+        tracker = _tracker_mock()
+        study_area_metric = box(0.0, 0.0, 2.0, 1.0)
+        study_area_wgs84 = box(0.0, 0.0, 1.0, 0.5)
+        saved = {}
+
+        returned_metric, returned_wgs84 = precompute._phases.phase_geometry_impl(
+            tracker,
+            cache_dir=Path("geo-cache"),
+            geo_hash="geo-hash-123",
+            cache_load=lambda key, directory: None,
+            cache_save=lambda key, data, directory: saved.__setitem__(key, data),
+            mark_building=mock.Mock(),
+            mark_complete=mock.Mock(),
+            geometry_is_2d=precompute._grid._geometry_is_2d,
+            can_finalize_geo_tier=mock.Mock(return_value=False),
+            load_study_area_geometries=mock.Mock(
+                return_value=(study_area_metric, study_area_wgs84)
+            ),
+            study_area_wgs84_from_metric=mock.Mock(),
+        )
+
+        self.assertEqual(returned_metric, study_area_metric)
+        self.assertEqual(returned_wgs84, study_area_wgs84)
+        self.assertEqual(saved["study_area_metric"], study_area_metric)
+        self.assertEqual(saved["study_area_wgs84"], study_area_wgs84)
+
+    def test_phase_geometry_cache_hit_reuses_cached_wgs84_geometry(self) -> None:
+        tracker = _tracker_mock()
+        cache_dir = Path("geo-cache")
+        study_area_metric = box(0.0, 0.0, 2.0, 1.0)
+        study_area_wgs84 = box(0.0, 0.0, 1.0, 0.5)
+        cache = {
+            "study_area_metric": study_area_metric,
+            "study_area_wgs84": study_area_wgs84,
+        }
+
+        returned_metric, returned_wgs84 = precompute._phases.phase_geometry_impl(
+            tracker,
+            cache_dir=cache_dir,
+            geo_hash="geo-hash-123",
+            cache_load=lambda key, directory: cache.get(key),
+            cache_save=mock.Mock(),
+            mark_building=mock.Mock(),
+            mark_complete=mock.Mock(),
+            geometry_is_2d=precompute._grid._geometry_is_2d,
+            can_finalize_geo_tier=mock.Mock(),
+            load_study_area_geometries=mock.Mock(
+                side_effect=AssertionError("cached geometry should be reused")
+            ),
+            study_area_wgs84_from_metric=mock.Mock(),
+        )
+
+        self.assertEqual(returned_metric, study_area_metric)
+        self.assertEqual(returned_wgs84, study_area_wgs84)
+        tracker.finish_phase.assert_called_with("geometry", "cached", detail="geometry cache hit")
+
+    def test_phase_geometry_repairs_metric_only_cache_and_saves_wgs84(self) -> None:
+        tracker = _tracker_mock()
+        cache_dir = Path("geo-cache")
+        study_area_metric = box(0.0, 0.0, 1.0, 1.0)
+        study_area_wgs84 = box(0.0, 0.0, 1.0, 0.5)
+        cache = {"study_area_metric": study_area_metric}
+        saved = {}
+        can_finalize = mock.Mock(return_value=True)
+        mark_complete = mock.Mock()
+        load_study_area_geometries = mock.Mock(
+            side_effect=AssertionError("valid cached metric geometry should be reused")
+        )
+
+        returned_metric, returned_wgs84 = precompute._phases.phase_geometry_impl(
+            tracker,
+            cache_dir=cache_dir,
+            geo_hash="geo-hash-123",
+            cache_load=lambda key, directory: cache.get(key),
+            cache_save=lambda key, data, directory: saved.__setitem__(key, data),
+            mark_building=mock.Mock(),
+            mark_complete=mark_complete,
+            geometry_is_2d=precompute._grid._geometry_is_2d,
+            can_finalize_geo_tier=can_finalize,
+            load_study_area_geometries=load_study_area_geometries,
+            study_area_wgs84_from_metric=mock.Mock(return_value=study_area_wgs84),
+        )
+
+        self.assertEqual(returned_metric, study_area_metric)
+        self.assertEqual(returned_wgs84, study_area_wgs84)
+        self.assertNotIn("study_area_metric", saved)
+        self.assertEqual(saved["study_area_wgs84"], study_area_wgs84)
+        can_finalize.assert_called_once_with(study_area_metric, study_area_wgs84)
+        mark_complete.assert_called_once_with(cache_dir, "geo", "geo-hash-123", "geometry")
+
+    def test_recoverable_geo_artifacts_require_both_cached_geometries(self) -> None:
+        cache_dir = Path("geo-cache")
+        artifacts = {"study_area_metric": box(0.0, 0.0, 1.0, 1.0)}
+
+        def cache_load_for_finalize(key, directory):
+            del directory
+            return artifacts.get(key)
+
+        self.assertFalse(
+            precompute._tiers._has_recoverable_geo_artefacts(
+                cache_dir,
+                cache_load_for_finalize=cache_load_for_finalize,
+            )
+        )
+
+        artifacts["study_area_wgs84"] = box(0.0, 0.0, 1.0, 1.0)
+
+        self.assertTrue(
+            precompute._tiers._has_recoverable_geo_artefacts(
+                cache_dir,
+                cache_load_for_finalize=cache_load_for_finalize,
+            )
+        )
+
+    def test_load_study_area_metric_defaults_to_island_geometry(self) -> None:
+        island_geom = box(0.0, 0.0, 2.0, 2.0)
+
+        with (
+            mock.patch.object(study_area, "STUDY_AREA_KIND", "ireland"),
+            mock.patch.object(study_area, "load_island_geometry_metric", return_value=island_geom),
+            mock.patch.object(study_area, "load_m1_corridor_metric") as corridor_mock,
+        ):
+            returned = study_area.load_study_area_metric()
+
+        self.assertEqual(returned, island_geom)
+        corridor_mock.assert_not_called()
+
+    def test_load_study_area_metric_keeps_corridor_mode_available(self) -> None:
+        island_geom = box(0.0, 0.0, 2.0, 2.0)
+        corridor_geom = box(0.5, 0.5, 1.5, 1.5)
+
+        with (
+            mock.patch.object(study_area, "STUDY_AREA_KIND", "m1_corridor"),
+            mock.patch.object(study_area, "load_island_geometry_metric", return_value=island_geom),
+            mock.patch.object(study_area, "load_m1_corridor_metric", return_value=corridor_geom) as corridor_mock,
+        ):
+            returned = study_area.load_study_area_metric()
+
+        self.assertEqual(returned, corridor_geom)
+        corridor_mock.assert_called_once_with(island_geom)
+
+    def test_build_scoring_grid_emits_2d_geometry(self) -> None:
+        with mock.patch.object(precompute._grid, "TO_WGS84", lambda x, y: (x, y)):
+            cells = precompute._grid.build_scoring_grid(1.0, box(0.0, 0.0, 2.0, 1.0))
+
+        self.assertEqual(len(cells), 2)
+        self.assertTrue(all("geometry" in cell for cell in cells))
+        self.assertTrue(all(not cell["geometry"].has_z for cell in cells))
+
+    def test_clone_scoring_grid_shells_preserves_geometry_and_bounds(self) -> None:
+        geometry = box(0.0, 0.0, 1.0, 1.0)
+        original = _grid_cell(
+            "walk-cell",
+            geometry=geometry,
+            metric_bounds=(10.0, 20.0, 30.0, 40.0),
+            clip_required=True,
+        )
+
+        cloned = precompute._grid.clone_scoring_grid_shells([original])[0]
+
+        self.assertTrue(cloned["geometry"].equals(geometry))
+        self.assertEqual(cloned["metric_bounds"], (10.0, 20.0, 30.0, 40.0))
+        self.assertTrue(cloned["clip_required"])
+
+    def test_materialize_cell_geometry_clips_missing_boundary_geometry_by_rect(self) -> None:
+        cell = _grid_cell(
+            "boundary-cell",
+            include_geometry=False,
+            metric_bounds=(0.0, 0.0, 1.0, 1.0),
+            clip_required=True,
+        )
+
+        with mock.patch.object(precompute._grid, "TO_WGS84", lambda x, y: (x, y)):
+            geometry = precompute._grid.materialize_cell_geometry(
+                cell,
+                box(0.25, 0.25, 0.75, 0.75),
+            )
+
+        self.assertTrue(geometry.equals(box(0.25, 0.25, 0.75, 0.75)))
+
+    def test_walk_rows_preserve_2d_geometry_in_payloads(self) -> None:
+        created_at = datetime.now(timezone.utc)
+        walk_grids = {
+            1000: [_grid_cell("walk-cell")],
+        }
+
+        walk_rows = list(precompute._walk_rows(walk_grids, created_at))
+
+        self.assertFalse(walk_rows[0]["cell_geom"].has_z)
+        self.assertFalse(walk_rows[0]["centre_geom"].has_z)
+
+        invalid_grids = {
+            1000: [_grid_cell("bad-cell", geometry=_polygon_z(0.0, 0.0, 1.0, 1.0))],
+        }
+        with self.assertRaises(ValueError):
+            list(precompute._walk_rows(invalid_grids, created_at))
+
+    def test_walk_rows_materialize_missing_geometry(self) -> None:
+        created_at = datetime.now(timezone.utc)
+        walk_grids = {
+            1000: [_grid_cell("walk-cell", include_geometry=False, metric_bounds=(0.0, 0.0, 1.0, 1.0))],
+        }
+
+        with (
+            mock.patch.object(precompute._STATE, "study_area_metric", box(0.0, 0.0, 1.0, 1.0)),
+            mock.patch.object(precompute._grid, "TO_WGS84", lambda x, y: (x, y)),
+        ):
+            walk_rows = list(precompute._walk_rows(walk_grids, created_at))
+
+        self.assertTrue(walk_rows[0]["cell_geom"].equals(box(0.0, 0.0, 1.0, 1.0)))
+
+    def test_walk_rows_clip_boundary_cells_only_when_required(self) -> None:
+        created_at = datetime.now(timezone.utc)
+        walk_grids = {
+            1000: [
+                _grid_cell(
+                    "inland-cell",
+                    include_geometry=False,
+                    metric_bounds=(0.0, 0.0, 1.0, 1.0),
+                    clip_required=False,
+                ),
+                _grid_cell(
+                    "boundary-cell",
+                    include_geometry=False,
+                    metric_bounds=(0.0, 0.0, 1.0, 1.0),
+                    clip_required=True,
+                ),
+            ],
+        }
+
+        with (
+            mock.patch.object(precompute._STATE, "study_area_metric", box(0.25, 0.25, 0.75, 0.75)),
+            mock.patch.object(precompute._grid, "TO_WGS84", lambda x, y: (x, y)),
+        ):
+            walk_rows = list(precompute._walk_rows(walk_grids, created_at))
+
+        self.assertTrue(walk_rows[0]["cell_geom"].equals(box(0.0, 0.0, 1.0, 1.0)))
+        self.assertTrue(walk_rows[1]["cell_geom"].equals(box(0.25, 0.25, 0.75, 0.75)))
+
+    def test_walk_rows_reuses_existing_geometry(self) -> None:
+        created_at = datetime.now(timezone.utc)
+        materialize_cell_geometry = mock.Mock(side_effect=AssertionError("should not materialize"))
+        row_stream = precompute._publish.iter_walk_rows_impl(
+            {1000: [_grid_cell("walk-cell")]},
+            created_at,
+            hashes=precompute._STATE.hashes,
+            study_area_metric=box(0.0, 0.0, 1.0, 1.0),
+            materialize_cell_geometry=materialize_cell_geometry,
+        )
+
+        walk_rows = list(row_stream)
+
+        self.assertEqual(len(walk_rows), 1)
+        materialize_cell_geometry.assert_not_called()
+
+    def test_walk_rows_reports_cell_context_when_geometry_materialization_fails(self) -> None:
+        created_at = datetime.now(timezone.utc)
+        cell = _grid_cell(
+            "bad-cell",
+            include_geometry=False,
+            metric_bounds=(0.0, 0.0, 1.0, 1.0),
+            clip_required=True,
+        )
+        row_stream = precompute._publish.iter_walk_rows_impl(
+            {1000: [cell]},
+            created_at,
+            hashes=precompute._STATE.hashes,
+            study_area_metric=box(0.0, 0.0, 1.0, 1.0),
+            materialize_cell_geometry=mock.Mock(side_effect=MemoryError("boom")),
+        )
+
+        with self.assertRaises(RuntimeError) as ctx:
+            list(row_stream)
+
+        message = str(ctx.exception)
+        self.assertIn("resolution_m=1000", message)
+        self.assertIn("cell_id='bad-cell'", message)
+        self.assertIn("metric_bounds=(0.0, 0.0, 1.0, 1.0)", message)
+        self.assertIn("clip_required=True", message)
+        self.assertIsInstance(ctx.exception.__cause__, MemoryError)
+
+    def test_grid_cells_are_2d_requires_clip_required_metadata(self) -> None:
+        self.assertFalse(
+            precompute._grid._grid_cells_are_2d(
+                [
+                    {
+                        "cell_id": "missing-clip",
+                        "centre": (53.0, -6.0),
+                        "metric_bounds": (0.0, 0.0, 1.0, 1.0),
+                        "counts": {},
+                        "scores": {},
+                        "total": 0.0,
+                    }
+                ]
+            )
+        )
+
+    def test_iter_walk_rows_emits_progress_during_row_preparation(self) -> None:
+        created_at = datetime.now(timezone.utc)
+        progress = mock.Mock()
+        row_stream = precompute._publish.iter_walk_rows_impl(
+            {1000: [_grid_cell("walk-cell")]},
+            created_at,
+            hashes=precompute._STATE.hashes,
+            study_area_metric=box(0.0, 0.0, 1.0, 1.0),
+            materialize_cell_geometry=precompute._grid.materialize_cell_geometry,
+            progress_cb=progress,
+            progress_every=1,
+        )
+
+        rows = list(row_stream)
+
+        self.assertEqual(len(rows), 1)
+        progress.assert_any_call(
+            "detail",
+            detail="preparing grid_walk rows 1/1",
+            force_log=True,
+        )
+
+    def test_render_from_db_delegates_to_local_server(self) -> None:
+        with mock.patch.object(
+            render_from_db,
+            "serve_livability_app",
+            return_value="http://127.0.0.1:8765/",
+        ) as serve_mock:
+            returned_url = render_from_db.run_render_from_db(host="127.0.0.1", port=8765)
+
+        self.assertEqual(returned_url, "http://127.0.0.1:8765/")
+        serve_mock.assert_called_once_with(host="127.0.0.1", port=8765)
+
+
+class ConfigTests(TestCase):
+    def test_config_hashes_no_drive(self) -> None:
+        config_source = Path(config.__file__).read_text(encoding="utf-8")
+
+        self.assertFalse(hasattr(config, "DRIVE_TIME_S"))
+        self.assertFalse(hasattr(config, "DRIVE_HOURS"))
+        self.assertIn("WALKGRAPH_FORMAT_VERSION", config_source)
+        self.assertIn("WALKGRAPH_BBOX_PADDING_M", config_source)
+        self.assertNotIn("networkx", config_source)
+
+        hashes = config.build_config_hashes()
+        self.assertTrue(hashes.geo_hash)
+        self.assertTrue(hashes.render_hash)
+
+        with mock.patch.object(config, "WALKGRAPH_BIN", "walkgraph-from-another-path.exe"):
+            alternate_hashes = config.build_config_hashes()
+
+        self.assertEqual(hashes.geo_hash, alternate_hashes.geo_hash)
+        self.assertEqual(hashes.config_hash, alternate_hashes.config_hash)
+
+    def test_default_study_area_kind_is_ireland(self) -> None:
+        self.assertEqual(config.STUDY_AREA_KIND, "ireland")
+
+    def test_config_hash_changes_when_study_area_kind_changes(self) -> None:
+        with mock.patch.object(config, "STUDY_AREA_KIND", "ireland"):
+            island_hashes = config.build_config_hashes()
+        with mock.patch.object(config, "STUDY_AREA_KIND", "m1_corridor"):
+            corridor_hashes = config.build_config_hashes()
+
+        self.assertNotEqual(island_hashes.geo_hash, corridor_hashes.geo_hash)
+        self.assertNotEqual(island_hashes.config_hash, corridor_hashes.config_hash)
+
+
+class CompactGraphArrayTests(TestCase):
+    def test_vertex_coordinate_arrays_use_compact_graph_attrs(self) -> None:
+        graph = _FakeGraph({})
+        graph["_node_latitudes"] = [53.0, 53.1, 53.2]
+        graph["_node_longitudes"] = [-6.3, -6.2, -6.1]
+
+        latitudes, longitudes = precompute._network._vertex_coordinate_arrays(graph)
+
+        self.assertEqual(latitudes.tolist(), [53.0, 53.1, 53.2])
+        self.assertEqual(longitudes.tolist(), [-6.3, -6.2, -6.1])
+
+    def test_edge_weights_use_compact_graph_attr_when_available(self) -> None:
+        graph = _FakeGraph({}, edge_lengths=[1.0, 2.0])
+        graph["_edge_length_m"] = [5.0, 6.0]
+
+        weights = precompute._network._edge_weights(graph, "length_m")
+
+        self.assertEqual(list(weights), [5.0, 6.0])

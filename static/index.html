@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Island of Ireland Livability</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/dist/app.css">
+</head>
+<body>
+    <div id="app">
+        <div id="map-shell">
+            <div id="map-stage">
+                <div id="map" aria-label="Livability map"></div>
+                <div id="status-pill">Loading map...</div>
+            </div>
+            <div id="zoom-controls" class="floating-card">
+                <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+                <button id="zoom-out" type="button" aria-label="Zoom out">-</button>
+            </div>
+            <button
+                id="panel-toggle"
+                class="floating-card"
+                type="button"
+                aria-controls="control-panel"
+                aria-expanded="true"
+            >
+                Hide panel
+            </button>
+        </div>
+
+        <aside id="control-panel" class="floating-card">
+            <div class="panel-header">
+                <div>
+                    <p class="eyebrow">Local Web App</p>
+                    <h1>Island of Ireland Livability</h1>
+                </div>
+                <div id="resolution-chip">Grid --</div>
+            </div>
+
+            <p class="panel-copy">
+                Pan and zoom across the island. The app only requests the active grid resolution for the visible viewport.
+            </p>
+
+            <section class="panel-section">
+                <h2>Grid</h2>
+                <label class="toggle-row" for="grid-toggle">
+                    <span>Show walk score grid</span>
+                    <input id="grid-toggle" type="checkbox" checked>
+                </label>
+            </section>
+
+            <section class="panel-section">
+                <div class="section-heading">
+                    <h2>Amenities</h2>
+                    <span id="amenity-note">Off until enabled</span>
+                </div>
+                <div id="amenity-controls"></div>
+            </section>
+
+            <section class="panel-section">
+                <h2>How it works</h2>
+                <ul id="facts-list">
+                    <li>Base map tiles stream separately from the scoring data.</li>
+                    <li>Only one grid resolution is active at a time.</li>
+                    <li>Amenity overlays are fetched only after you turn them on.</li>
+                </ul>
+            </section>
+        </aside>
+    </div>
+
+    <script type="module" src="/static/dist/app.js"></script>
+</body>
+</html>
