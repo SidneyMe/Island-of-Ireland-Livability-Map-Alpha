@@ -1,14 +1,15 @@
 # Island of Ireland Livability Map
 
-A local-first livability mapping experiment for the island of Ireland. It imports local OpenStreetMap data, stores the working state in PostGIS, uses a Rust helper for fast walk-network work, bakes the output into PMTiles, and serves it through a small MapLibre web app.
+**Vibecoded in pure flow state in under a week**, with heavy AI assistance.
 
-This is not a SaaS dashboard or a polished civic-tech product. It is a hands-on geospatial system for exploring how reachable everyday amenities are across Ireland and Northern Ireland without depending on a hosted backend.
+My focus was on **architecture and system design** — deciding what the pieces should be, how they should fit together, and where the boundaries belonged. The line-by-line implementation was largely AI-generated under that direction.
+
+This is not a polished product. It’s an experiment that started as “haha what if I made a silly map of Ireland” and quickly turned into a proper local-first geospatial system with PostGIS, Rust acceleration, PMTiles, and real architecture.
 
 ## Status
 
-Alpha. Built in pure flow state in under a week. It started as "haha, what if I made a silly map of Ireland?" and then somehow turned into a local-first geospatial system with PostGIS, a Rust walk-graph helper, PMTiles, and actual architecture.
-
-It works, it has sharp edges, and the whole point was to make something that did not feel awful to use.
+**Alpha** — It works, it’s fast, and the core experience is already enjoyable.  
+Expect sharp edges, some jank, and missing polish. More features will come as the vibe demands.
 
 ## Preview
 
