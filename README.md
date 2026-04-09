@@ -12,9 +12,7 @@ It works, it has sharp edges, and the whole point was to make something that did
 
 ## Preview
 
-<video src="docs/media/preview.mp4" controls muted loop playsinline width="100%">
-  Your browser does not support embedded video. Open `docs/media/preview.mp4` directly.
-</video>
+https://github.com/user-attachments/assets/e8f3717e-5948-49aa-a1cb-51490ca91f97
 
 ## What It Does
 
