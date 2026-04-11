@@ -1,10 +1,10 @@
 # Island of Ireland Livability Map
 
-**Vibecoded in pure flow state**, with heavy AI assistance.
+Local-first livability mapping for the island of Ireland — built with PostGIS, a Rust walk-graph helper, PMTiles, and MapLibre. Scores places by what's nearby, how quiet it is, how green it is, and whether the transport actually runs — not raw amenity count.
 
-My focus was on **architecture and system design** — deciding what the pieces should be, how they should fit together, and where the boundaries belonged. The implementation itself was largely AI-generated under that direction.
+It started as "haha what if I made a silly map of Ireland" and turned into a real local-first geospatial system. Not polished. An experiment that got serious.
 
-It started as "haha what if I made a silly map of Ireland" and turned into a local-first geospatial system with PostGIS, a Rust walk-graph helper, and PMTiles. Not polished — an experiment that got serious.
+**Vibecoded in pure flow state.**
 
 ## Why This Exists
 
@@ -27,6 +27,7 @@ I live in a big Irish town. A real one. My nearest corner shop is still a 15-min
 - [Known Limitations](#known-limitations)
 - [Roadmap](#roadmap)
 - [Attribution And Data Sources](#attribution-and-data-sources)
+- [How This Was Built](#how-this-was-built)
 - [Acknowledgements](#acknowledgements)
 - [Notes And Caveats](#notes-and-caveats)
 
@@ -282,50 +283,97 @@ boundaries/*.geojson
 - Healthcare scoring treats a rural GP the same as a major hospital; there's no capacity or quality weighting.
 - Parks are counted by presence, not area — a pocket playground scores the same as a regional park.
 - Grid cells straddling the coast aren't clipped to land, so coastal cells can look artificially sparse.
-- Windows-first setup. Paths, shell snippets, and the default `walkgraph.exe` lookup assume Windows; Linux/macOS should work but aren't documented yet.
+- Windows-only in practice. The code should work on Linux/macOS once Windows-specific paths are removed, but it hasn't been tested there. Contributions welcome.
 - No automated CI — tests are run locally.
 
 ## Roadmap
 
-### Resolve current limitations
+This is a **livability** map, not a walkability map. High scores mean a place is good to live in — not just that amenities are nearby, but that the environment is pleasant, quiet, green, and well-served. A noisy city centre with every shop in walking distance may score lower than a quiet suburb with a GP, a park, and a supermarket. The scoring model should reflect how a place feels to live in, not just what you can reach on foot.
 
-- [ ] Calibrate scoring weights and caps against a ground-truth livability index (or at least a sanity dataset).
-- [ ] Mode-aware scoring: cycling, transit-chained trips, and variable walk radii instead of a single fixed 500 m.
-- [ ] Weight healthcare by capacity and type — a regional hospital should not equal a single rural GP.
-- [ ] Score parks by area (and quality tags), not just presence.
-- [ ] Clip grid cells to land so coastal cells aren't artificially sparse.
-- [ ] Cross-platform setup: document Linux/macOS, drop the Windows-only `walkgraph.exe` assumption.
-- [ ] Basic CI — run Python + Rust tests on push.
+Implementation detail, phase ordering, and open design questions for every item below live in [docs/PHASES.md](docs/PHASES.md).
 
-### Richer scoring system
+### Calibration and validation
 
-The current four-category model (shops / transport / healthcare / parks) is too coarse.
+- [ ] Build a livability sanity fixture — a set of hand-picked reference locations across Ireland, used as a regression test for every scoring change.
+- [ ] Compare against an independent dataset (e.g. CSO deprivation indices) as a secondary sanity check, once the scoring model is mature enough for the comparison to be meaningful.
 
-- [ ] Add drinking water, parcel lockers, and public shelters as convenience anchors.
+### Sub-tier every category
+
+The current model counts features by presence: a corner shop scores the same as a supermarket, a pocket playground the same as a regional park, a rural GP the same as a major hospital. The next iteration tiers each category by type and, where relevant, by physical size.
+
+- [ ] **Shops:** corner shop → regular shop → supermarket → mall / retail cluster.
+- [ ] **Healthcare:** pharmacy / GP → clinic / health centre → hospital → major hospital with A&E.
+- [ ] **Parks:** score by area, not count. Pocket park / playground (<0.5 ha) → neighbourhood park (0.5–5 ha) → district park (5–25 ha) → regional park / nature reserve (25+ ha).
+- [ ] **Variety signal** — count distinct clusters rather than distinct tags, so co-located services don't inflate the score.
+
+### Service reality check
+
+A prerequisite for any transport scoring work. Every stop the model counts is assumed to exist in practice, and that assumption currently holds across derelict stations, routes that were cancelled during COVID and never restored, school-only runs tagged as general transit, and rural services that run on an informal schedule. Filtering phantom stops is upstream of every transport-scoring improvement — there is no value in tiering a bus stop by frequency if its effective frequency is zero.
+
+- [ ] Cross-reference OSM bus stops against live GTFS feeds; stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
+- [ ] Separate public services from school-only routes so the latter don't count toward general transit access.
+- [ ] Flag service deserts — grid cells with nominal transport features that resolve to zero real weekly departures — and expose them as a dedicated overlay.
+- [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL.
+
+### Transport scoring overhaul
+
+Depends on the service reality check above — every item assumes phantom stops have already been filtered.
+
+- [ ] Pull GTFS feeds (NTA + Translink) and compute departures per stop per day.
+- [ ] Tier transport by mode: Luas → rail station → high-frequency bus → rural bus.
+- [ ] Rail proximity sweet spot: reward walking distance to a station, penalize immediate adjacency (noise, dust).
+- [ ] Cap rural bus stops so a single low-frequency stop cannot match urban transit access.
+
+### Noise and nuisance penalty layer
+
+- [ ] Railway track proximity (the tracks themselves, not stations).
+- [ ] Motorway and major-road noise.
+- [ ] Flight paths and airport proximity.
+- [ ] Over-concentration of nightlife, fast food, and retail relative to residential context.
+- [ ] Conditional pitch noise — only when lit or embedded in dense residential context.
+
+### New scoring categories and modifiers
+
+- [ ] Daily-convenience anchors: drinking water, parcel lockers, public shelters.
 - [ ] Separate chemists from pharmacies — chemists score under daily convenience, not healthcare.
 - [ ] Night-usability modifier for footpaths, crossings, and stops based on lighting data.
 - [ ] Surface-quality modifier for walkable ways.
 - [ ] Shade and pleasantness modifier from street trees and tree rows.
 - [ ] Waterfront pleasantness bonus for paths and parks adjacent to water.
-- [ ] Community and public-realm anchors (community centres, picnic tables, shelters).
+- [ ] Community and public-realm anchors (community centres, libraries, benches, picnic tables).
 - [ ] Dual-role nightlife features (pubs, bars, fast food) that add value in moderation and penalize over-concentration.
-- [ ] Conditional pitch-noise penalty — only when lit or in dense residential context.
 - [ ] Land-use context layer (residential / commercial / industrial) driving concentration penalties and green-buffer bonuses.
+
+### Scoring mechanics
+
 - [ ] Distance-decay scoring to replace the binary in-range / out-of-range cutoff.
-- [ ] Sub-weights within categories (supermarket > corner shop > petrol station shop).
-- [ ] User-adjustable weight sliders in the UI.
-- [ ] Per-cell score breakdowns on click — see *why* a cell scored what it did.
+- [ ] Mode-aware scoring: cycling, transit-chained trips, and variable walk radii instead of a single fixed 500 m.
 
-Detailed OSM tag choices and reasoning for each of these will live in a separate design note when that work starts.
+### UI and features
 
-### Features
-
-- [ ] **Isochrone overlay** — click anywhere, draw the actual reachable polygon at 5 / 10 / 15 min on foot. Makes the walk graph visible.
+- [ ] **Per-cell score breakdowns on click** — show the component scores behind a cell.
+- [ ] **User-adjustable weight sliders** — let users score for their own priorities rather than the built-in defaults.
+- [ ] **Layer toggles** — view the map by a single category instead of only the combined score.
+- [ ] **Shortlist mode** — save multiple locations and view their breakdowns in one panel.
 - [ ] **Compare mode** — pin two locations side by side with their score breakdowns.
-- [ ] **Time-of-day awareness** — a bus stop with 2 buses/day isn't the same as one with 50. Pull GTFS where available.
-- [ ] **Shareable permalinks** — URL encodes viewport + weights.
-- [ ] **Hosted demo** — static PMTiles + a stripped-down frontend, so people can try it without the full setup.
-- [ ] **Data freshness indicator** — show the OSM extract date in the UI.
+- [ ] **Isochrone overlay** — click anywhere, draw the reachable polygon at 5 / 10 / 15 min on foot.
+- [ ] **"Is this wrong?" feedback loop** — direct links into OpenStreetMap to edit the relevant feature, turning corrections into upstream contributions.
+- [ ] **Shareable permalinks** — URL encodes viewport and weight vector.
+- [ ] **Data freshness indicator** — surface the OSM extract date in the UI.
+
+### Infrastructure
+
+- [ ] Clip grid cells to land so coastal cells aren't artificially sparse.
+- [ ] Automated data refresh — scripted OSM re-import and precompute on a schedule.
+- [ ] Remove Windows-specific assumptions from the code path (hardcoded `.exe` suffix, PowerShell-only setup commands) so the project can run on Linux/macOS in principle. Testing and documentation for those platforms is out of scope — PRs from Linux/macOS users welcome.
+- [ ] Basic CI — run Python and Rust tests on push.
+
+### Public launch
+
+The hosted demo is the project's public moment, and it deliberately sits at the end. Until then the project lives on GitHub and updates land there continuously, but the public-facing site exists once there is something worth landing on — the local pipeline working end-to-end, the scoring model calibrated, the UI polished, and a real story to tell.
+
+- [ ] **Hosted static demo** — public site serving the precomputed PMTiles plus a stripped-down frontend. No backend, no database.
+- [ ] **Privacy promise** — no tracking of individual users, no search or query logging, no behavioural profiling. Only anonymous aggregate visit counts may be collected. Score queries run in the user's browser.
 
 ## Attribution And Data Sources
 
@@ -335,6 +383,10 @@ Detailed OSM tag choices and reasoning for each of these will live in a separate
 - **Basemap rendering** — [MapLibre GL](https://maplibre.org/) on the frontend; tiles are served locally from the generated PMTiles archive.
 
 This project is a derivative database under ODbL terms. The generated `livability.pmtiles` archive is a database derived from OSM and inherits ODbL — it must be redistributed under the same license, with attribution preserved. The source code in this repository is a separate work and is not covered by ODbL.
+
+## How This Was Built
+
+Architecture and system design are mine — deciding what the pieces should be, how they should fit together, and where the boundaries belonged. The implementation itself was largely AI-generated under that direction.
 
 ## Acknowledgements
 
