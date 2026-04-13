@@ -81,6 +81,10 @@ M1_CORRIDOR_ANCHORS_WGS84 = [
 GRID_SIZES_M = [20000, 10000, 5000]
 ZOOM_BREAKS = [(11, 5000), (8, 10000), (0, 20000)]
 
+COASTAL_ARTIFACT_WIDTH_M = 75
+COASTAL_COMPONENT_PRESERVE_AREA_M2 = 100_000
+COASTAL_CLEANUP_ALGORITHM_VERSION = 3
+
 
 WALK_RADIUS_M = 500
 WALKGRAPH_BBOX_PADDING_M = WALK_RADIUS_M
@@ -120,8 +124,8 @@ CACHE_DIR = BASE_DIR / ".livability_cache"
 PMTILES_OUTPUT_PATH = CACHE_DIR / "livability.pmtiles"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
 PMTILES_SCHEMA_VERSION = 2
-GRID_GEOMETRY_SCHEMA_VERSION = 2
-CACHE_SCHEMA_VERSION = 7
+GRID_GEOMETRY_SCHEMA_VERSION = 4
+CACHE_SCHEMA_VERSION = 8
 FORCE_RECOMPUTE = False
 USE_COMPRESSED_CACHE = True
 MANIFEST_NAME = "manifest.json"
@@ -221,6 +225,9 @@ def build_config_hashes() -> ConfigHashes:
         "walk_radius_m": WALK_RADIUS_M,
         "walkgraph_format_version": WALKGRAPH_FORMAT_VERSION,
         "walkgraph_bbox_padding_m": WALKGRAPH_BBOX_PADDING_M,
+        "coastal_artifact_width_m": COASTAL_ARTIFACT_WIDTH_M,
+        "coastal_component_preserve_area_m2": COASTAL_COMPONENT_PRESERVE_AREA_M2,
+        "coastal_cleanup_algorithm_version": COASTAL_CLEANUP_ALGORITHM_VERSION,
         "schema_version": CACHE_SCHEMA_VERSION,
     }
     geo_hash = hash_dict(geo_params)

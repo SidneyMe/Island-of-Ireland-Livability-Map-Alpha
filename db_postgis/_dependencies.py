@@ -12,6 +12,7 @@ try:
         MetaData,
         Table,
         Text,
+        case,
         create_engine,
         delete,
         func,

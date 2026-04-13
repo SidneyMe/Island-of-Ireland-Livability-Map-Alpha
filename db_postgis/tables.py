@@ -30,6 +30,8 @@ grid_walk = Table(
     Column("cell_id", Text, nullable=False),
     Column("centre_geom", Geometry("POINT", srid=4326), nullable=False),
     Column("cell_geom", Geometry("GEOMETRY", srid=4326), nullable=False),
+    Column("effective_area_m2", Float, nullable=False),
+    Column("effective_area_ratio", Float, nullable=False),
     Column("counts_json", JSONB, nullable=False),
     Column("scores_json", JSONB, nullable=False),
     Column("total_score", Float, nullable=False),

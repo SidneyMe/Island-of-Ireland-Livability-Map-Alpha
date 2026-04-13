@@ -2,28 +2,67 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from config import OSM_IMPORT_SCHEMA
+from config import BASE_DIR, OSM_IMPORT_SCHEMA
+
+try:
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+except ImportError as exc:  # pragma: no cover - depends on installed dependencies
+    raise RuntimeError(
+        "Missing Alembic dependency. Install requirements.txt before running the DB-backed pipeline."
+    ) from exc
 
 from ._dependencies import Engine, inspect, text
 from .common import _count_import_rows, root_module
 from .tables import (
     IMPORTER_OWNED_RAW_TABLES,
-    MANAGED_RAW_SUPPORT_TABLES,
     REQUIRED_PUBLIC_TABLES,
     REQUIRED_RAW_TABLES,
+    amenities,
+    build_manifest,
     features,
+    grid_walk,
+    import_manifest,
 )
 
 
+ALEMBIC_INI_PATH = BASE_DIR / "alembic.ini"
+ALEMBIC_SCRIPT_LOCATION = BASE_DIR / "db_postgis" / "migrations"
+ALEMBIC_INITIAL_REVISION = "20260411_000001"
+
+
 @dataclass(frozen=True)
-class _ManagedRawSupportIndexSpec:
-    table_name: str
+class _ManagedIndexSpec:
     index_name: str
-    columns: tuple[str, ...]
-    unique: bool = False
+    table_name: str
+    schema: str = "public"
 
 
-_MANAGED_RAW_SUPPORT_INDEX_SPECS = ()
+_MANAGED_TABLES = (
+    grid_walk,
+    amenities,
+    build_manifest,
+    import_manifest,
+)
+
+_MANAGED_INDEX_SPECS = (
+    _ManagedIndexSpec("grid_walk_build_resolution_cell_idx", "grid_walk"),
+    _ManagedIndexSpec("grid_walk_build_resolution_idx", "grid_walk"),
+    _ManagedIndexSpec("grid_walk_config_resolution_idx", "grid_walk"),
+    _ManagedIndexSpec("grid_walk_centre_geom_gist", "grid_walk"),
+    _ManagedIndexSpec("grid_walk_cell_geom_gist", "grid_walk"),
+    _ManagedIndexSpec("amenities_build_category_idx", "amenities"),
+    _ManagedIndexSpec("amenities_config_category_idx", "amenities"),
+    _ManagedIndexSpec("amenities_geom_gist", "amenities"),
+    _ManagedIndexSpec("build_manifest_status_idx", "build_manifest"),
+    _ManagedIndexSpec("build_manifest_extract_config_idx", "build_manifest"),
+    _ManagedIndexSpec("build_manifest_import_idx", "build_manifest"),
+    _ManagedIndexSpec(
+        "osm_raw_import_manifest_path_idx",
+        "import_manifest",
+        schema=OSM_IMPORT_SCHEMA,
+    ),
+)
 
 _EXPECTED_SERVE_INDEXES = (
     "grid_walk_build_resolution_cell_idx",
@@ -32,6 +71,125 @@ _EXPECTED_SERVE_INDEXES = (
     "grid_walk_cell_geom_gist",
     "amenities_geom_gist",
 )
+
+
+def _table_schema_name(table) -> str:
+    return str(table.schema or "public")
+
+
+def _table_column_names(table) -> tuple[str, ...]:
+    return tuple(column.name for column in table.columns)
+
+
+def _table_names_by_schema(inspector) -> dict[str, set[str]]:
+    public_tables = {str(name) for name in inspector.get_table_names()}
+    raw_tables = {str(name) for name in inspector.get_table_names(schema=OSM_IMPORT_SCHEMA)}
+    return {
+        "public": public_tables,
+        OSM_IMPORT_SCHEMA: raw_tables,
+    }
+
+
+def _present_index_names(inspector, table_name: str, *, schema: str) -> set[str]:
+    return {
+        str(index.get("name"))
+        for index in inspector.get_indexes(table_name, schema=None if schema == "public" else schema)
+        if index.get("name")
+    }
+
+
+def _managed_schema_mismatches(inspector) -> list[str]:
+    mismatches: list[str] = []
+    tables_by_schema = _table_names_by_schema(inspector)
+
+    for table in _MANAGED_TABLES:
+        schema_name = _table_schema_name(table)
+        table_name = str(table.name)
+        if table_name not in tables_by_schema.get(schema_name, set()):
+            mismatches.append(f"missing table {schema_name}.{table_name}")
+            continue
+
+        present_columns = {
+            str(column["name"])
+            for column in inspector.get_columns(
+                table_name,
+                schema=None if schema_name == "public" else schema_name,
+            )
+        }
+        missing_columns = [
+            column_name
+            for column_name in _table_column_names(table)
+            if column_name not in present_columns
+        ]
+        mismatches.extend(
+            f"missing column {schema_name}.{table_name}.{column_name}"
+            for column_name in missing_columns
+        )
+
+    for index_spec in _MANAGED_INDEX_SPECS:
+        if index_spec.table_name not in tables_by_schema.get(index_spec.schema, set()):
+            continue
+        present_indexes = _present_index_names(
+            inspector,
+            index_spec.table_name,
+            schema=index_spec.schema,
+        )
+        if index_spec.index_name not in present_indexes:
+            mismatches.append(
+                f"missing index {index_spec.schema}.{index_spec.index_name}"
+            )
+
+    return mismatches
+
+
+def _managed_schema_is_empty(inspector) -> bool:
+    tables_by_schema = _table_names_by_schema(inspector)
+    return not (
+        REQUIRED_PUBLIC_TABLES.intersection(tables_by_schema["public"])
+        or REQUIRED_RAW_TABLES.intersection(tables_by_schema[OSM_IMPORT_SCHEMA])
+    )
+
+
+def _alembic_config(connection=None) -> AlembicConfig:
+    config = AlembicConfig(str(ALEMBIC_INI_PATH))
+    config.set_main_option("script_location", str(ALEMBIC_SCRIPT_LOCATION))
+    config.attributes["configure_logger"] = False
+    if connection is not None:
+        config.attributes["connection"] = connection
+        engine = getattr(connection, "engine", None)
+        if engine is not None:
+            rendered_url = engine.url.render_as_string(hide_password=False)
+            config.set_main_option(
+                "sqlalchemy.url",
+                str(rendered_url),
+            )
+    return config
+
+
+def _alembic_version_exists(inspector) -> bool:
+    return "alembic_version" in {str(name) for name in inspector.get_table_names()}
+
+
+def _apply_schema_migrations(engine: Engine) -> None:
+    with engine.connect() as connection:
+        inspector = inspect(connection)
+        has_alembic_version = _alembic_version_exists(inspector)
+        migration_config = _alembic_config(connection)
+
+        if not has_alembic_version:
+            if _managed_schema_is_empty(inspector):
+                pass
+            else:
+                mismatches = _managed_schema_mismatches(inspector)
+                if mismatches:
+                    raise RuntimeError(
+                        "Managed schema exists without alembic_version but does not match the "
+                        "supported legacy schema shape. Unsupported drift/manual intervention "
+                        f"required: {', '.join(mismatches)}."
+                    )
+                command.stamp(migration_config, ALEMBIC_INITIAL_REVISION)
+
+        command.upgrade(migration_config, "head")
 
 
 def table_exists(engine: Engine, table_name: str, schema: str | None = None) -> bool:
@@ -47,14 +205,18 @@ def osm2pgsql_properties_exists(engine: Engine) -> bool:
 
 
 def ensure_managed_raw_support_tables(engine: Engine) -> None:
-    with engine.begin() as connection:
-        for table in MANAGED_RAW_SUPPORT_TABLES:
-            table.create(connection, checkfirst=True)
-        connection.execute(
-            text(
-                f"ALTER TABLE {OSM_IMPORT_SCHEMA}.import_manifest "
-                "ADD COLUMN IF NOT EXISTS normalization_scope_hash TEXT NOT NULL DEFAULT ''"
-            )
+    inspector = inspect(engine)
+    mismatches = [
+        mismatch
+        for mismatch in _managed_schema_mismatches(inspector)
+        if mismatch.startswith(f"missing table {OSM_IMPORT_SCHEMA}.")
+        or mismatch.startswith(f"missing column {OSM_IMPORT_SCHEMA}.")
+        or mismatch.startswith(f"missing index {OSM_IMPORT_SCHEMA}.")
+    ]
+    if mismatches:
+        raise RuntimeError(
+            "Managed raw-support schema is incomplete. Run startup migrations first. "
+            + ", ".join(mismatches)
         )
 
 
@@ -70,10 +232,20 @@ def ensure_database_ready(engine: Engine) -> None:
     try:
         with engine.begin() as connection:
             connection.execute(text("SELECT 1"))
-            connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {OSM_IMPORT_SCHEMA}"))
+            try:
+                connection.execute(text("CREATE EXTENSION IF NOT EXISTS postgis"))
+            except Exception as exc:
+                raise RuntimeError(
+                    "PostGIS extension is not enabled and could not be created automatically. "
+                    "Grant permission for CREATE EXTENSION or enable postgis manually. "
+                    f"Original error: {exc}"
+                ) from exc
             has_postgis = connection.execute(
                 text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis')")
             ).scalar_one()
+            connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {OSM_IMPORT_SCHEMA}"))
+    except RuntimeError:
+        raise
     except Exception as exc:  # pragma: no cover - depends on environment
         raise RuntimeError(
             "Unable to connect to PostgreSQL/PostGIS. Check DATABASE_URL or POSTGRES_* "
@@ -82,29 +254,18 @@ def ensure_database_ready(engine: Engine) -> None:
 
     if not has_postgis:
         raise RuntimeError(
-            "PostGIS extension is not enabled in the target database. Run schema.sql, "
-            "which begins with CREATE EXTENSION IF NOT EXISTS postgis;"
+            "PostGIS extension is not enabled in the target database and automatic creation "
+            "did not succeed."
         )
 
-    root_module().ensure_managed_raw_support_tables(engine)
+    _apply_schema_migrations(engine)
 
-    public_tables = set(inspect(engine).get_table_names())
-    missing_public = REQUIRED_PUBLIC_TABLES.difference(public_tables)
-    if missing_public:
+    inspector = inspect(engine)
+    mismatches = _managed_schema_mismatches(inspector)
+    if mismatches:
         raise RuntimeError(
-            "Database schema is incomplete. Missing tables: "
-            + ", ".join(sorted(missing_public))
-            + ". Apply schema.sql first."
-        )
-
-    raw_tables = set(inspect(engine).get_table_names(schema=OSM_IMPORT_SCHEMA))
-    missing_raw = REQUIRED_RAW_TABLES.difference(raw_tables)
-    if missing_raw:
-        raise RuntimeError(
-            "Database raw schema is incomplete. Missing tables in "
-            f"{OSM_IMPORT_SCHEMA}: "
-            + ", ".join(sorted(missing_raw))
-            + ". Apply schema.sql first."
+            "Automatic schema migration completed but the managed schema is still incomplete: "
+            + ", ".join(mismatches)
         )
 
 

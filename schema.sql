@@ -1,3 +1,6 @@
+-- Convenience bootstrap snapshot only.
+-- Alembic migrations under db_postgis/migrations are the canonical managed-schema source of truth.
+
 CREATE EXTENSION IF NOT EXISTS postgis;
 CREATE SCHEMA IF NOT EXISTS osm_raw;
 
@@ -9,6 +12,8 @@ CREATE TABLE IF NOT EXISTS grid_walk (
     cell_id TEXT NOT NULL,
     centre_geom GEOMETRY(Point, 4326) NOT NULL,
     cell_geom GEOMETRY(Geometry, 4326) NOT NULL,
+    effective_area_m2 DOUBLE PRECISION NOT NULL,
+    effective_area_ratio DOUBLE PRECISION NOT NULL,
     counts_json JSONB NOT NULL,
     scores_json JSONB NOT NULL,
     total_score DOUBLE PRECISION NOT NULL,

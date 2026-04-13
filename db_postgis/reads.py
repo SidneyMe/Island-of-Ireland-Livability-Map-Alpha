@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._dependencies import Engine, func, select
+from ._dependencies import Engine, case, func, select
 from .common import root_module
 from .tables import amenities, build_manifest, features, grid_walk, import_manifest
 
@@ -10,6 +10,13 @@ from .tables import amenities, build_manifest, features, grid_walk, import_manif
 def load_source_amenity_rows(engine: Engine, import_fingerprint: str, study_area_wgs84) -> list[dict[str, Any]]:
     root = root_module()
     study_area = root.from_shape(study_area_wgs84, srid=4326)
+    park_area_m2 = case(
+        (
+            (features.c.category == "parks") & (func.ST_Dimension(features.c.geom) == 2),
+            func.COALESCE(func.ST_Area(func.ST_Transform(features.c.geom, 2157)), 0.0),
+        ),
+        else_=0.0,
+    ).label("park_area_m2")
     with engine.connect() as connection:
         rows = connection.execute(
             select(
@@ -17,6 +24,7 @@ def load_source_amenity_rows(engine: Engine, import_fingerprint: str, study_area
                 features.c.osm_type,
                 features.c.osm_id,
                 func.ST_PointOnSurface(features.c.geom).label("point_geom"),
+                park_area_m2,
             )
             .where(features.c.import_fingerprint == import_fingerprint)
             .where(func.ST_Intersects(features.c.geom, study_area))
@@ -28,6 +36,7 @@ def load_source_amenity_rows(engine: Engine, import_fingerprint: str, study_area
             "category": row["category"],
             "source_ref": f"{row['osm_type']}/{row['osm_id']}",
             "geom": root.to_shape(row["point_geom"]),
+            "park_area_m2": float(row.get("park_area_m2") or 0.0),
         }
         for row in rows
     ]
@@ -41,6 +50,8 @@ def load_walk_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
                 grid_walk.c.cell_id,
                 grid_walk.c.centre_geom,
                 grid_walk.c.cell_geom,
+                grid_walk.c.effective_area_m2,
+                grid_walk.c.effective_area_ratio,
                 grid_walk.c.counts_json,
                 grid_walk.c.scores_json,
                 grid_walk.c.total_score,
@@ -56,6 +67,8 @@ def load_walk_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
             "cell_id": row["cell_id"],
             "centre_geom": root.to_shape(row["centre_geom"]),
             "cell_geom": root.to_shape(row["cell_geom"]),
+            "effective_area_m2": float(row["effective_area_m2"]),
+            "effective_area_ratio": float(row["effective_area_ratio"]),
             "counts_json": row["counts_json"],
             "scores_json": row["scores_json"],
             "total_score": row["total_score"],
@@ -80,6 +93,8 @@ def load_walk_rows_for_resolutions(
                 grid_walk.c.cell_id,
                 grid_walk.c.centre_geom,
                 grid_walk.c.cell_geom,
+                grid_walk.c.effective_area_m2,
+                grid_walk.c.effective_area_ratio,
                 grid_walk.c.counts_json,
                 grid_walk.c.scores_json,
                 grid_walk.c.total_score,
@@ -96,6 +111,8 @@ def load_walk_rows_for_resolutions(
             "cell_id": row["cell_id"],
             "centre_geom": root.to_shape(row["centre_geom"]),
             "cell_geom": root.to_shape(row["cell_geom"]),
+            "effective_area_m2": float(row["effective_area_m2"]),
+            "effective_area_ratio": float(row["effective_area_ratio"]),
             "counts_json": row["counts_json"],
             "scores_json": row["scores_json"],
             "total_score": row["total_score"],
