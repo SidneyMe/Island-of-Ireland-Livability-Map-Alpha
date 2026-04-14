@@ -18,6 +18,7 @@ from .reads import (
     load_amenity_rows,
     load_available_resolutions,
     load_source_amenity_rows,
+    load_point_scores_for_build,
     load_walk_rows_for_resolutions,
     load_walk_rows,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "load_build_manifest",
     "load_complete_manifest",
     "load_import_manifest",
+    "load_point_scores_for_build",
     "load_runtime_manifest",
     "load_source_amenity_rows",
     "load_walk_rows_for_resolutions",

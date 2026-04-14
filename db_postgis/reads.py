@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ._dependencies import Engine, case, func, select
+from ._dependencies import Engine, case, func, select, text
 from .common import root_module
 from .tables import amenities, build_manifest, features, grid_walk, import_manifest
 
@@ -150,6 +150,80 @@ def load_available_resolutions(engine: Engine, build_key: str) -> list[int]:
             .order_by(grid_walk.c.resolution_m)
         ).all()
     return sorted((int(row[0]) for row in rows), reverse=True)
+
+
+def load_point_scores_for_build(
+    engine: Engine,
+    build_key: str,
+    points: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if not points:
+        return []
+
+    values_sql: list[str] = []
+    params: dict[str, Any] = {"build_key": str(build_key)}
+    for index, point in enumerate(points):
+        values_sql.append(f"(:point_id_{index}, :lat_{index}, :lon_{index})")
+        params[f"point_id_{index}"] = str(point["id"])
+        params[f"lat_{index}"] = float(point["lat"])
+        params[f"lon_{index}"] = float(point["lon"])
+
+    statement = text(
+        f"""
+        WITH fixture_points(point_id, lat, lon) AS (
+            VALUES
+                {", ".join(values_sql)}
+        ),
+        matched AS (
+            SELECT
+                p.point_id,
+                p.lat,
+                p.lon,
+                g.resolution_m,
+                g.total_score,
+                g.scores_json,
+                g.counts_json,
+                ROW_NUMBER() OVER (
+                    PARTITION BY p.point_id
+                    ORDER BY g.resolution_m ASC, g.cell_id ASC
+                ) AS rownum
+            FROM fixture_points AS p
+            JOIN grid_walk AS g
+              ON g.build_key = :build_key
+             AND ST_Covers(
+                    g.cell_geom,
+                    ST_SetSRID(ST_MakePoint(p.lon, p.lat), 4326)
+                )
+        )
+        SELECT
+            point_id,
+            lat,
+            lon,
+            resolution_m,
+            total_score,
+            scores_json,
+            counts_json
+        FROM matched
+        WHERE rownum = 1
+        ORDER BY point_id
+        """
+    )
+
+    with engine.connect() as connection:
+        rows = connection.execute(statement, params).mappings().all()
+
+    return [
+        {
+            "point_id": str(row["point_id"]),
+            "lat": float(row["lat"]),
+            "lon": float(row["lon"]),
+            "resolution_m": int(row["resolution_m"]),
+            "total_score": float(row["total_score"]),
+            "scores_json": dict(row.get("scores_json") or {}),
+            "counts_json": dict(row.get("counts_json") or {}),
+        }
+        for row in rows
+    ]
 
 
 def load_build_manifest(engine: Engine, build_key: str) -> dict[str, Any] | None:
