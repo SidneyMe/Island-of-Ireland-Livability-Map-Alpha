@@ -281,7 +281,7 @@ class FineSurfaceRuntimeTests(TestCase):
         self.assertEqual(payload["component_scores"]["shops"], 10.0)
         self.assertEqual(payload["total_score"], 10.0)
 
-    @unittest.skipUnless(Path(config.WALKGRAPH_BIN).exists(), "walkgraph binary is required for the integration fixture")
+    @unittest.skipUnless(Path(config.WALKGRAPH_BIN).is_file(), "walkgraph binary is required for the integration fixture")
     def test_walkgraph_surface_subcommand_builds_expected_shell_payload(self) -> None:
         with TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
