@@ -1,0 +1,227 @@
+{
+  "fixture_version": 1,
+  "score_scale": "0-100",
+  "notes": [
+    "Phase 0 regression fixture for the Ireland livability model.",
+    "Ranges are intentionally broad in v1 and should only move through deliberate, reviewable git changes.",
+    "CI validates fixture structure only; full score assertions require a completed local precompute build."
+  ],
+  "locations": [
+    {
+      "id": "terenure_dublin",
+      "name": "Terenure, Dublin",
+      "lat": 53.3092,
+      "lon": -6.3084,
+      "tags": ["suburb"],
+      "expected_total_score": {"min": 55.0, "max": 75.0},
+      "rationale": "Quiet, established suburb with everyday services, parks, and healthcare nearby; this should outrank many noisier city-core cells."
+    },
+    {
+      "id": "blackrock_dublin",
+      "name": "Blackrock, Dublin",
+      "lat": 53.3015,
+      "lon": -6.1778,
+      "tags": ["suburb", "coastal"],
+      "expected_total_score": {"min": 54.0, "max": 74.0},
+      "rationale": "Coastal suburb with real service density and pleasantness; a strong livability control rather than an extreme outlier."
+    },
+    {
+      "id": "malahide_dublin",
+      "name": "Malahide, Dublin",
+      "lat": 53.4509,
+      "lon": -6.1545,
+      "tags": ["suburb", "coastal"],
+      "expected_total_score": {"min": 52.0, "max": 72.0},
+      "rationale": "Serviced coastal suburb with shops, rail access, and amenities in a calmer setting than the urban core."
+    },
+    {
+      "id": "sutton_dublin",
+      "name": "Sutton, Dublin",
+      "lat": 53.3893,
+      "lon": -6.1068,
+      "tags": ["suburb", "coastal"],
+      "expected_total_score": {"min": 48.0, "max": 70.0},
+      "rationale": "Pleasant coastal suburb that should score respectably thanks to real services and environment, even if not every amenity is at the front door."
+    },
+    {
+      "id": "ballyhackamore_belfast",
+      "name": "Ballyhackamore, Belfast",
+      "lat": 54.5969,
+      "lon": -5.8735,
+      "tags": ["suburb"],
+      "expected_total_score": {"min": 50.0, "max": 70.0},
+      "rationale": "A serviced Belfast suburb with a believable mix of daily needs and a calmer feel than the city centre."
+    },
+    {
+      "id": "temple_bar_dublin",
+      "name": "Temple Bar, Dublin",
+      "lat": 53.3455,
+      "lon": -6.2642,
+      "tags": ["urban_core", "noise"],
+      "expected_total_score": {"min": 25.0, "max": 48.0},
+      "rationale": "Extremely convenient but noisy and intense; it should not land near the very top of a livability ranking."
+    },
+    {
+      "id": "drumcondra_dublin_railline",
+      "name": "Drumcondra rail corridor, Dublin",
+      "lat": 53.3658,
+      "lon": -6.2514,
+      "tags": ["suburb", "noise"],
+      "expected_total_score": {"min": 32.0, "max": 56.0},
+      "rationale": "Walkable and useful, but rail-line noise and traffic should keep it below quieter suburbs with comparable services."
+    },
+    {
+      "id": "sydenham_belfast_airport",
+      "name": "Sydenham near Belfast City Airport",
+      "lat": 54.6064,
+      "lon": -5.8732,
+      "tags": ["noise"],
+      "expected_total_score": {"min": 24.0, "max": 46.0},
+      "rationale": "Nominally well connected, but airport and corridor noise should drag it down versus calmer areas."
+    },
+    {
+      "id": "limerick_dock_road",
+      "name": "Dock Road corridor, Limerick",
+      "lat": 52.6554,
+      "lon": -8.6251,
+      "tags": ["urban_core", "noise"],
+      "expected_total_score": {"min": 28.0, "max": 52.0},
+      "rationale": "Useful urban corridor with traffic and industrial-adjacent downsides; should be middling rather than elite."
+    },
+    {
+      "id": "barack_obama_plaza_m7",
+      "name": "Barack Obama Plaza, M7",
+      "lat": 52.5472,
+      "lon": -8.1705,
+      "tags": ["rural", "single_cluster"],
+      "expected_total_score": {"min": 18.0, "max": 38.0},
+      "rationale": "A classic single-site amenity cluster trap: several services co-located, but not a real walkable neighbourhood."
+    },
+    {
+      "id": "lusk_services_m1",
+      "name": "Lusk Services, M1",
+      "lat": 53.5521,
+      "lon": -6.1343,
+      "tags": ["rural", "single_cluster", "coastal"],
+      "expected_total_score": {"min": 18.0, "max": 40.0},
+      "rationale": "Another motorway-cluster trap that should not score like a genuine suburb or town centre."
+    },
+    {
+      "id": "birdhill_service_station",
+      "name": "Birdhill service cluster",
+      "lat": 52.7654,
+      "lon": -8.4391,
+      "tags": ["rural", "single_cluster"],
+      "expected_total_score": {"min": 18.0, "max": 38.0},
+      "rationale": "Multiple services at one site should count as limited convenience, not as a fully livable district."
+    },
+    {
+      "id": "kinvara_galway",
+      "name": "Kinvara, Galway",
+      "lat": 53.1376,
+      "lon": -8.9392,
+      "tags": ["coastal"],
+      "expected_total_score": {"min": 35.0, "max": 55.0},
+      "rationale": "Pleasant small-place living with some real services; should score respectably despite not being amenity-dense."
+    },
+    {
+      "id": "schull_cork",
+      "name": "Schull, Cork",
+      "lat": 51.5246,
+      "lon": -9.5487,
+      "tags": ["coastal", "rural"],
+      "expected_total_score": {"min": 30.0, "max": 52.0},
+      "rationale": "Low-service but attractive coastal settlement that should not collapse to the bottom of the scale."
+    },
+    {
+      "id": "roundstone_galway",
+      "name": "Roundstone, Galway",
+      "lat": 53.3947,
+      "lon": -9.9174,
+      "tags": ["coastal", "rural"],
+      "expected_total_score": {"min": 28.0, "max": 50.0},
+      "rationale": "Quiet and scenic with limited services; it should beat harsh motorway clusters while staying below real-service towns."
+    },
+    {
+      "id": "castlewellan_down",
+      "name": "Castlewellan, County Down",
+      "lat": 54.2583,
+      "lon": -5.9443,
+      "tags": ["rural"],
+      "expected_total_score": {"min": 32.0, "max": 54.0},
+      "rationale": "A calm small-town setting with credible day-to-day amenities; respectable but not top-tier."
+    },
+    {
+      "id": "mullaghmeen_longford_rural_stop",
+      "name": "Mullaghmeen rural stop area, Longford",
+      "lat": 53.7218,
+      "lon": -7.6171,
+      "tags": ["rural", "ghost_stop"],
+      "expected_total_score": {"min": 10.0, "max": 28.0},
+      "rationale": "Sparse rural context where nominal stop presence should not inflate the score above real service towns."
+    },
+    {
+      "id": "glencolmcille_donegal",
+      "name": "Glencolmcille, Donegal",
+      "lat": 54.7062,
+      "lon": -8.7516,
+      "tags": ["rural", "ghost_stop", "coastal"],
+      "expected_total_score": {"min": 12.0, "max": 32.0},
+      "rationale": "Remote and beautiful, but weak everyday access means it should not leapfrog properly serviced settlements."
+    },
+    {
+      "id": "riverstick_cork_rural",
+      "name": "Riverstick rural stop area, Cork",
+      "lat": 51.8225,
+      "lon": -8.5206,
+      "tags": ["rural", "ghost_stop"],
+      "expected_total_score": {"min": 15.0, "max": 34.0},
+      "rationale": "Nominal transport presence in a rural setting should still score below towns with reliable services."
+    },
+    {
+      "id": "jonesborough_border_rural",
+      "name": "Jonesborough border rural area",
+      "lat": 54.0774,
+      "lon": -6.3827,
+      "tags": ["rural", "ghost_stop"],
+      "expected_total_score": {"min": 16.0, "max": 34.0},
+      "rationale": "Some connections exist, but sparse service reality should keep this well below clearly serviced town centres."
+    },
+    {
+      "id": "naas_town_centre",
+      "name": "Naas town centre",
+      "lat": 53.2159,
+      "lon": -6.6667,
+      "tags": ["control_town"],
+      "expected_total_score": {"min": 45.0, "max": 68.0},
+      "rationale": "A solid control town with real services and credible daily convenience; should beat rural traps and many corridor locations."
+    },
+    {
+      "id": "athlone_centre",
+      "name": "Athlone centre",
+      "lat": 53.4239,
+      "lon": -7.9407,
+      "tags": ["control_town"],
+      "expected_total_score": {"min": 42.0, "max": 65.0},
+      "rationale": "Another control town: not meant to dominate the model, but should clearly outperform weak-service rural candidates."
+    },
+    {
+      "id": "ennis_centre",
+      "name": "Ennis centre",
+      "lat": 52.8461,
+      "lon": -8.9873,
+      "tags": ["control_town"],
+      "expected_total_score": {"min": 40.0, "max": 64.0},
+      "rationale": "A believable real-service town centre that provides a sanity anchor between suburbs and remote settlements."
+    },
+    {
+      "id": "bangor_centre",
+      "name": "Bangor centre",
+      "lat": 54.6615,
+      "lon": -5.6686,
+      "tags": ["control_town", "coastal"],
+      "expected_total_score": {"min": 42.0, "max": 66.0},
+      "rationale": "Coastal control town with substantial real services; should score strongly without eclipsing the best quiet suburbs."
+    }
+  ]
+}
