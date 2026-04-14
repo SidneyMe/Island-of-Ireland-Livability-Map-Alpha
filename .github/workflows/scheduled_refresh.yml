@@ -1,0 +1,46 @@
+name: Scheduled OSM refresh
+
+on:
+  schedule:
+    - cron: '0 3 * * 0'   # Weekly, Sunday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force download even if OSM extract is unchanged'
+        required: false
+        default: 'false'
+        type: boolean
+
+jobs:
+  refresh:
+    # Full precompute requires PostGIS, osm2pgsql, the walkgraph binary,
+    # and ~1 GB disk for the OSM extract. Configure a self-hosted runner
+    # with these prerequisites and register it in your repository settings.
+    runs-on: self-hosted
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Download latest OSM extract
+        run: |
+          FLAGS=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then FLAGS="--force"; fi
+          python scripts/refresh_osm.py $FLAGS
+
+      - name: Run precompute
+        run: python main.py --precompute --auto-refresh-import
+
+      - name: Run sanity fixture
+        run: python scripts/sanity_check.py --profile full
