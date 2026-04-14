@@ -8,6 +8,7 @@ use walkgraph::reachability::run_reachability;
 use walkgraph::serialize::{
     now_utc_rfc3339, prepare_output_dir, write_meta_json, write_node_sidecars, GraphMeta,
 };
+use walkgraph::surface::{run_surface, SurfaceArgs};
 
 const FORMAT_VERSION: u32 = 3;
 
@@ -56,6 +57,39 @@ enum Commands {
         bbox_padding_m: f64,
         #[arg(long)]
         extract_fingerprint: Option<String>,
+    },
+    /// Build fine surface shard cache in parallel (replaces Python shard loop).
+    Surface {
+        /// Path to walk_graph.nodes.bin (packed f32 lat/lon pairs, LE).
+        #[arg(long)]
+        nodes_bin: PathBuf,
+        /// Study area as GeoJSON file (coordinates in ITM / EPSG:2157 metres).
+        #[arg(long)]
+        study_area: PathBuf,
+        /// Output directory for shards/ subdirectory and manifest.json.
+        #[arg(long)]
+        shell_dir: PathBuf,
+        /// Opaque hash identifying the surface shell tier (written to manifest).
+        #[arg(long)]
+        surface_shell_hash: String,
+        /// Opaque reach-tier hash (written to manifest).
+        #[arg(long)]
+        reach_hash: String,
+        /// Total walk-graph node count (written to manifest).
+        #[arg(long)]
+        node_count: u64,
+        /// Shard size in metres (default 20000).
+        #[arg(long, default_value_t = 20_000)]
+        shard_size_m: i64,
+        /// Base resolution in metres — cell size (default 50).
+        #[arg(long, default_value_t = 50)]
+        resolution_m: i64,
+        /// Optional JSON file with zoom_breaks, tile_size_px, resolution lists.
+        #[arg(long)]
+        config_json: Option<PathBuf>,
+        /// Number of rayon threads (default: num_cpus).
+        #[arg(long)]
+        threads: Option<usize>,
     },
 }
 
@@ -204,6 +238,32 @@ fn main() -> Result<(), Box<dyn Error>> {
             )?;
             println!("nodes: {}", meta.node_count);
             println!("edges: {}", meta.edge_count);
+        }
+        Commands::Surface {
+            nodes_bin,
+            study_area,
+            shell_dir,
+            surface_shell_hash,
+            reach_hash,
+            node_count,
+            shard_size_m,
+            resolution_m,
+            config_json,
+            threads,
+        } => {
+            run_surface(SurfaceArgs {
+                nodes_bin,
+                study_area,
+                shell_dir,
+                surface_shell_hash,
+                reach_hash,
+                node_count,
+                shard_size_m,
+                resolution_m,
+                config_json,
+                threads,
+            })
+            .map_err(|e| -> Box<dyn Error> { Box::from(e.to_string()) })?;
         }
     }
     Ok(())
