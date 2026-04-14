@@ -129,28 +129,47 @@ def _counts_from_vector(
     return counts
 
 
-def _amenity_node_weights(
+def _category_weight_rows_from_nodes(
     nodes_by_category: dict[str, list[int]],
+) -> dict[str, list[tuple[int, int]]]:
+    return {
+        category: [(int(node), 1) for node in nodes]
+        for category, nodes in nodes_by_category.items()
+    }
+
+
+def _node_weight_matrix(
+    node_weights_by_category: dict[str, list[tuple[int, int]]],
 ) -> tuple[list[int], list[str], np.ndarray]:
     unique_amenity_nodes = normalize_origin_node_ids(
         node
-        for nodes in nodes_by_category.values()
-        for node in nodes
+        for node_weights in node_weights_by_category.values()
+        for node, weight in node_weights
+        if int(weight) > 0
     )
     categories = _ordered_categories(
         {
             category
-            for category, nodes in nodes_by_category.items()
-            if nodes
+            for category, node_weights in node_weights_by_category.items()
+            if any(int(weight) > 0 for _, weight in node_weights)
         }
     )
     node_to_row = {node: index for index, node in enumerate(unique_amenity_nodes)}
-    matrix = np.zeros((len(unique_amenity_nodes), len(categories)), dtype=np.int32)
+    matrix = np.zeros((len(unique_amenity_nodes), len(categories)), dtype=U32_DTYPE)
     category_index = {category: index for index, category in enumerate(categories)}
     for category in categories:
-        for node in nodes_by_category.get(category, []):
-            matrix[node_to_row[int(node)], category_index[category]] += 1
+        for node, weight in node_weights_by_category.get(category, []):
+            integer_weight = int(weight)
+            if integer_weight <= 0:
+                continue
+            matrix[node_to_row[int(node)], category_index[category]] += integer_weight
     return list(unique_amenity_nodes), categories, matrix
+
+
+def _amenity_node_weights(
+    nodes_by_category: dict[str, list[int]],
+) -> tuple[list[int], list[str], np.ndarray]:
+    return _node_weight_matrix(_category_weight_rows_from_nodes(nodes_by_category))
 
 
 def _edge_weights(graph, weight: str | Sequence[float]) -> Sequence[float]:
@@ -311,9 +330,9 @@ def _walkgraph_chunk_size(origin_count: int) -> int:
     return max(1, min(int(origin_count), RUST_REACHABILITY_CHUNK_SIZE))
 
 
-def precompute_walk_counts_by_origin_node(
+def precompute_walk_weighted_totals_by_origin_node(
     graph,
-    nodes_by_category: dict[str, list[int]],
+    node_weights_by_category: dict[str, list[tuple[int, int]]],
     origin_node_ids: Iterable[int],
     cutoff: float,
     weight: str | Sequence[float] = "length_m",
@@ -327,7 +346,7 @@ def precompute_walk_counts_by_origin_node(
     if not origin_nodes:
         return {}
 
-    amenity_nodes, categories, amenity_weights = _amenity_node_weights(nodes_by_category)
+    amenity_nodes, categories, amenity_weights = _node_weight_matrix(node_weights_by_category)
     if not amenity_nodes:
         empty = {node: {} for node in origin_nodes}
         if progress_cb is not None:
@@ -376,6 +395,28 @@ def precompute_walk_counts_by_origin_node(
             progress_cb("advance", units=len(origin_chunk), detail=detail)
 
     return _normalize_counts_by_node(counts_by_node)
+
+
+def precompute_walk_counts_by_origin_node(
+    graph,
+    nodes_by_category: dict[str, list[int]],
+    origin_node_ids: Iterable[int],
+    cutoff: float,
+    weight: str | Sequence[float] = "length_m",
+    progress_cb=None,
+    detail: str | None = None,
+    save_chunk_cb: Callable[[dict[int, dict[str, int]]], None] | None = None,
+) -> dict[int, dict[str, int]]:
+    return precompute_walk_weighted_totals_by_origin_node(
+        graph,
+        _category_weight_rows_from_nodes(nodes_by_category),
+        origin_node_ids,
+        cutoff,
+        weight=weight,
+        progress_cb=progress_cb,
+        detail=detail,
+        save_chunk_cb=save_chunk_cb,
+    )
 
 
 def precompute_counts_by_node(

@@ -20,10 +20,12 @@ from pmtiles.tile import Compression, TileType, zxy_to_tileid
 from pmtiles.writer import Writer
 from sqlalchemy import text
 
+from config import zoom_bounds_for_resolution
+
 
 # Zoom + bbox window for the bake. The frontend min/max zoom mirrors these.
 DEFAULT_MIN_ZOOM = 5
-DEFAULT_MAX_ZOOM = 14
+DEFAULT_MAX_ZOOM = 19
 # Island of Ireland bounding box (lon_min, lat_min, lon_max, lat_max).
 DEFAULT_BBOX = (-11.0, 51.3, -5.3, 55.5)
 # Amenity points are only meaningful once you can actually see individual
@@ -48,6 +50,7 @@ def _pmtiles_metadata(
     *,
     min_zoom: int,
     max_zoom: int,
+    grid_max_zoom: int,
     amenity_min_zoom: int,
 ) -> dict[str, object]:
     return {
@@ -57,7 +60,7 @@ def _pmtiles_metadata(
             {
                 "id": "grid",
                 "minzoom": min_zoom,
-                "maxzoom": max_zoom,
+                "maxzoom": grid_max_zoom,
                 "fields": _grid_layer_fields(),
             },
             {
@@ -75,8 +78,7 @@ def _pmtiles_metadata(
 
 
 def _resolution_for_zoom(zoom: int) -> int:
-    """Mirror the legacy ZOOM_BREAKS so the visual LOD matches the old map."""
-    if zoom >= 11:
+    if zoom >= 10:
         return 5000
     if zoom >= 8:
         return 10000
@@ -179,6 +181,17 @@ _AMENITY_TILE_SQL = text(
 )
 
 
+_AMENITY_POINT_SQL = text(
+    """
+    SELECT
+        ST_X(a.geom) AS lon,
+        ST_Y(a.geom) AS lat
+    FROM amenities AS a
+    WHERE a.build_key = :build_key
+    """
+)
+
+
 def _tile_mvt_bytes(
     connection,
     *,
@@ -186,6 +199,7 @@ def _tile_mvt_bytes(
     z: int,
     x: int,
     y: int,
+    include_grid: bool,
     include_amenities: bool,
 ) -> bytes:
     """Build a single MVT for ``(z, x, y)`` containing both grid and amenities.
@@ -194,20 +208,22 @@ def _tile_mvt_bytes(
     independent ``ST_AsMVT`` calls can simply be concatenated to produce a
     valid multi-layer tile without any reparsing.
     """
-    resolution_m = _resolution_for_zoom(z)
-    grid_bytes = (
-        connection.execute(
-            _GRID_TILE_SQL,
-            {
-                "z": z,
-                "x": x,
-                "y": y,
-                "build_key": build_key,
-                "resolution_m": resolution_m,
-            },
-        ).scalar()
-        or b""
-    )
+    grid_bytes = b""
+    if include_grid:
+        resolution_m = _resolution_for_zoom(z)
+        grid_bytes = (
+            connection.execute(
+                _GRID_TILE_SQL,
+                {
+                    "z": z,
+                    "x": x,
+                    "y": y,
+                    "build_key": build_key,
+                    "resolution_m": resolution_m,
+                },
+            ).scalar()
+            or b""
+        )
     amenity_bytes = b""
     if include_amenities:
         amenity_bytes = (
@@ -218,6 +234,32 @@ def _tile_mvt_bytes(
             or b""
         )
     return bytes(grid_bytes) + bytes(amenity_bytes)
+
+
+def _load_amenity_points(connection, *, build_key: str) -> list[tuple[float, float]]:
+    rows = connection.execute(
+        _AMENITY_POINT_SQL,
+        {"build_key": build_key},
+    ).mappings().all()
+    return [(float(row["lon"]), float(row["lat"])) for row in rows]
+
+
+def _amenity_tile_coordinates(
+    points: list[tuple[float, float]],
+    *,
+    zoom: int,
+    bbox: tuple[float, float, float, float],
+) -> list[tuple[int, int]]:
+    min_lon, min_lat, max_lon, max_lat = bbox
+    max_index = (1 << zoom) - 1
+    tile_coords: set[tuple[int, int]] = set()
+    for lon, lat in points:
+        if lon < min_lon or lon > max_lon or lat < min_lat or lat > max_lat:
+            continue
+        tile_x = min(max(_lon_to_tile_x(lon, zoom), 0), max_index)
+        tile_y = min(max(_lat_to_tile_y(lat, zoom), 0), max_index)
+        tile_coords.add((tile_x, tile_y))
+    return sorted(tile_coords)
 
 
 def bake_pmtiles(
@@ -247,28 +289,59 @@ def bake_pmtiles(
 
     with output_path.open("wb") as handle, engine.connect() as connection:
         writer = Writer(handle)
+        amenity_points = _load_amenity_points(connection, build_key=build_key)
+        _, coarse_grid_max_zoom = zoom_bounds_for_resolution(5000)
         for zoom in range(min_zoom, max_zoom + 1):
-            x_min, x_max, y_min, y_max = _tile_range_for_bbox(zoom, bbox)
             include_amenities = zoom >= amenity_min_zoom
+            include_grid = zoom <= coarse_grid_max_zoom
             zoom_started = tiles_written
-            for x in range(x_min, x_max + 1):
-                for y in range(y_min, y_max + 1):
-                    payload = _tile_mvt_bytes(
-                        connection,
-                        build_key=build_key,
-                        z=zoom,
-                        x=x,
-                        y=y,
-                        include_amenities=include_amenities,
-                    )
-                    if not payload:
-                        tiles_empty += 1
-                        continue
-                    writer.write_tile(zxy_to_tileid(zoom, x, y), gzip.compress(payload))
-                    tiles_written += 1
+            if include_grid:
+                x_min, x_max, y_min, y_max = _tile_range_for_bbox(zoom, bbox)
+                for x in range(x_min, x_max + 1):
+                    for y in range(y_min, y_max + 1):
+                        payload = _tile_mvt_bytes(
+                            connection,
+                            build_key=build_key,
+                            z=zoom,
+                            x=x,
+                            y=y,
+                            include_grid=True,
+                            include_amenities=include_amenities,
+                        )
+                        if not payload:
+                            tiles_empty += 1
+                            continue
+                        writer.write_tile(zxy_to_tileid(zoom, x, y), gzip.compress(payload))
+                        tiles_written += 1
+                print(
+                    f"  z{zoom}: {tiles_written - zoom_started:,} non-empty tiles "
+                    f"(bbox scan {x_min}..{x_max} x {y_min}..{y_max})"
+                )
+                continue
+
+            tile_coords = [] if not include_amenities else _amenity_tile_coordinates(
+                amenity_points,
+                zoom=zoom,
+                bbox=bbox,
+            )
+            for x, y in tile_coords:
+                payload = _tile_mvt_bytes(
+                    connection,
+                    build_key=build_key,
+                    z=zoom,
+                    x=x,
+                    y=y,
+                    include_grid=False,
+                    include_amenities=True,
+                )
+                if not payload:
+                    tiles_empty += 1
+                    continue
+                writer.write_tile(zxy_to_tileid(zoom, x, y), gzip.compress(payload))
+                tiles_written += 1
             print(
                 f"  z{zoom}: {tiles_written - zoom_started:,} non-empty tiles "
-                f"(grid={x_min}..{x_max} x {y_min}..{y_max})"
+                f"(amenity tiles={len(tile_coords):,})"
             )
 
         center_lon = (min_lon + max_lon) / 2.0
@@ -289,6 +362,7 @@ def bake_pmtiles(
         metadata = _pmtiles_metadata(
             min_zoom=min_zoom,
             max_zoom=max_zoom,
+            grid_max_zoom=coarse_grid_max_zoom,
             amenity_min_zoom=amenity_min_zoom,
         )
         writer.finalize(header, metadata)

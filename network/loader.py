@@ -242,6 +242,64 @@ def run_walkgraph_reachability(
         raise subprocess.CalledProcessError(return_code, command)
 
 
+def run_surface_shell_build(
+    nodes_bin: Path,
+    study_area_geojson_path: Path,
+    shell_dir: Path,
+    *,
+    walkgraph_bin: str,
+    surface_shell_hash: str,
+    reach_hash: str,
+    node_count: int,
+    config_json_path: Path,
+    shard_size_m: int = 20_000,
+    base_resolution_m: int = 50,
+    threads: int | None = None,
+    progress_cb=None,
+) -> None:
+    """Call the Rust `walkgraph surface` subcommand to build shard .npz files."""
+    command = [
+        walkgraph_bin,
+        "surface",
+        "--nodes-bin", str(nodes_bin),
+        "--study-area", str(study_area_geojson_path),
+        "--shell-dir", str(shell_dir),
+        "--surface-shell-hash", surface_shell_hash,
+        "--reach-hash", reach_hash,
+        "--node-count", str(int(node_count)),
+        "--shard-size-m", str(int(shard_size_m)),
+        "--resolution-m", str(int(base_resolution_m)),
+        "--config-json", str(config_json_path),
+    ]
+    if threads is not None:
+        command += ["--threads", str(int(threads))]
+
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "walkgraph surface subcommand not found. "
+            "Rebuild the Rust CLI or set WALKGRAPH_BIN."
+        ) from exc
+
+    try:
+        for line in _iter_stderr_lines(process):
+            _emit_progress(progress_cb, f"surface: {line}")
+        return_code = process.wait()
+    finally:
+        if process.stderr is not None and hasattr(process.stderr, "close"):
+            process.stderr.close()
+
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
+
+
 def load_graph_meta(graph_dir: Path) -> dict[str, Any]:
     meta_path = graph_dir / "walk_graph.meta.json"
     with meta_path.open(encoding="utf-8") as handle:

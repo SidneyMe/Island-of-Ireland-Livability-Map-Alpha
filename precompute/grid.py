@@ -4,6 +4,7 @@ import math
 from typing import Any
 
 from shapely import force_2d
+from shapely.errors import GEOSException
 from shapely.geometry import box as shapely_box
 from shapely.ops import clip_by_rect, transform
 from shapely.prepared import prep
@@ -21,11 +22,31 @@ def _geometry_is_2d(geometry: Any) -> bool:
     return geometry is not None and not bool(getattr(geometry, "has_z", False))
 
 
+def _has_effective_area_metadata(cell: dict[str, Any]) -> bool:
+    area_value = cell.get("effective_area_m2")
+    ratio_value = cell.get("effective_area_ratio")
+
+    if not isinstance(area_value, (int, float)):
+        return False
+    if not isinstance(ratio_value, (int, float)):
+        return False
+
+    area_value = float(area_value)
+    ratio_value = float(ratio_value)
+    return (
+        math.isfinite(area_value)
+        and math.isfinite(ratio_value)
+        and area_value >= 0.0
+        and 0.0 <= ratio_value <= 1.0 + 1e-9
+    )
+
+
 def _grid_cells_are_2d(cells: list[dict[str, Any]] | None) -> bool:
     if cells is None:
         return False
     return all(
         isinstance(cell.get("clip_required"), bool)
+        and _has_effective_area_metadata(cell)
         and (cell.get("geometry") is None or _geometry_is_2d(cell.get("geometry")))
         for cell in cells
     )
@@ -96,7 +117,27 @@ def _clip_metric_geometry_to_bounds(
     bounds: tuple[float, float, float, float],
 ):
     minx, miny, maxx, maxy = bounds
-    return _clean_metric_geometry(clip_by_rect(study_geom_metric, minx, miny, maxx, maxy))
+    try:
+        clipped = clip_by_rect(study_geom_metric, minx, miny, maxx, maxy)
+    except GEOSException:
+        # clip_by_rect can produce degenerate rings on complex coastal geometry;
+        # intersection is slower but handles these edge cases correctly.
+        clipped = study_geom_metric.intersection(shapely_box(minx, miny, maxx, maxy))
+    return _clean_metric_geometry(clipped)
+
+
+def _effective_area_metadata(geom_metric, raw_cell_area_m2: float) -> dict[str, float]:
+    clipped_area_m2 = 0.0 if geom_metric is None else float(geom_metric.area)
+    if raw_cell_area_m2 <= 0.0:
+        return {
+            "effective_area_m2": 0.0,
+            "effective_area_ratio": 0.0,
+        }
+    clipped_area_m2 = min(max(clipped_area_m2, 0.0), float(raw_cell_area_m2))
+    return {
+        "effective_area_m2": clipped_area_m2,
+        "effective_area_ratio": clipped_area_m2 / float(raw_cell_area_m2),
+    }
 
 
 def build_scoring_grid(
@@ -107,6 +148,7 @@ def build_scoring_grid(
 ) -> list[dict[str, Any]]:
     minx, miny, maxx, maxy = study_geom_metric.bounds
     prepared = prep(study_geom_metric)
+    raw_cell_area_m2 = float(spacing_m) * float(spacing_m)
 
     cells: list[dict[str, Any]] = []
     y = miny
@@ -136,12 +178,14 @@ def build_scoring_grid(
                     anchor_metric = geom_metric.representative_point()
                     anchor_wgs84 = transform(TO_WGS84, anchor_metric)
                     geometry_wgs84 = transform(TO_WGS84, geom_metric)
+                    area_metadata = _effective_area_metadata(geom_metric, raw_cell_area_m2)
                     cells.append(
                         {
                             "cell_id": build_cell_id(spacing_m, x, y),
                             "centre": (anchor_wgs84.y, anchor_wgs84.x),
                             "metric_bounds": metric_bounds,
                             "clip_required": bool(needs_clip),
+                            **area_metadata,
                             "geometry": _as_2d(geometry_wgs84),
                             **_empty_scoring_fields(),
                         }
@@ -222,6 +266,8 @@ def clone_scoring_grid_shells(cells: list[dict[str, Any]]) -> list[dict[str, Any
             "centre": cell["centre"],
             "metric_bounds": _metric_bounds_from_cell(cell),
             "clip_required": bool(cell.get("clip_required", True)),
+            "effective_area_m2": float(cell["effective_area_m2"]),
+            "effective_area_ratio": float(cell["effective_area_ratio"]),
             **_empty_scoring_fields(),
         }
         geometry = cell.get("geometry")
@@ -235,11 +281,39 @@ def _clone_grid_shells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clone_scoring_grid_shells(cells)
 
 
-def score_cell(counts: dict[str, int]) -> tuple[dict[str, float], float]:
-    per_category = {
-        category: min(counts.get(category, 0) / cap, 1.0) * 25.0
-        for category, cap in CAPS.items()
-    }
+_DENSITY_NORMALIZED_CATEGORIES = ("shops", "transport", "healthcare")
+_MIN_DENSITY_AREA_RATIO = 0.25
+_PARK_SCORE_CATEGORY = "parks"
+
+
+def _normalized_area_ratio(effective_area_ratio: Any) -> float:
+    try:
+        ratio = float(effective_area_ratio)
+    except (TypeError, ValueError):
+        ratio = 1.0
+    if not math.isfinite(ratio):
+        ratio = 1.0
+    ratio = min(max(ratio, 0.0), 1.0)
+    return max(ratio, _MIN_DENSITY_AREA_RATIO)
+
+
+def score_cell(
+    counts: dict[str, int],
+    *,
+    effective_area_ratio: float = 1.0,
+    density_normalized_categories: tuple[str, ...] = _DENSITY_NORMALIZED_CATEGORIES,
+    park_area_units: float | None = None,
+) -> tuple[dict[str, float], float]:
+    normalized_ratio = _normalized_area_ratio(effective_area_ratio)
+    per_category: dict[str, float] = {}
+    for category, cap in CAPS.items():
+        raw_count = counts.get(category, 0)
+        effective_count = float(raw_count)
+        if category == _PARK_SCORE_CATEGORY and park_area_units is not None:
+            effective_count = float(park_area_units) / normalized_ratio
+        elif category in density_normalized_categories:
+            effective_count = raw_count / normalized_ratio
+        per_category[category] = min(effective_count / cap, 1.0) * 25.0
     return per_category, sum(per_category.values())
 
 
@@ -247,18 +321,22 @@ def score_cells(
     cells: list[dict[str, Any]],
     counts_by_node: dict[Any, dict[str, int]],
     cell_nodes: list[Any],
+    park_area_units_by_node: dict[Any, float] | None = None,
 ) -> None:
     if not cells:
         return
 
-    score_cache: dict[Any, tuple[dict[str, int], dict[str, float], float]] = {}
-    for node in set(cell_nodes):
-        counts = dict(counts_by_node.get(node, {}))
-        scores, total = score_cell(counts)
-        score_cache[node] = (counts, scores, total)
-
     for cell, node in zip(cells, cell_nodes):
-        counts, scores, total = score_cache[node]
+        counts = dict(counts_by_node.get(node, {}))
+        scores, total = score_cell(
+            counts,
+            effective_area_ratio=float(cell.get("effective_area_ratio", 1.0)),
+            park_area_units=(
+                None
+                if park_area_units_by_node is None
+                else float(park_area_units_by_node.get(node, 0.0))
+            ),
+        )
         cell["counts"] = counts
         cell["scores"] = scores
         cell["total"] = total

@@ -14,6 +14,8 @@ PHASE_ORDER = (
     "amenities",
     "networks",
     "reachability",
+    "node_scores",
+    "fine_surface",
     "grids",
     "publish",
 )
