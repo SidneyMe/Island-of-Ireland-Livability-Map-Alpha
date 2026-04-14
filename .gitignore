@@ -39,6 +39,7 @@ legacy/
 
 # Large local geospatial inputs
 osm/*.osm.pbf
+osm/extract_manifest.json
 boundaries/*.geojson
 
 # Local databases, logs, and temporary files
