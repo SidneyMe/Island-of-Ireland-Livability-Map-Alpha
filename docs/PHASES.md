@@ -38,7 +38,7 @@ When in doubt, bump the narrower version first and let the existing hash machine
 
 Everything in this phase is either a scoring prerequisite or a cleanup that stops being fixable later. None of it depends on the rest of the roadmap.
 
-### Livability sanity fixture [blocker]
+### ~~Livability sanity fixture [blocker]~~
 
 **What:** A versioned JSON file of 20–40 hand-picked reference locations across Ireland, each with an expected score range and a short rationale.
 
@@ -59,7 +59,7 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 
 - Expected scores are hand-assigned and will drift as the model matures. Track the fixture's history in git so drift is visible; treat large fixture rewrites as a deliberate design decision, not a quiet update.
 
-### Coastal grid-cell clipping [independent]
+### ~~Coastal grid-cell clipping [independent]~~
 
 **What:** Clip grid cells straddling the coastline to land, so coastal cells don't look artificially sparse.
 
@@ -72,7 +72,18 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 - Normalize amenity density and park area by clipped area, not raw cell area.
 - Affects geometry hashing — bump `GRID_GEOMETRY_SCHEMA_VERSION` in `config.py`.
 
-### Remove Windows-only assumptions [independent]
+**Done so far:**
+
+- Grid cells now persist `effective_area_m2` and `effective_area_ratio` derived from the existing clipped metric geometry.
+- Cache validation now requires the clipped-area metadata, so old grid shells are rebuilt instead of being reused silently.
+- `grid_walk` now stores the clipped-area fields, with compatibility `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` upgrades for existing databases.
+- Coastal amenity-density normalization now applies to `shops`, `transport`, and `healthcare`, using a clipped-area ratio floor of `0.25`.
+- Park scoring now uses reachable polygon park area rather than raw reachable park-feature count, still normalized by the same clipped-area ratio floor of `0.25`.
+- Raw park counts remain raw feature counts for publishing/UI compatibility; only park scoring uses the interim reachable-area lookup.
+- `GRID_GEOMETRY_SCHEMA_VERSION` was bumped to reflect the new persisted grid metadata.
+- This phase item is still not fully done: park scoring is now area-based, but the broader Phase 2 park-size-tier redesign is still outstanding.
+
+### ~~Remove Windows-only assumptions [independent]~~
 
 **What:** The code path should run on Linux/macOS in principle. Testing and documentation for those platforms remain out of scope.
 
@@ -83,7 +94,7 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 - Replace any remaining string-join path operations with `pathlib.Path`.
 - Add POSIX-equivalent setup commands alongside the PowerShell ones in the README.
 
-### Basic CI [independent]
+### ~~Basic CI [independent]~~
 
 **What:** Run Python and Rust tests on every push.
 
@@ -95,7 +106,7 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 - Run the sanity fixture once it exists.
 - Skip the full precompute in CI — it needs the OSM extract, which is too large to download on every push.
 
-### Automated OSM re-import and precompute [independent]
+### ~~Automated OSM re-import and precompute [independent]~~
 
 **What:** Scheduled refresh so the published map doesn't slowly drift out of date.
 

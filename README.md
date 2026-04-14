@@ -98,7 +98,7 @@ The split is simple:
 - `frontend/` is the Vite source project for the MapLibre UI.
 - `static/` is served by the local Python server. `static/dist/` is the checked-in Vite production bundle.
 - `legacy/` contains quarantined historical UI/server files that are retained for reference but are not part of the active runtime path.
-- `schema.sql` is the canonical provisioning DDL. The SQLAlchemy table metadata in `db_postgis/` mirrors that schema for runtime queries and readiness checks.
+- Alembic migrations under `db_postgis/migrations/` are the canonical managed-schema source of truth. `schema.sql` is kept as a bootstrap snapshot for convenience, and the SQLAlchemy metadata in `db_postgis/` mirrors the runtime query model.
 
 ## Prerequisites
 
@@ -136,15 +136,20 @@ Optional local tool overrides:
 
 ```env
 OSM2PGSQL_BIN=osm2pgsql
+# Windows:
 WALKGRAPH_BIN=walkgraph/target/release/walkgraph.exe
+# Linux/macOS:
+WALKGRAPH_BIN=walkgraph/target/release/walkgraph
 ```
+
+Set `WALKGRAPH_BIN` only if you need an explicit override, and use the variant that matches your platform.
 
 ## Required Local Data
 
 The current config expects these files:
 
 ```text
-osm/ireland-and-northern-ireland-260405.osm.pbf
+osm/ireland-and-northern-ireland-latest.osm.pbf
 boundaries/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson
 boundaries/osni_open_data_largescale_boundaries_ni_outline.geojson
 ```
@@ -156,14 +161,22 @@ These inputs are intentionally not committed. They are large local data files, s
 Create and activate a Python environment:
 
 ```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
+```sh
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+```
+
+If your POSIX environment does not map `python` to Python 3, use `python3` for the same commands below.
+
 Install frontend dependencies and build the production bundle:
 
-```powershell
+```text
 cd frontend
 npm install
 npm run build
@@ -172,50 +185,57 @@ cd ..
 
 Build the Rust graph helper:
 
-```powershell
+```text
 cd walkgraph
 cargo build --release
 cd ..
 ```
 
-Prepare the database schema:
+The app auto-applies pending managed-schema migrations on startup. If you still want a bootstrap snapshot for a fresh database, you can apply `schema.sql` manually:
 
-```powershell
+```text
 psql "postgresql://user:password@localhost:5432/database_name" -f schema.sql
 ```
 
-If your app `DATABASE_URL` uses the SQLAlchemy driver form `postgresql+psycopg://`, remove `+psycopg` for the `psql` command. If you use split `POSTGRES_*` variables instead, run the schema command with the matching `psql` connection arguments for your database.
+If your app `DATABASE_URL` uses the SQLAlchemy driver form `postgresql+psycopg://`, remove `+psycopg` for the `psql` command. If you use split `POSTGRES_*` variables instead, run the schema command with the matching `psql` connection arguments for your database. Existing databases should be upgraded through Alembic on startup rather than by reapplying `schema.sql`.
 
 ## Usage Commands
 
+Each example shows `python` first and the `python3` POSIX alternative second. Use whichever form matches your shell.
+
 Refresh the raw local OSM import:
 
-```powershell
+```text
 python main.py --refresh-import
+python3 main.py --refresh-import
 ```
 
 Run precompute using an existing raw import:
 
-```powershell
+```text
 python main.py --precompute
+python3 main.py --precompute
 ```
 
 Allow precompute to refresh the import if the raw import is missing:
 
-```powershell
+```text
 python main.py --precompute --auto-refresh-import
+python3 main.py --precompute --auto-refresh-import
 ```
 
 Force a rebuild of the current PostGIS build:
 
-```powershell
+```text
 python main.py --precompute --force-precompute
+python3 main.py --precompute --force-precompute
 ```
 
 Serve the local web app:
 
-```powershell
+```text
 python main.py --serve
+python3 main.py --serve
 ```
 
 The server defaults to:
@@ -226,31 +246,49 @@ http://127.0.0.1:8000/
 
 You can override the bind address:
 
-```powershell
+```text
 python main.py --serve --host 127.0.0.1 --port 8080
+python3 main.py --serve --host 127.0.0.1 --port 8080
 ```
 
 `--render` still exists as a legacy alias for `--serve`.
 
 ## Testing
 
+Like the usage commands above, use the `python` or `python3` form that matches your environment.
+
 Run Python tests:
 
-```powershell
+```text
 python -m unittest discover -s tests -t . -p "test_*.py"
+python3 -m unittest discover -s tests -t . -p "test_*.py"
 ```
 
 Run Rust tests:
 
-```powershell
+```text
 cd walkgraph
 cargo test
 cd ..
 ```
 
+Validate the sanity fixture structure:
+
+```text
+python scripts/sanity_check.py --validate-only
+python3 scripts/sanity_check.py --validate-only
+```
+
+Run the sanity fixture against your current completed local build:
+
+```text
+python scripts/sanity_check.py --profile full
+python3 scripts/sanity_check.py --profile full
+```
+
 Build the frontend bundle used by `static/index.html`:
 
-```powershell
+```text
 cd frontend
 npm run build
 cd ..
@@ -282,9 +320,9 @@ boundaries/*.geojson
 - The 500 m walk radius is a single fixed value — no mode-aware scoring (cycling, transit-chained trips).
 - Healthcare scoring treats a rural GP the same as a major hospital; there's no capacity or quality weighting.
 - Parks are counted by presence, not area — a pocket playground scores the same as a regional park.
-- Grid cells straddling the coast aren't clipped to land, so coastal cells can look artificially sparse.
-- Windows-only in practice. The code should work on Linux/macOS once Windows-specific paths are removed, but it hasn't been tested there. Contributions welcome.
-- No automated CI — tests are run locally.
+- Grid cells straddling the coast can still look artificially sparse.
+- Linux/macOS should work in principle now that the active runtime path no longer assumes Windows-only executable names, but those platforms are still not fully tested. Contributions welcome.
+- CI currently validates Python tests, Rust tests, and sanity-fixture structure. End-to-end sanity score assertions still require a completed local build.
 
 ## Roadmap
 
@@ -294,7 +332,7 @@ Implementation detail, phase ordering, and open design questions for every item 
 
 ### Calibration and validation
 
-- [ ] Build a livability sanity fixture — a set of hand-picked reference locations across Ireland, used as a regression test for every scoring change.
+- [x] Build a livability sanity fixture — a set of hand-picked reference locations across Ireland, used as a regression test for every scoring change.
 - [ ] Compare against an independent dataset (e.g. CSO deprivation indices) as a secondary sanity check, once the scoring model is mature enough for the comparison to be meaningful.
 
 ### Sub-tier every category
@@ -363,10 +401,10 @@ Depends on the service reality check above — every item assumes phantom stops 
 
 ### Infrastructure
 
-- [ ] Clip grid cells to land so coastal cells aren't artificially sparse.
-- [ ] Automated data refresh — scripted OSM re-import and precompute on a schedule.
-- [ ] Remove Windows-specific assumptions from the code path (hardcoded `.exe` suffix, PowerShell-only setup commands) so the project can run on Linux/macOS in principle. Testing and documentation for those platforms is out of scope — PRs from Linux/macOS users welcome.
-- [ ] Basic CI — run Python and Rust tests on push.
+- [x] Clip grid cells to land so coastal cells aren't artificially sparse. Effective area stored per cell; amenity density and park scoring normalised by clipped land area. Full park size tiers (pocket → regional) are tracked separately as a Phase 2 item.
+- [x] Automated data refresh — scripted OSM re-import and precompute on a schedule.
+- [x] Remove Windows-specific assumptions from the code path (hardcoded `.exe` suffix, PowerShell-only setup commands) so the project can run on Linux/macOS in principle. Testing and documentation for those platforms is out of scope — PRs from Linux/macOS users welcome.
+- [x] Basic CI — run Python and Rust tests on push.
 
 ### Public launch
 
