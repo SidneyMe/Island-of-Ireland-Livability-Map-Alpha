@@ -3,10 +3,12 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, mock
 
 from config import OSM_IMPORT_SCHEMA, SourceState
 import db_postgis
+import db_postgis.reads as db_reads
 import db_postgis.schema as db_schema
 import local_osm_import
 
@@ -73,6 +75,87 @@ class MonotonicClock:
         if self._values:
             self._last = self._values.pop(0)
         return self._last
+
+
+def _db_ready_connection(*, postgis_exists: bool = True):
+    connection = mock.MagicMock()
+
+    def _execute(statement, *args, **kwargs):
+        del args, kwargs
+        sql = str(statement)
+        result = mock.Mock()
+        if "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis')" in sql:
+            result.scalar_one.return_value = postgis_exists
+        return result
+
+    connection.execute.side_effect = _execute
+    return connection
+
+
+def _managed_schema_inspector(
+    *,
+    include_alembic_version: bool = False,
+    missing_tables: set[tuple[str, str]] | None = None,
+    missing_columns: dict[tuple[str, str], set[str]] | None = None,
+    missing_indexes: set[str] | None = None,
+):
+    missing_tables = missing_tables or set()
+    missing_columns = missing_columns or {}
+    missing_indexes = missing_indexes or set()
+
+    public_tables = []
+    raw_tables = []
+    for table in db_schema._MANAGED_TABLES:
+        schema_name = str(table.schema or "public")
+        table_name = str(table.name)
+        if (schema_name, table_name) in missing_tables:
+            continue
+        if schema_name == "public":
+            public_tables.append(table_name)
+        elif schema_name == OSM_IMPORT_SCHEMA:
+            raw_tables.append(table_name)
+    if include_alembic_version:
+        public_tables.append("alembic_version")
+
+    inspector = mock.Mock()
+
+    def _get_table_names(schema=None):
+        if schema is None:
+            return list(public_tables)
+        if schema == OSM_IMPORT_SCHEMA:
+            return list(raw_tables)
+        return []
+
+    def _get_columns(table_name, schema=None):
+        schema_name = str(schema or "public")
+        table = next(
+            table
+            for table in db_schema._MANAGED_TABLES
+            if str(table.name) == str(table_name)
+            and str(table.schema or "public") == schema_name
+        )
+        omitted = missing_columns.get((schema_name, str(table_name)), set())
+        return [
+            {"name": column.name}
+            for column in table.columns
+            if column.name not in omitted
+        ]
+
+    def _get_indexes(table_name, schema=None):
+        schema_name = str(schema or "public")
+        names = [
+            index_spec.index_name
+            for index_spec in db_schema._MANAGED_INDEX_SPECS
+            if index_spec.schema == schema_name
+            and index_spec.table_name == str(table_name)
+            and index_spec.index_name not in missing_indexes
+        ]
+        return [{"name": name} for name in names]
+
+    inspector.get_table_names.side_effect = _get_table_names
+    inspector.get_columns.side_effect = _get_columns
+    inspector.get_indexes.side_effect = _get_indexes
+    return inspector
 
 
 def detail_messages(progress_cb: mock.Mock) -> list[str]:
@@ -394,16 +477,177 @@ class DbPostgisImportStateTests(TestCase):
 
     def test_ensure_managed_raw_support_tables_creates_import_manifest_support_only(self) -> None:
         engine = mock.MagicMock()
-        connection = engine.begin.return_value.__enter__.return_value
-        managed_tables = (FakeManagedTable("import_manifest"),)
+        inspector = _managed_schema_inspector(include_alembic_version=True)
 
-        with mock.patch.object(db_schema, "MANAGED_RAW_SUPPORT_TABLES", managed_tables):
+        with mock.patch.object(db_schema, "inspect", return_value=inspector):
             db_postgis.ensure_managed_raw_support_tables(engine)
 
-        managed_tables[0].create.assert_called_once_with(connection, checkfirst=True)
-        statements = [str(call.args[0]) for call in connection.execute.call_args_list]
-        self.assertEqual(len(statements), 1)
-        self.assertIn("ALTER TABLE osm_raw.import_manifest", statements[0])
+        engine.begin.assert_not_called()
+
+    def test_ensure_database_ready_auto_upgrades_empty_managed_schema(self) -> None:
+        engine = mock.MagicMock()
+        begin_connection = _db_ready_connection()
+        connect_connection = mock.MagicMock()
+        engine.begin.return_value.__enter__.return_value = begin_connection
+        engine.connect.return_value.__enter__.return_value = connect_connection
+        legacy_inspector = _managed_schema_inspector(
+            missing_tables={
+                ("public", "grid_walk"),
+                ("public", "amenities"),
+                ("public", "build_manifest"),
+                (OSM_IMPORT_SCHEMA, "import_manifest"),
+            }
+        )
+        final_inspector = _managed_schema_inspector(include_alembic_version=True)
+
+        with (
+            mock.patch.object(
+                db_schema,
+                "inspect",
+                side_effect=[legacy_inspector, final_inspector],
+            ),
+            mock.patch.object(db_schema.command, "stamp") as stamp_mock,
+            mock.patch.object(db_schema.command, "upgrade") as upgrade_mock,
+        ):
+            db_postgis.ensure_database_ready(engine)
+
+        stamp_mock.assert_not_called()
+        upgrade_mock.assert_called_once()
+
+    def test_ensure_database_ready_stamps_supported_legacy_schema_before_upgrade(self) -> None:
+        engine = mock.MagicMock()
+        begin_connection = _db_ready_connection()
+        connect_connection = mock.MagicMock()
+        engine.begin.return_value.__enter__.return_value = begin_connection
+        engine.connect.return_value.__enter__.return_value = connect_connection
+        legacy_inspector = _managed_schema_inspector()
+        final_inspector = _managed_schema_inspector(include_alembic_version=True)
+
+        with (
+            mock.patch.object(
+                db_schema,
+                "inspect",
+                side_effect=[legacy_inspector, final_inspector],
+            ),
+            mock.patch.object(db_schema.command, "stamp") as stamp_mock,
+            mock.patch.object(db_schema.command, "upgrade") as upgrade_mock,
+        ):
+            db_postgis.ensure_database_ready(engine)
+
+        stamp_mock.assert_called_once()
+        self.assertEqual(
+            stamp_mock.call_args.args[1],
+            db_schema.ALEMBIC_INITIAL_REVISION,
+        )
+        upgrade_mock.assert_called_once()
+
+    def test_ensure_database_ready_rejects_legacy_schema_drift_without_alembic_version(self) -> None:
+        engine = mock.MagicMock()
+        begin_connection = _db_ready_connection()
+        connect_connection = mock.MagicMock()
+        engine.begin.return_value.__enter__.return_value = begin_connection
+        engine.connect.return_value.__enter__.return_value = connect_connection
+        drifted_inspector = _managed_schema_inspector(
+            missing_columns={("public", "grid_walk"): {"effective_area_ratio"}}
+        )
+
+        with (
+            mock.patch.object(db_schema, "inspect", return_value=drifted_inspector),
+            mock.patch.object(db_schema.command, "stamp") as stamp_mock,
+            mock.patch.object(db_schema.command, "upgrade") as upgrade_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "Unsupported drift/manual intervention required"):
+                db_postgis.ensure_database_ready(engine)
+
+        stamp_mock.assert_not_called()
+        upgrade_mock.assert_not_called()
+
+
+class DbReadTests(TestCase):
+    def test_load_source_amenity_rows_preserves_polygon_park_area(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.mappings.return_value.all.return_value = [
+            {
+                "category": "parks",
+                "osm_type": "way",
+                "osm_id": 123,
+                "point_geom": "park-point",
+                "park_area_m2": 125_000.0,
+            },
+            {
+                "category": "parks",
+                "osm_type": "node",
+                "osm_id": 456,
+                "point_geom": "playground-point",
+                "park_area_m2": 0.0,
+            },
+        ]
+        root = SimpleNamespace(
+            from_shape=mock.Mock(return_value="study-area"),
+            to_shape=lambda geom: geom,
+        )
+
+        with mock.patch.object(db_reads, "root_module", return_value=root):
+            rows = db_postgis.load_source_amenity_rows(
+                engine,
+                "import-fingerprint",
+                mock.sentinel.study_area_wgs84,
+            )
+
+        self.assertEqual(rows[0]["source_ref"], "way/123")
+        self.assertEqual(rows[0]["geom"], "park-point")
+        self.assertEqual(rows[0]["park_area_m2"], 125_000.0)
+        self.assertEqual(rows[1]["source_ref"], "node/456")
+        self.assertEqual(rows[1]["park_area_m2"], 0.0)
+
+    def test_load_walk_rows_includes_effective_area_fields(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.mappings.return_value.all.return_value = [
+            {
+                "resolution_m": 5000,
+                "cell_id": "cell-1",
+                "centre_geom": "centre-geom",
+                "cell_geom": "cell-geom",
+                "effective_area_m2": 12_500_000.0,
+                "effective_area_ratio": 0.5,
+                "counts_json": {"shops": 2},
+                "scores_json": {"shops": 10.0},
+                "total_score": 10.0,
+            }
+        ]
+
+        with mock.patch.object(db_postgis, "to_shape", side_effect=lambda geom: geom):
+            rows = db_postgis.load_walk_rows(engine, "build-key")
+
+        self.assertEqual(rows[0]["effective_area_m2"], 12_500_000.0)
+        self.assertEqual(rows[0]["effective_area_ratio"], 0.5)
+        self.assertEqual(rows[0]["cell_geom"], "cell-geom")
+
+    def test_load_walk_rows_for_resolutions_includes_effective_area_fields(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.mappings.return_value.all.return_value = [
+            {
+                "resolution_m": 10000,
+                "cell_id": "cell-2",
+                "centre_geom": "centre-geom-2",
+                "cell_geom": "cell-geom-2",
+                "effective_area_m2": 80_000_000.0,
+                "effective_area_ratio": 0.8,
+                "counts_json": {"parks": 1},
+                "scores_json": {"parks": 12.5},
+                "total_score": 12.5,
+            }
+        ]
+
+        with mock.patch.object(db_postgis, "to_shape", side_effect=lambda geom: geom):
+            rows = db_postgis.load_walk_rows_for_resolutions(engine, "build-key", [10000])
+
+        self.assertEqual(rows[0]["effective_area_m2"], 80_000_000.0)
+        self.assertEqual(rows[0]["effective_area_ratio"], 0.8)
+        self.assertEqual(rows[0]["centre_geom"], "centre-geom-2")
 
 
 class TextCleanupTests(TestCase):
