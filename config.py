@@ -3,11 +3,12 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, cast
 from urllib.parse import quote_plus
 
 from pyproj import Transformer
@@ -41,6 +42,22 @@ OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
 IMPORTER_CONFIG_VERSION = "2026-04-08"
 
 
+def _optional_positive_int_env(name: str) -> int | None:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return None
+    normalized = raw_value.strip()
+    if not normalized:
+        return None
+    try:
+        value = int(normalized)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer when set; got {raw_value!r}.") from exc
+    if value <= 0:
+        raise RuntimeError(f"{name} must be a positive integer when set; got {raw_value!r}.")
+    return value
+
+
 def _default_walkgraph_bin() -> str:
     walkgraph_dir = BASE_DIR / "walkgraph" / "target"
     candidates = [
@@ -55,6 +72,7 @@ def _default_walkgraph_bin() -> str:
 
 WALKGRAPH_BIN = os.getenv("WALKGRAPH_BIN", _default_walkgraph_bin())
 WALKGRAPH_FORMAT_VERSION = 3
+LIVABILITY_SURFACE_THREADS = _optional_positive_int_env("LIVABILITY_SURFACE_THREADS")
 
 
 TARGET_CRS = "EPSG:2157"
@@ -78,8 +96,98 @@ M1_CORRIDOR_ANCHORS_WGS84 = [
 ]
 
 
-GRID_SIZES_M = [20000, 10000, 5000]
-ZOOM_BREAKS = [(11, 5000), (8, 10000), (0, 20000)]
+BuildProfile = Literal["full", "dev"]
+DEFAULT_BUILD_PROFILE: BuildProfile = "full"
+
+
+@dataclass(frozen=True)
+class BuildProfileSettings:
+    name: BuildProfile
+    coarse_vector_resolutions_m: tuple[int, ...]
+    fine_resolutions_m: tuple[int, ...]
+    surface_zoom_breaks: tuple[tuple[int, int], ...]
+    fine_surface_enabled: bool
+
+    @property
+    def surface_resolutions_m(self) -> list[int]:
+        return list(self.coarse_vector_resolutions_m + self.fine_resolutions_m)
+
+    @property
+    def grid_sizes_m(self) -> list[int]:
+        return list(self.coarse_vector_resolutions_m)
+
+
+_BUILD_PROFILE_SETTINGS: dict[BuildProfile, BuildProfileSettings] = {
+    "full": BuildProfileSettings(
+        name="full",
+        coarse_vector_resolutions_m=(20_000, 10_000, 5_000),
+        fine_resolutions_m=(2_500, 1_000, 500, 250, 100, 50),
+        surface_zoom_breaks=(
+            (18, 50),
+            (16, 100),
+            (15, 250),
+            (14, 500),
+            (13, 1_000),
+            (12, 2_500),
+            (10, 5_000),
+            (8, 10_000),
+            (0, 20_000),
+        ),
+        fine_surface_enabled=True,
+    ),
+    "dev": BuildProfileSettings(
+        name="dev",
+        coarse_vector_resolutions_m=(20_000, 10_000, 5_000),
+        fine_resolutions_m=(),
+        surface_zoom_breaks=(
+            (10, 5_000),
+            (8, 10_000),
+            (0, 20_000),
+        ),
+        fine_surface_enabled=False,
+    ),
+}
+
+
+def normalize_build_profile(profile: str | None = None) -> BuildProfile:
+    normalized = DEFAULT_BUILD_PROFILE if profile is None else str(profile).strip().lower()
+    if normalized not in _BUILD_PROFILE_SETTINGS:
+        raise ValueError(f"Unsupported build profile: {profile!r}")
+    return cast(BuildProfile, normalized)
+
+
+def build_profile_settings(profile: str | None = None) -> BuildProfileSettings:
+    return _BUILD_PROFILE_SETTINGS[normalize_build_profile(profile)]
+
+
+FULL_BUILD_PROFILE_SETTINGS = build_profile_settings("full")
+
+
+COARSE_VECTOR_RESOLUTIONS_M = list(FULL_BUILD_PROFILE_SETTINGS.coarse_vector_resolutions_m)
+FINE_RESOLUTIONS_M = list(FULL_BUILD_PROFILE_SETTINGS.fine_resolutions_m)
+CANONICAL_BASE_RESOLUTION_M = 50
+SURFACE_RESOLUTIONS_M = COARSE_VECTOR_RESOLUTIONS_M + FINE_RESOLUTIONS_M
+SURFACE_ZOOM_BREAKS = list(FULL_BUILD_PROFILE_SETTINGS.surface_zoom_breaks)
+GRID_SIZES_M = list(COARSE_VECTOR_RESOLUTIONS_M)
+ZOOM_BREAKS = list(SURFACE_ZOOM_BREAKS)
+SURFACE_MIN_ZOOM = 5
+SURFACE_MAX_ZOOM = 19
+SURFACE_DEFAULT_ZOOM = 6
+SURFACE_SHARD_SIZE_M = 20_000
+SURFACE_TILE_SIZE_PX = 256
+SURFACE_SCORE_RAMP = [
+    (0.0, "#440154"),
+    (25.0, "#3b528b"),
+    (50.0, "#21908c"),
+    (75.0, "#5dc863"),
+    (100.0, "#fde725"),
+]
+SURFACE_SHELL_SCHEMA_VERSION = 1
+FINE_SURFACE_SCHEMA_VERSION = 1
+ENABLE_FINE_RASTER_SURFACE = (
+    os.getenv("LIVABILITY_FINE_RASTER_SURFACE", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
 
 COASTAL_ARTIFACT_WIDTH_M = 75
 COASTAL_COMPONENT_PRESERVE_AREA_M2 = 100_000
@@ -121,14 +229,73 @@ CATEGORY_COLORS = {
 
 
 CACHE_DIR = BASE_DIR / ".livability_cache"
-PMTILES_OUTPUT_PATH = CACHE_DIR / "livability.pmtiles"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
 PMTILES_SCHEMA_VERSION = 2
 GRID_GEOMETRY_SCHEMA_VERSION = 4
-CACHE_SCHEMA_VERSION = 8
+CACHE_SCHEMA_VERSION = 9
 FORCE_RECOMPUTE = False
 USE_COMPRESSED_CACHE = True
 MANIFEST_NAME = "manifest.json"
+
+
+def profile_fine_surface_enabled(profile: str | None = None) -> bool:
+    settings = build_profile_settings(profile)
+    return bool(settings.fine_surface_enabled and ENABLE_FINE_RASTER_SURFACE)
+
+
+def pmtiles_filename(profile: str | None = None) -> str:
+    normalized_profile = normalize_build_profile(profile)
+    if normalized_profile == "full":
+        return "livability.pmtiles"
+    return f"livability-{normalized_profile}.pmtiles"
+
+
+def pmtiles_output_path(profile: str | None = None) -> Path:
+    return CACHE_DIR / pmtiles_filename(profile)
+
+
+def pmtiles_url_path(profile: str | None = None) -> str:
+    return f"/tiles/{pmtiles_filename(profile)}"
+
+
+PMTILES_OUTPUT_PATH = pmtiles_output_path(DEFAULT_BUILD_PROFILE)
+
+
+def resolution_for_zoom(zoom: int | float, *, profile: str | None = None) -> int:
+    zoom_value = int(math.floor(float(zoom)))
+    ladder = build_profile_settings(profile).surface_zoom_breaks
+    for min_zoom, resolution_m in ladder:
+        if zoom_value >= int(min_zoom):
+            return int(resolution_m)
+    return int(ladder[-1][1])
+
+
+def zoom_bounds_for_resolution(
+    resolution_m: int,
+    *,
+    profile: str | None = None,
+) -> tuple[int, int]:
+    normalized = int(resolution_m)
+    ladder = [
+        (int(min_zoom), int(size))
+        for min_zoom, size in build_profile_settings(profile).surface_zoom_breaks
+    ]
+    for index, (min_zoom, size) in enumerate(ladder):
+        if size != normalized:
+            continue
+        if index == 0:
+            return (min_zoom, SURFACE_MAX_ZOOM)
+        previous_min_zoom = ladder[index - 1][0]
+        return (min_zoom, previous_min_zoom - 1)
+    raise ValueError(f"Unsupported surface resolution: {resolution_m}")
+
+
+def is_coarse_vector_resolution(resolution_m: int, *, profile: str | None = None) -> bool:
+    return int(resolution_m) in build_profile_settings(profile).coarse_vector_resolutions_m
+
+
+def is_fine_surface_resolution(resolution_m: int, *, profile: str | None = None) -> bool:
+    return int(resolution_m) in build_profile_settings(profile).fine_resolutions_m
 
 
 def _file_meta(path: Path) -> dict[str, int]:
@@ -177,8 +344,10 @@ def validate_local_osm_extract(path: Path = OSM_EXTRACT_PATH) -> Path:
 
 @dataclass(frozen=True)
 class ConfigHashes:
+    build_profile: BuildProfile
     geo_hash: str
     reach_hash: str
+    surface_shell_hash: str
     score_hash: str
     render_hash: str
     config_hash: str
@@ -195,8 +364,10 @@ class SourceState:
 
 @dataclass(frozen=True)
 class BuildHashes:
+    build_profile: BuildProfile
     geo_hash: str
     reach_hash: str
+    surface_shell_hash: str
     score_hash: str
     render_hash: str
     config_hash: str
@@ -204,7 +375,9 @@ class BuildHashes:
     build_key: str
 
 
-def build_config_hashes() -> ConfigHashes:
+def build_config_hashes(profile: str | None = None) -> ConfigHashes:
+    normalized_profile = normalize_build_profile(profile)
+    profile_settings = build_profile_settings(normalized_profile)
     roi_meta = _file_meta(ROI_BOUNDARY_PATH)
     ni_meta = _file_meta(NI_BOUNDARY_PATH)
 
@@ -239,17 +412,35 @@ def build_config_hashes() -> ConfigHashes:
     }
     reach_hash = hash_dict(reach_params)
 
+    surface_shell_hash = hash_dict(
+        {
+            "reach_hash": reach_hash,
+            "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
+            "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
+            "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
+            "surface_shell_schema_version": SURFACE_SHELL_SCHEMA_VERSION,
+        }
+    )
+
     score_params = {
         "reach_hash": reach_hash,
         "caps": CAPS,
-        "grid_sizes_m": sorted(GRID_SIZES_M),
+        "coarse_vector_resolutions_m": sorted(COARSE_VECTOR_RESOLUTIONS_M),
+        "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
+        "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
         "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
+        "fine_surface_schema_version": FINE_SURFACE_SCHEMA_VERSION,
     }
     score_hash = hash_dict(score_params)
 
     render_params = {
+        "build_profile": normalized_profile,
         "score_hash": score_hash,
-        "zoom_breaks": sorted(ZOOM_BREAKS),
+        "surface_zoom_breaks": sorted(profile_settings.surface_zoom_breaks),
+        "surface_score_ramp": list(SURFACE_SCORE_RAMP),
+        "profile_fine_surface_enabled": profile_settings.fine_surface_enabled,
+        "runtime_fine_surface_enabled": profile_fine_surface_enabled(normalized_profile),
+        "surface_max_zoom": SURFACE_MAX_ZOOM,
         "output_html": OUTPUT_HTML,
         "category_colors": CATEGORY_COLORS,
         "pmtiles_schema_version": PMTILES_SCHEMA_VERSION,
@@ -258,6 +449,7 @@ def build_config_hashes() -> ConfigHashes:
 
     config_hash = hash_dict(
         {
+            "build_profile": normalized_profile,
             "score_hash": score_hash,
             "render_hash": render_hash,
             "schema_version": CACHE_SCHEMA_VERSION,
@@ -265,8 +457,10 @@ def build_config_hashes() -> ConfigHashes:
     )
 
     return ConfigHashes(
+        build_profile=normalized_profile,
         geo_hash=geo_hash,
         reach_hash=reach_hash,
+        surface_shell_hash=surface_shell_hash,
         score_hash=score_hash,
         render_hash=render_hash,
         config_hash=config_hash,
@@ -278,9 +472,7 @@ def extract_fingerprint(path: Path) -> str:
     extract_meta = _file_meta(validated_path)
     return hash_dict(
         {
-            "extract_path": str(validated_path.resolve()),
             "extract_size": extract_meta["size"],
-            "extract_mtime_ns": extract_meta["mtime_ns"],
             "extract_content_hash": _content_hash(validated_path),
         }
     )
@@ -318,10 +510,15 @@ def build_source_state(importer_version: str, path: Path = OSM_EXTRACT_PATH) -> 
     )
 
 
-def build_hashes_for_import(import_fingerprint: str) -> BuildHashes:
+def build_hashes_for_import(
+    import_fingerprint: str,
+    profile: str | None = None,
+) -> BuildHashes:
+    normalized_profile = normalize_build_profile(profile)
+    base_hashes = build_config_hashes(normalized_profile)
     geo_hash = hash_dict(
         {
-            "base_geo_hash": HASHES.geo_hash,
+            "base_geo_hash": base_hashes.geo_hash,
             "import_fingerprint": import_fingerprint,
         }
     )
@@ -332,26 +529,41 @@ def build_hashes_for_import(import_fingerprint: str) -> BuildHashes:
             "walk_radius_m": WALK_RADIUS_M,
         }
     )
+    surface_shell_hash = hash_dict(
+        {
+            "reach_hash": reach_hash,
+            "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
+            "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
+            "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
+            "surface_shell_schema_version": SURFACE_SHELL_SCHEMA_VERSION,
+        }
+    )
     score_hash = hash_dict(
         {
             "reach_hash": reach_hash,
             "caps": CAPS,
-            "grid_sizes_m": sorted(GRID_SIZES_M),
+            "coarse_vector_resolutions_m": sorted(COARSE_VECTOR_RESOLUTIONS_M),
+            "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
+            "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
             "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
+            "fine_surface_schema_version": FINE_SURFACE_SCHEMA_VERSION,
         }
     )
     build_key = hash_dict(
         {
+            "build_profile": normalized_profile,
             "import_fingerprint": import_fingerprint,
-            "config_hash": HASHES.config_hash,
+            "config_hash": base_hashes.config_hash,
         }
     )
     return BuildHashes(
+        build_profile=normalized_profile,
         geo_hash=geo_hash,
         reach_hash=reach_hash,
+        surface_shell_hash=surface_shell_hash,
         score_hash=score_hash,
-        render_hash=HASHES.render_hash,
-        config_hash=HASHES.config_hash,
+        render_hash=base_hashes.render_hash,
+        config_hash=base_hashes.config_hash,
         import_fingerprint=import_fingerprint,
         build_key=build_key,
     )
@@ -360,8 +572,8 @@ def build_hashes_for_import(import_fingerprint: str) -> BuildHashes:
 HASHES = build_config_hashes()
 
 
-def current_normalization_scope_hash() -> str:
-    return HASHES.geo_hash
+def current_normalization_scope_hash(profile: str | None = None) -> str:
+    return build_config_hashes(profile).geo_hash
 
 
 def package_snapshot() -> dict[str, str]:

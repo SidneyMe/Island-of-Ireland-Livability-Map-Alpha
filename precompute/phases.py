@@ -4,6 +4,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+
+_PARK_CATEGORY = "parks"
+_PARK_AREA_UNIT_M2 = 50_000.0
+
+
 def _grid_size_signature(grid_sizes_m: list[int]) -> str:
     sizes = sorted({int(size) for size in grid_sizes_m})
     if not sizes:
@@ -22,6 +27,54 @@ def _merge_counts_lookup(
     merged_counts = dict(existing_counts)
     merged_counts.update(new_counts)
     return {node: merged_counts[node] for node in sorted(merged_counts)}
+
+
+def _merge_numeric_lookup(
+    existing_values: dict[int, float],
+    new_values: dict[int, float],
+) -> dict[int, float]:
+    merged_values = {int(node): float(value) for node, value in existing_values.items()}
+    merged_values.update({int(node): float(value) for node, value in new_values.items()})
+    return {node: merged_values[node] for node in sorted(merged_values)}
+
+
+def _park_area_m2_from_row(row: dict[str, Any]) -> float:
+    try:
+        area_m2 = float(row.get("park_area_m2", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    if area_m2 < 0.0:
+        return 0.0
+    return area_m2
+
+
+def _park_node_weight_rows(
+    amenity_source_rows: list[dict[str, Any]],
+    park_nodes: list[int],
+) -> dict[str, list[tuple[int, int]]]:
+    park_rows = [row for row in amenity_source_rows if row.get("category") == _PARK_CATEGORY]
+    if len(park_rows) != len(park_nodes):
+        raise ValueError(
+            "Cached park amenity rows and snapped park nodes are out of sync: "
+            f"{len(park_rows)} park rows vs {len(park_nodes)} snapped park nodes."
+        )
+
+    weight_rows: list[tuple[int, int]] = []
+    for row, node in zip(park_rows, park_nodes):
+        integer_area_m2 = int(round(_park_area_m2_from_row(row)))
+        if integer_area_m2 <= 0:
+            continue
+        weight_rows.append((int(node), integer_area_m2))
+    return {_PARK_CATEGORY: weight_rows}
+
+
+def _park_area_units_lookup(
+    park_area_m2_by_node: dict[int, dict[str, int]],
+) -> dict[int, float]:
+    return {
+        int(node): float(category_totals.get(_PARK_CATEGORY, 0)) / _PARK_AREA_UNIT_M2
+        for node, category_totals in park_area_m2_by_node.items()
+    }
 
 
 def _record_substep(
@@ -144,7 +197,9 @@ def phase_geometry_impl(
         tracker.finish_phase("geometry", "completed", detail="repaired WGS84 study area geometry")
     elif study_area_metric is None or study_area_wgs84 is None:
         mark_building(cache_dir, "geo", geo_hash, "geometry")
-        study_area_metric, study_area_wgs84 = load_study_area_geometries()
+        study_area_metric, study_area_wgs84 = load_study_area_geometries(
+            progress_cb=tracker.phase_callback("geometry"),
+        )
         cache_save("study_area_metric", study_area_metric, cache_dir)
         cache_save("study_area_wgs84", study_area_wgs84, cache_dir)
         if can_finalize_geo_tier(study_area_metric, study_area_wgs84):
@@ -209,6 +264,7 @@ def phase_amenities_impl(
                 "lat": lat,
                 "lon": lon,
                 "source_ref": row["source_ref"],
+                "park_area_m2": _park_area_m2_from_row(row),
             }
         )
     for category in tags:
@@ -296,6 +352,7 @@ def phase_networks_impl(
 def phase_reachability_impl(
     walk_graph,
     amenity_data: dict[str, list[tuple[float, float]]],
+    amenity_source_rows: list[dict[str, Any]],
     tracker,
     *,
     walk_origin_node_ids,
@@ -312,6 +369,7 @@ def phase_reachability_impl(
     snap_amenities,
     normalize_origin_node_ids,
     precompute_walk_counts_by_origin_node,
+    precompute_walk_weighted_totals_by_origin_node,
 ):
     if walk_origin_node_ids is None:
         raise ValueError("walk_origin_node_ids is required for walk reachability")
@@ -338,14 +396,24 @@ def phase_reachability_impl(
         cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
 
     walk_counts_by_node = cache_load_large("walk_counts_by_origin_node", cache_dir)
-    counts_missing = walk_counts_by_node is None
     if walk_counts_by_node is None:
         walk_counts_by_node = {}
-    missing_origin_nodes = tuple(
+    walk_park_area_units_by_node = cache_load_large("walk_park_area_units_by_origin_node", cache_dir)
+    if walk_park_area_units_by_node is None:
+        walk_park_area_units_by_node = {}
+
+    missing_count_nodes = tuple(
         node for node in requested_walk_origin_nodes if node not in walk_counts_by_node
     )
+    missing_park_area_nodes = tuple(
+        node for node in requested_walk_origin_nodes if node not in walk_park_area_units_by_node
+    )
+    missing_origin_nodes = tuple(
+        node for node in requested_walk_origin_nodes if node not in walk_counts_by_node
+        or node not in walk_park_area_units_by_node
+    )
 
-    if counts_missing or missing_origin_nodes:
+    if missing_origin_nodes:
         built_any = True
         if cache_dir not in tiers_building:
             mark_building(cache_dir, "reach", reach_hash, "walk_reachability")
@@ -369,58 +437,133 @@ def phase_reachability_impl(
         )
 
     if missing_origin_nodes:
-        started_at = time.perf_counter()
-        cache_save_seconds = 0.0
+        counts_cache_save_seconds = 0.0
+        park_cache_save_seconds = 0.0
 
-        def _checkpoint_save(chunk_counts: dict[int, dict[str, int]]) -> None:
-            nonlocal walk_counts_by_node, cache_save_seconds
-            walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, chunk_counts)
-            save_started_at = time.perf_counter()
-            cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
-            cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
+        if missing_count_nodes:
+            routing_started_at = time.perf_counter()
 
-        new_walk_counts = precompute_walk_counts_by_origin_node(
-            walk_graph,
-            walk_nodes_by_category,
-            missing_origin_nodes,
-            cutoff=walk_radius_m,
-            weight="length_m",
-            progress_cb=tracker.phase_callback("reachability"),
-            detail="walk origins",
-            save_chunk_cb=_checkpoint_save,
-        )
-        _record_substep(tracker, "reachability", "walk_routing", started_at, force_log=True)
-        walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, new_walk_counts)
-        if cache_save_seconds <= 0.0:
-            started_at = time.perf_counter()
-            cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
-            cache_save_seconds = max(time.perf_counter() - started_at, 0.0)
-        tracker.record_substep(
-            "reachability",
-            "walk_cache_save",
-            cache_save_seconds,
-            force_log=True,
-        )
-    elif counts_missing:
-        started_at = time.perf_counter()
-        cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
-        _record_substep(tracker, "reachability", "walk_cache_save", started_at, force_log=True)
+            def _checkpoint_save_counts(chunk_counts: dict[int, dict[str, int]]) -> None:
+                nonlocal walk_counts_by_node, counts_cache_save_seconds
+                walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, chunk_counts)
+                save_started_at = time.perf_counter()
+                cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
+                counts_cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
+
+            new_walk_counts = precompute_walk_counts_by_origin_node(
+                walk_graph,
+                walk_nodes_by_category,
+                missing_origin_nodes,
+                cutoff=walk_radius_m,
+                weight="length_m",
+                progress_cb=tracker.phase_callback("reachability"),
+                detail="walk origins",
+                save_chunk_cb=_checkpoint_save_counts,
+            )
+            _record_substep(
+                tracker,
+                "reachability",
+                "walk_routing",
+                routing_started_at,
+                force_log=True,
+            )
+            walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, new_walk_counts)
+            if counts_cache_save_seconds <= 0.0:
+                save_started_at = time.perf_counter()
+                cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
+                counts_cache_save_seconds = max(time.perf_counter() - save_started_at, 0.0)
+            tracker.record_substep(
+                "reachability",
+                "walk_cache_save",
+                counts_cache_save_seconds,
+                force_log=True,
+            )
+
+        if missing_park_area_nodes:
+            park_weight_rows = _park_node_weight_rows(
+                amenity_source_rows,
+                walk_nodes_by_category.get(_PARK_CATEGORY, []),
+            )
+            if park_weight_rows.get(_PARK_CATEGORY):
+                park_routing_started_at = time.perf_counter()
+
+                def _checkpoint_save_park(chunk_totals: dict[int, dict[str, int]]) -> None:
+                    nonlocal walk_park_area_units_by_node, park_cache_save_seconds
+                    chunk_units = _park_area_units_lookup(chunk_totals)
+                    walk_park_area_units_by_node = _merge_numeric_lookup(
+                        walk_park_area_units_by_node,
+                        chunk_units,
+                    )
+                    save_started_at = time.perf_counter()
+                    cache_save_large(
+                        "walk_park_area_units_by_origin_node",
+                        walk_park_area_units_by_node,
+                        cache_dir,
+                    )
+                    park_cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
+
+                park_progress_cb = None
+                if not missing_count_nodes:
+                    park_progress_cb = tracker.phase_callback("reachability")
+
+                park_totals_by_node = precompute_walk_weighted_totals_by_origin_node(
+                    walk_graph,
+                    park_weight_rows,
+                    missing_origin_nodes,
+                    cutoff=walk_radius_m,
+                    weight="length_m",
+                    progress_cb=park_progress_cb,
+                    detail="walk origins",
+                    save_chunk_cb=_checkpoint_save_park,
+                )
+                _record_substep(
+                    tracker,
+                    "reachability",
+                    "walk_park_area_routing",
+                    park_routing_started_at,
+                    force_log=True,
+                )
+                walk_park_area_units_by_node = _merge_numeric_lookup(
+                    walk_park_area_units_by_node,
+                    _park_area_units_lookup(park_totals_by_node),
+                )
+            else:
+                walk_park_area_units_by_node = _merge_numeric_lookup(
+                    walk_park_area_units_by_node,
+                    {node: 0.0 for node in missing_origin_nodes},
+                )
+
+            if park_cache_save_seconds <= 0.0:
+                save_started_at = time.perf_counter()
+                cache_save_large(
+                    "walk_park_area_units_by_origin_node",
+                    walk_park_area_units_by_node,
+                    cache_dir,
+                )
+                park_cache_save_seconds = max(time.perf_counter() - save_started_at, 0.0)
+            tracker.record_substep(
+                "reachability",
+                "walk_park_area_cache_save",
+                park_cache_save_seconds,
+                force_log=True,
+            )
 
     if built_any:
         mark_complete(cache_dir, "reach", reach_hash, "reachability")
     tracker.finish_phase(
         "reachability",
-        "cached" if not missing_origin_nodes and not counts_missing else "completed",
+        "completed" if built_any else "cached",
         detail=f"{len(requested_walk_origin_nodes):,} walk origins",
     )
 
-    return walk_nodes_by_category, walk_counts_by_node
+    return walk_nodes_by_category, walk_counts_by_node, walk_park_area_units_by_node
 
 
 def phase_grids_impl(
     engine,
     study_area_metric,
     amenity_data: dict[str, list[tuple[float, float]]],
+    amenity_source_rows: list[dict[str, Any]],
     tracker,
     *,
     grid_sizes_m: list[int],
@@ -441,8 +584,26 @@ def phase_grids_impl(
     clone_grid_shells,
     snap_cells_to_nodes,
     score_cells,
+    fine_surface_enabled: bool,
+    reach_hash: str,
+    surface_shell_hash: str,
+    surface_shell_dir: Path,
+    surface_score_dir: Path,
+    ensure_surface_shell_cache,
+    ensure_surface_score_cache,
+    collect_surface_origin_nodes,
+    surface_analysis_ready,
+    graph_dir: Path,
+    walkgraph_bin: str,
+    surface_threads: int | None,
 ):
     total_steps = len(grid_sizes_m)
+    if fine_surface_enabled:
+        tracker.set_phase_expected("node_scores", True)
+        tracker.set_phase_expected("fine_surface", True)
+    else:
+        tracker.skip_phase("node_scores", detail="fine raster surface disabled")
+        tracker.skip_phase("fine_surface", detail="fine raster surface disabled")
     tracker.start_phase(
         "grids",
         total_units=total_steps,
@@ -463,9 +624,35 @@ def phase_grids_impl(
             print(f"  [score] cached {size}m walk grid contains non-2D geometry - rebuilding")
         sizes_to_rebuild.append(size)
 
-    if not sizes_to_rebuild:
+    surface_ready = False
+    if fine_surface_enabled:
+        surface_ready = surface_analysis_ready(
+            surface_shell_dir,
+            surface_score_dir,
+            expected_surface_shell_hash=surface_shell_hash,
+            expected_score_hash=score_hash,
+        )
+
+    if not sizes_to_rebuild and (not fine_surface_enabled or surface_ready):
         tracker.skip_phase("networks", detail="walk score grids already cached")
         tracker.skip_phase("reachability", detail="walk reachability already cached")
+        if fine_surface_enabled:
+            tracker.start_phase(
+                "node_scores",
+                total_units=0,
+                rebuild_total_units=0,
+                unit_label="artifacts",
+                detail="checking node score cache",
+            )
+            tracker.finish_phase("node_scores", "cached", detail="fine surface score cache hit")
+            tracker.start_phase(
+                "fine_surface",
+                total_units=0,
+                rebuild_total_units=0,
+                unit_label="shards",
+                detail="checking fine surface shard cache",
+            )
+            tracker.finish_phase("fine_surface", "cached", detail="fine surface shell cache hit")
         tracker.credit_phase("grids", total_steps, detail="all walk grids cached", force_log=True)
         tracker.finish_phase("grids", "cached", detail="walk grid cache hit")
         return {size: cached_grids[size] for size in grid_sizes_m}
@@ -490,52 +677,92 @@ def phase_grids_impl(
         mark_building(cache_dir, "score", score_hash, phase_name)
         did_build_score = True
 
-    grid_cells_by_size: dict[int, list[dict[str, Any]]] = {}
+    grid_cells_by_size: dict[int, list[dict[str, Any]]] = dict(cached_grids)
     walk_cell_nodes_by_size: dict[int, list[int]] = {}
+    walk_origin_nodes: list[int] = []
+    surface_origin_nodes: list[int] = []
 
-    for size in sizes_to_rebuild:
-        grid_cells, built_grid_cells = _load_or_build_grid_cells(
-            size,
-            study_area_metric,
-            tracker=tracker,
+    needs_walk_origin_nodes = bool(sizes_to_rebuild) or fine_surface_enabled
+    if needs_walk_origin_nodes:
+        for size in grid_sizes_m:
+            if size not in grid_cells_by_size:
+                grid_cells, built_grid_cells = _load_or_build_grid_cells(
+                    size,
+                    study_area_metric,
+                    tracker=tracker,
+                    cache_dir=cache_dir,
+                    cache_load=cache_load,
+                    cache_save=cache_save,
+                    grid_cells_are_2d=grid_cells_are_2d,
+                    build_grid=build_grid,
+                    elapsed=elapsed,
+                )
+                if built_grid_cells:
+                    ensure_score_building(f"grid_shell_{size}")
+                grid_cells_by_size[size] = grid_cells
+            tracker.set_live_work("grids", detail=f"{size}m walk node snap")
+            started_at = time.perf_counter()
+            walk_cell_nodes_by_size[size] = snap_cells_to_nodes(
+                walk_graph,
+                grid_cells_by_size[size],
+                f"walk_cell_nodes_{size}",
+                cache_dir,
+            )
+            _record_substep(tracker, "grids", "walk_snapping", started_at, force_log=True)
+
+        walk_origin_nodes, built_walk_origin_nodes = _load_or_build_walk_origin_nodes(
+            grid_sizes_m,
+            walk_cell_nodes_by_size,
             cache_dir=cache_dir,
             cache_load=cache_load,
             cache_save=cache_save,
-            grid_cells_are_2d=grid_cells_are_2d,
-            build_grid=build_grid,
-            elapsed=elapsed,
+            normalize_origin_node_ids=normalize_origin_node_ids,
         )
-        if built_grid_cells:
-            ensure_score_building(f"grid_shell_{size}")
-        grid_cells_by_size[size] = grid_cells
+        if built_walk_origin_nodes:
+            ensure_score_building(f"walk_origins_{_grid_size_signature(grid_sizes_m)}")
 
-        tracker.set_live_work("grids", detail=f"{size}m walk node snap")
-        started_at = time.perf_counter()
-        walk_cell_nodes_by_size[size] = snap_cells_to_nodes(
-            walk_graph,
-            grid_cells,
-            f"walk_cell_nodes_{size}",
-            cache_dir,
+    if fine_surface_enabled:
+        ensure_surface_shell_cache(
+            shell_dir=surface_shell_dir,
+            surface_shell_hash=surface_shell_hash,
+            reach_hash=reach_hash,
+            study_area_metric=study_area_metric,
+            graph_dir=graph_dir,
+            walkgraph_bin=walkgraph_bin,
+            node_count=walk_graph.vcount(),
+            threads=surface_threads,
+            tracker=tracker,
         )
-        _record_substep(tracker, "grids", "walk_snapping", started_at, force_log=True)
+        surface_origin_nodes = collect_surface_origin_nodes(surface_shell_dir)
 
-    walk_origin_nodes, built_walk_origin_nodes = _load_or_build_walk_origin_nodes(
-        sizes_to_rebuild,
-        walk_cell_nodes_by_size,
-        cache_dir=cache_dir,
-        cache_load=cache_load,
-        cache_save=cache_save,
-        normalize_origin_node_ids=normalize_origin_node_ids,
+    reachability_origin_nodes = list(
+        normalize_origin_node_ids(list(walk_origin_nodes) + list(surface_origin_nodes))
     )
-    if built_walk_origin_nodes:
-        ensure_score_building(f"walk_origins_{_grid_size_signature(sizes_to_rebuild)}")
 
-    _, walk_counts_by_node = phase_reachability(
+    _, walk_counts_by_node, walk_park_area_units_by_node = phase_reachability(
         walk_graph,
         amenity_data,
+        amenity_source_rows,
         tracker,
-        walk_origin_node_ids=walk_origin_nodes,
+        walk_origin_node_ids=reachability_origin_nodes,
     )
+
+    if fine_surface_enabled:
+        ensure_surface_score_cache(
+            shell_dir=surface_shell_dir,
+            score_dir=surface_score_dir,
+            surface_shell_hash=surface_shell_hash,
+            score_hash=score_hash,
+            walk_graph=walk_graph,
+            walk_counts_by_node=walk_counts_by_node,
+            walk_park_area_units_by_node=walk_park_area_units_by_node,
+            tracker=tracker,
+        )
+
+    if not sizes_to_rebuild:
+        tracker.credit_phase("grids", total_steps, detail="all walk grids cached", force_log=True)
+        tracker.finish_phase("grids", "cached", detail="walk grid cache hit")
+        return {size: cached_grids[size] for size in grid_sizes_m}
 
     walk_grids: dict[int, list[dict[str, Any]]] = {}
     for size in grid_sizes_m:
@@ -556,7 +783,12 @@ def phase_grids_impl(
         tracker.set_live_work("grids", detail=f"{size}m walk scoring")
         started_at = time.perf_counter()
         print("           walk scoring  ...", end=" ", flush=True)
-        score_cells(walk_cells, walk_counts_by_node, walk_cell_nodes_by_size[size])
+        score_cells(
+            walk_cells,
+            walk_counts_by_node,
+            walk_cell_nodes_by_size[size],
+            walk_park_area_units_by_node,
+        )
         walk_scores = [cell["total"] for cell in walk_cells]
         print(f"{_score_summary(walk_scores)} {elapsed(started_at)}")
         _record_substep(tracker, "grids", "walk_scoring", started_at, force_log=True)

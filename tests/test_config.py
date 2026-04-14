@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import time
 from unittest import TestCase, mock
 
 import config
@@ -67,9 +68,100 @@ class ConfigHashTests(TestCase):
         with mock.patch.object(config, "PMTILES_SCHEMA_VERSION", 2):
             current_hashes = config.build_config_hashes()
 
+        self.assertEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
         self.assertEqual(previous_hashes.score_hash, current_hashes.score_hash)
         self.assertNotEqual(previous_hashes.render_hash, current_hashes.render_hash)
         self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
+
+    def test_caps_changes_invalidate_score_hash_but_reuse_surface_shell_hash(self) -> None:
+        with mock.patch.object(config, "CAPS", {"shops": 5, "transport": 5, "healthcare": 3, "parks": 2}):
+            previous_hashes = config.build_config_hashes()
+        with mock.patch.object(config, "CAPS", {"shops": 7, "transport": 5, "healthcare": 3, "parks": 2}):
+            current_hashes = config.build_config_hashes()
+
+        self.assertEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+
+    def test_build_profiles_produce_distinct_config_hashes_and_build_keys(self) -> None:
+        full_hashes = config.build_config_hashes(profile="full")
+        dev_hashes = config.build_config_hashes(profile="dev")
+        full_build = config.build_hashes_for_import("import-fingerprint-123", profile="full")
+        dev_build = config.build_hashes_for_import("import-fingerprint-123", profile="dev")
+
+        self.assertEqual(full_hashes.geo_hash, dev_hashes.geo_hash)
+        self.assertEqual(full_hashes.reach_hash, dev_hashes.reach_hash)
+        self.assertEqual(full_hashes.score_hash, dev_hashes.score_hash)
+        self.assertNotEqual(full_hashes.config_hash, dev_hashes.config_hash)
+        self.assertNotEqual(full_hashes.render_hash, dev_hashes.render_hash)
+        self.assertEqual(full_build.geo_hash, dev_build.geo_hash)
+        self.assertEqual(full_build.reach_hash, dev_build.reach_hash)
+        self.assertEqual(full_build.score_hash, dev_build.score_hash)
+        self.assertNotEqual(full_build.build_key, dev_build.build_key)
+        self.assertEqual(full_build.build_profile, "full")
+        self.assertEqual(dev_build.build_profile, "dev")
+
+
+class SurfaceResolutionTests(TestCase):
+    def test_surface_resolution_ladder_matches_architecture(self) -> None:
+        self.assertEqual(config.COARSE_VECTOR_RESOLUTIONS_M, [20000, 10000, 5000])
+        self.assertEqual(config.FINE_RESOLUTIONS_M, [2500, 1000, 500, 250, 100, 50])
+        self.assertEqual(config.CANONICAL_BASE_RESOLUTION_M, 50)
+
+    def test_dev_profile_has_coarse_only_surface_settings(self) -> None:
+        dev_settings = config.build_profile_settings("dev")
+
+        self.assertEqual(list(dev_settings.coarse_vector_resolutions_m), [20000, 10000, 5000])
+        self.assertEqual(list(dev_settings.fine_resolutions_m), [])
+        self.assertEqual(
+            list(dev_settings.surface_zoom_breaks),
+            [(10, 5000), (8, 10000), (0, 20000)],
+        )
+        self.assertFalse(dev_settings.fine_surface_enabled)
+
+    def test_resolution_for_zoom_uses_fixed_breaks(self) -> None:
+        expectations = {
+            0: 20000,
+            7: 20000,
+            8: 10000,
+            9: 10000,
+            10: 5000,
+            11: 5000,
+            12: 2500,
+            13: 1000,
+            14: 500,
+            15: 250,
+            16: 100,
+            17: 100,
+            18: 50,
+            19: 50,
+        }
+        for zoom, resolution in expectations.items():
+            with self.subTest(zoom=zoom):
+                self.assertEqual(config.resolution_for_zoom(zoom), resolution)
+
+    def test_zoom_bounds_for_resolution_match_runtime_contract(self) -> None:
+        self.assertEqual(config.zoom_bounds_for_resolution(20000), (0, 7))
+        self.assertEqual(config.zoom_bounds_for_resolution(10000), (8, 9))
+        self.assertEqual(config.zoom_bounds_for_resolution(5000), (10, 11))
+        self.assertEqual(config.zoom_bounds_for_resolution(2500), (12, 12))
+        self.assertEqual(config.zoom_bounds_for_resolution(1000), (13, 13))
+        self.assertEqual(config.zoom_bounds_for_resolution(500), (14, 14))
+        self.assertEqual(config.zoom_bounds_for_resolution(250), (15, 15))
+        self.assertEqual(config.zoom_bounds_for_resolution(100), (16, 17))
+        self.assertEqual(config.zoom_bounds_for_resolution(50), (18, 19))
+
+    def test_dev_resolution_for_zoom_uses_coarse_only_breaks(self) -> None:
+        expectations = {
+            0: 20000,
+            7: 20000,
+            8: 10000,
+            9: 10000,
+            10: 5000,
+            19: 5000,
+        }
+        for zoom, resolution in expectations.items():
+            with self.subTest(zoom=zoom):
+                self.assertEqual(config.resolution_for_zoom(zoom, profile="dev"), resolution)
 
     def test_grid_geometry_schema_version_changes_score_hash(self) -> None:
         with mock.patch.object(config, "GRID_GEOMETRY_SCHEMA_VERSION", 1):
@@ -81,6 +173,35 @@ class ConfigHashTests(TestCase):
         self.assertEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
         self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
         self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
+
+    def test_coastal_cleanup_algorithm_version_changes_geo_hash_and_downstream_hashes(self) -> None:
+        with mock.patch.object(config, "COASTAL_CLEANUP_ALGORITHM_VERSION", 1):
+            previous_hashes = config.build_config_hashes()
+        with mock.patch.object(config, "COASTAL_CLEANUP_ALGORITHM_VERSION", 2):
+            current_hashes = config.build_config_hashes()
+
+        self.assertNotEqual(previous_hashes.geo_hash, current_hashes.geo_hash)
+        self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+        self.assertNotEqual(previous_hashes.render_hash, current_hashes.render_hash)
+        self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
+
+
+class SurfaceThreadEnvTests(TestCase):
+    def test_surface_thread_env_accepts_positive_integer(self) -> None:
+        with mock.patch.dict(os.environ, {"LIVABILITY_SURFACE_THREADS": "5"}, clear=False):
+            self.assertEqual(config._optional_positive_int_env("LIVABILITY_SURFACE_THREADS"), 5)
+
+    def test_surface_thread_env_treats_blank_as_unset(self) -> None:
+        with mock.patch.dict(os.environ, {"LIVABILITY_SURFACE_THREADS": "   "}, clear=False):
+            self.assertIsNone(config._optional_positive_int_env("LIVABILITY_SURFACE_THREADS"))
+
+    def test_surface_thread_env_rejects_invalid_values(self) -> None:
+        for raw_value in ("0", "-1", "nope"):
+            with self.subTest(raw_value=raw_value):
+                with mock.patch.dict(os.environ, {"LIVABILITY_SURFACE_THREADS": raw_value}, clear=False):
+                    with self.assertRaisesRegex(RuntimeError, "positive integer"):
+                        config._optional_positive_int_env("LIVABILITY_SURFACE_THREADS")
 
 
 class LocalOsmExtractValidationTests(TestCase):
@@ -104,3 +225,34 @@ class LocalOsmExtractValidationTests(TestCase):
             extract.write_bytes(b"pbf")
 
             self.assertEqual(config.validate_local_osm_extract(extract), extract)
+
+
+class ExtractFingerprintTests(TestCase):
+    def test_extract_fingerprint_ignores_path_and_mtime_for_identical_content(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            temp_dir = Path(tmp_name)
+            first = temp_dir / "first.osm.pbf"
+            second = temp_dir / "second.osm.pbf"
+
+            first.write_bytes(b"same extract bytes")
+            time.sleep(0.01)
+            second.write_bytes(b"same extract bytes")
+
+            first_fingerprint = config.extract_fingerprint(first)
+            second_fingerprint = config.extract_fingerprint(second)
+
+            self.assertEqual(first_fingerprint, second_fingerprint)
+
+    def test_extract_fingerprint_changes_when_content_changes(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            temp_dir = Path(tmp_name)
+            first = temp_dir / "first.osm.pbf"
+            second = temp_dir / "second.osm.pbf"
+
+            first.write_bytes(b"extract version one")
+            second.write_bytes(b"extract version two")
+
+            self.assertNotEqual(
+                config.extract_fingerprint(first),
+                config.extract_fingerprint(second),
+            )

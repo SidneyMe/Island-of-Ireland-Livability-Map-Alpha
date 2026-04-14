@@ -12,8 +12,9 @@ def run_render_from_db(
     *,
     host: str = DEFAULT_SERVER_HOST,
     port: int = DEFAULT_SERVER_PORT,
+    profile: str = "full",
 ) -> str:
-    return serve_livability_app(host=host, port=port)
+    return serve_livability_app(host=host, port=port, profile=profile)
 
 
 __all__ = [

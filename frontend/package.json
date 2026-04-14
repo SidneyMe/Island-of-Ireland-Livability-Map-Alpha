@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "dev": "vite"
+    "dev": "vite",
+    "test": "node src/runtime_contract.test.js"
   },
   "dependencies": {
     "maplibre-gl": "^4.7.1",

@@ -2,14 +2,18 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { Protocol } from "pmtiles";
 import "./main.css";
+import {
+  buildStyle as buildRuntimeStyle,
+  fineSurfaceEnabled as runtimeFineSurfaceEnabled,
+  resolutionForZoom as runtimeResolutionForZoom
+} from "./runtime_contract.js";
 
-// Wire the pmtiles:// protocol into MapLibre once at module load.
 const protocol = new Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
 
-const BASEMAP_RASTER = "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png";
 const MIN_ZOOM = 5;
-const MAX_ZOOM = 14;
+const DEBUG_GRID_QUERY_PARAM = "debug-grid";
+const SCORE_SECTIONS = ["shops", "transport", "healthcare", "parks"];
 
 const elements = {
   statusPill: document.getElementById("status-pill"),
@@ -30,7 +34,9 @@ const state = {
   map: null,
   popup: null,
   panelHidden: false,
-  enabledAmenityCategories: new Set()
+  enabledAmenityCategories: new Set(),
+  gridVisible: true,
+  debugGridVisible: false
 };
 
 function updateStatus(message) {
@@ -44,16 +50,30 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
+function fineSurfaceEnabled() {
+  return runtimeFineSurfaceEnabled(state.runtime);
+}
+
+function resolutionForZoom(zoom) {
+  return runtimeResolutionForZoom(state.runtime, zoom);
+}
+
+function formatResolutionLabel(resolutionM) {
+  const resolution = Number(resolutionM);
+  if (resolution >= 1000) {
+    const km = resolution / 1000;
+    return Number.isInteger(km) ? km + "km" : km.toFixed(1) + "km";
+  }
+  return resolution + "m";
+}
+
 function setResolutionChip() {
   if (!state.map) {
     elements.resolutionChip.textContent = "Grid --";
     return;
   }
-  const zoom = state.map.getZoom();
-  let resolution = "20km";
-  if (zoom >= 11) resolution = "5km";
-  else if (zoom >= 8) resolution = "10km";
-  elements.resolutionChip.textContent = "Grid " + resolution;
+  const resolution = resolutionForZoom(state.map.getZoom());
+  elements.resolutionChip.textContent = "Grid " + formatResolutionLabel(resolution);
 }
 
 function updateAmenityNote() {
@@ -69,80 +89,23 @@ function updatePanelVisibility() {
   elements.panelToggle.setAttribute("aria-expanded", state.panelHidden ? "false" : "true");
 }
 
-function gridFillColorExpression() {
-  // GPU-side data-driven choropleth on total_score (0..100, viridis-ish).
-  return [
-    "interpolate",
-    ["linear"],
-    ["coalesce", ["get", "total_score"], 0],
-    0, "#440154",
-    25, "#3b528b",
-    50, "#21908c",
-    75, "#5dc863",
-    100, "#fde725"
-  ];
-}
-
-function amenityCircleColorExpression(colors) {
-  const expr = ["match", ["get", "category"]];
-  Object.keys(colors).forEach(function (category) {
-    expr.push(category, colors[category]);
+function applyGridVisibility() {
+  if (!state.map) return;
+  const visibility = state.gridVisible ? "visible" : "none";
+  state.map.setLayoutProperty("grid-fill-coarse", "visibility", visibility);
+  if (!fineSurfaceEnabled()) return;
+  (state.runtime.fine_resolutions_m || []).forEach(function (resolutionM) {
+    state.map.setLayoutProperty("surface-" + resolutionM, "visibility", visibility);
   });
-  expr.push("#888888");
-  return expr;
 }
 
-function buildStyle(runtime) {
-  const colors = runtime.category_colors || {};
-  const pmtilesUrl = "pmtiles://" + window.location.origin + (runtime.pmtiles_url || "/tiles/livability.pmtiles");
-  return {
-    version: 8,
-    glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-    sources: {
-      basemap: {
-        type: "raster",
-        tiles: [BASEMAP_RASTER],
-        tileSize: 256,
-        attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
-      },
-      livability: {
-        type: "vector",
-        url: pmtilesUrl
-      }
-    },
-    layers: [
-      { id: "basemap", type: "raster", source: "basemap" },
-      {
-        id: "grid-fill",
-        type: "fill",
-        source: "livability",
-        "source-layer": "grid",
-        paint: {
-          "fill-color": gridFillColorExpression(),
-          "fill-opacity": 0.55,
-          "fill-outline-color": "rgba(0,0,0,0.15)"
-        }
-      },
-      {
-        id: "amenities-circle",
-        type: "circle",
-        source: "livability",
-        "source-layer": "amenities",
-        layout: { visibility: "none" },
-        filter: ["in", ["get", "category"], ["literal", []]],
-        paint: {
-          "circle-radius": [
-            "interpolate", ["linear"], ["zoom"],
-            9, 2,
-            14, 5
-          ],
-          "circle-color": amenityCircleColorExpression(colors),
-          "circle-stroke-color": "#ffffff",
-          "circle-stroke-width": 1
-        }
-      }
-    ]
-  };
+function applyDebugGridVisibility() {
+  if (!state.map) return;
+  state.map.setLayoutProperty(
+    "grid-fill-debug",
+    "visibility",
+    state.debugGridVisible ? "visible" : "none"
+  );
 }
 
 function applyAmenityFilter() {
@@ -197,30 +160,31 @@ function buildAmenityControls() {
   updateAmenityNote();
 }
 
-function gridPopupHtml(properties) {
-  const score = Number(properties.total_score || 0).toFixed(1);
-  const sections = [
-    ["Shops", properties.count_shops || 0, properties.score_shops || 0],
-    ["Transport", properties.count_transport || 0, properties.score_transport || 0],
-    ["Healthcare", properties.count_healthcare || 0, properties.score_healthcare || 0],
-    ["Parks", properties.count_parks || 0, properties.score_parks || 0]
-  ];
-  const listHtml = sections
-    .map(function (section) {
-      return (
-        "<li><strong>" + section[0] + "</strong>: " +
-        Number(section[2]).toFixed(1) + " points, " + section[1] + " found</li>"
-      );
-    })
-    .join("");
-  return (
-    '<div class="popup-content">' +
-      "<h3>Walk score " + score + " / 100</h3>" +
-      "<p>Cell " + escapeHtml(properties.cell_id || "unknown") + "</p>" +
-      "<p>Resolution: " + escapeHtml(String(properties.resolution_m || "?")) + "m</p>" +
-      "<ul>" + listHtml + "</ul>" +
-    "</div>"
-  );
+function maybeBuildDebugGridControl() {
+  const url = new URL(window.location.href);
+  if (url.searchParams.get(DEBUG_GRID_QUERY_PARAM) !== "1") return;
+  const gridSection = elements.gridToggle.closest(".panel-section");
+  if (!gridSection) return;
+
+  const label = document.createElement("label");
+  label.className = "toggle-row";
+  label.htmlFor = "grid-debug-toggle";
+
+  const text = document.createElement("span");
+  text.textContent = "Show coarse vector debug grid";
+
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  input.id = "grid-debug-toggle";
+  input.checked = false;
+  input.addEventListener("change", function () {
+    state.debugGridVisible = input.checked;
+    applyDebugGridVisibility();
+  });
+
+  label.appendChild(text);
+  label.appendChild(input);
+  gridSection.appendChild(label);
 }
 
 function amenityPopupHtml(properties) {
@@ -230,6 +194,68 @@ function amenityPopupHtml(properties) {
       "<p>" + escapeHtml(properties.source_ref || "OSM feature") + "</p>" +
     "</div>"
   );
+}
+
+function inspectPopupHtml(payload) {
+  if (!payload.valid_land) {
+    return (
+      '<div class="popup-content">' +
+        "<h3>No land cell</h3>" +
+        "<p>The canonical 50m surface is transparent at this location.</p>" +
+        "<p>Visible grid: " + escapeHtml(formatResolutionLabel(payload.visible_resolution_m || 50)) + "</p>" +
+      "</div>"
+    );
+  }
+
+  const listHtml = SCORE_SECTIONS.map(function (category) {
+    const title = category.charAt(0).toUpperCase() + category.slice(1);
+    const count = Number((payload.counts || {})[category] || 0);
+    const score = Number((payload.component_scores || {})[category] || 0).toFixed(1);
+    return "<li><strong>" + title + "</strong>: " + score + " points, " + count + " found</li>";
+  }).join("");
+
+  return (
+    '<div class="popup-content">' +
+      "<h3>Walk score " + Number(payload.total_score || 0).toFixed(1) + " / 100</h3>" +
+      "<p>Exact surface: " + escapeHtml(formatResolutionLabel(payload.resolution_m || 50)) + "</p>" +
+      "<p>Visible grid: " + escapeHtml(formatResolutionLabel(payload.visible_resolution_m || payload.resolution_m || 50)) + "</p>" +
+      "<p>Land coverage: " + (Number(payload.effective_area_ratio || 0) * 100).toFixed(0) + "%</p>" +
+      "<ul>" + listHtml + "</ul>" +
+    "</div>"
+  );
+}
+
+function coarseGridPopupHtml(properties) {
+  const listHtml = SCORE_SECTIONS.map(function (category) {
+    const title = category.charAt(0).toUpperCase() + category.slice(1);
+    const count = Number(properties["count_" + category] || 0);
+    const score = Number(properties["score_" + category] || 0).toFixed(1);
+    return "<li><strong>" + title + "</strong>: " + score + " points, " + count + " found</li>";
+  }).join("");
+
+  return (
+    '<div class="popup-content">' +
+      "<h3>Walk score " + Number(properties.total_score || 0).toFixed(1) + " / 100</h3>" +
+      "<p>Visible grid: " + escapeHtml(formatResolutionLabel(properties.resolution_m || resolutionForZoom(state.map.getZoom()))) + "</p>" +
+      "<ul>" + listHtml + "</ul>" +
+    "</div>"
+  );
+}
+
+async function fetchInspect(lngLat) {
+  const params = new URLSearchParams({
+    lat: String(lngLat.lat),
+    lon: String(lngLat.lng),
+    zoom: String(state.map.getZoom())
+  });
+  const response = await fetch(String(state.runtime.inspect_url) + "?" + params.toString());
+  if (!response.ok) {
+    const payload = await response.json().catch(function () {
+      return {};
+    });
+    throw new Error(payload.error || response.statusText);
+  }
+  return response.json();
 }
 
 function wireUi() {
@@ -252,9 +278,8 @@ function wireUi() {
   });
 
   elements.gridToggle.addEventListener("change", function () {
-    if (!state.map) return;
-    const visibility = elements.gridToggle.checked ? "visible" : "none";
-    state.map.setLayoutProperty("grid-fill", "visibility", visibility);
+    state.gridVisible = elements.gridToggle.checked;
+    applyGridVisibility();
   });
 
   window.addEventListener("resize", function () {
@@ -265,11 +290,11 @@ function wireUi() {
 function initializeMap() {
   state.map = new maplibregl.Map({
     container: elements.map,
-    style: buildStyle(state.runtime),
+    style: buildRuntimeStyle(state.runtime, { windowOrigin: window.location.origin }),
     center: [state.runtime.map_center.lon, state.runtime.map_center.lat],
     zoom: state.runtime.default_zoom || 6,
     minZoom: MIN_ZOOM,
-    maxZoom: MAX_ZOOM,
+    maxZoom: Number(state.runtime.max_zoom || 19),
     attributionControl: false,
     hash: false
   });
@@ -288,6 +313,9 @@ function initializeMap() {
 
   state.map.on("load", function () {
     setResolutionChip();
+    applyGridVisibility();
+    applyDebugGridVisibility();
+    applyAmenityFilter();
     updateStatus("");
     elements.statusPill.style.display = "none";
   });
@@ -295,28 +323,43 @@ function initializeMap() {
   state.map.on("zoom", setResolutionChip);
   state.map.on("zoomend", setResolutionChip);
 
-  state.map.on("click", "grid-fill", function (event) {
-    const feature = event.features && event.features[0];
-    if (!feature) return;
-    state.popup
-      .setLngLat(event.lngLat)
-      .setHTML(gridPopupHtml(feature.properties || {}))
-      .addTo(state.map);
+  state.map.on("click", async function (event) {
+    const amenityFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["amenities-circle"] });
+    if (amenityFeatures.length > 0) {
+      state.popup
+        .setLngLat(event.lngLat)
+        .setHTML(amenityPopupHtml(amenityFeatures[0].properties || {}))
+        .addTo(state.map);
+      return;
+    }
+
+    if (fineSurfaceEnabled()) {
+      try {
+        const payload = await fetchInspect(event.lngLat);
+        state.popup
+          .setLngLat(event.lngLat)
+          .setHTML(inspectPopupHtml(payload))
+          .addTo(state.map);
+      } catch (error) {
+        updateStatus(error.message || "Inspect failed");
+        elements.statusPill.style.display = "";
+      }
+      return;
+    }
+
+    const gridFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["grid-fill-coarse"] });
+    if (gridFeatures.length > 0) {
+      state.popup
+        .setLngLat(event.lngLat)
+        .setHTML(coarseGridPopupHtml(gridFeatures[0].properties || {}))
+        .addTo(state.map);
+    }
   });
 
-  state.map.on("click", "amenities-circle", function (event) {
-    const feature = event.features && event.features[0];
-    if (!feature) return;
-    state.popup
-      .setLngLat(event.lngLat)
-      .setHTML(amenityPopupHtml(feature.properties || {}))
-      .addTo(state.map);
-  });
-
-  state.map.on("mouseenter", "grid-fill", function () {
+  state.map.on("mouseenter", "amenities-circle", function () {
     state.map.getCanvas().style.cursor = "pointer";
   });
-  state.map.on("mouseleave", "grid-fill", function () {
+  state.map.on("mouseleave", "amenities-circle", function () {
     state.map.getCanvas().style.cursor = "";
   });
 
@@ -329,7 +372,9 @@ function initializeMap() {
 
 function initializeApp(runtime) {
   state.runtime = runtime;
+  state.gridVisible = true;
   buildAmenityControls();
+  maybeBuildDebugGridControl();
   wireUi();
   updatePanelVisibility();
   initializeMap();

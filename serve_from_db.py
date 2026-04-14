@@ -9,15 +9,22 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from config import (
+    CACHE_DIR,
     CATEGORY_COLORS,
     DEFAULT_SERVER_HOST,
     DEFAULT_SERVER_PORT,
-    HASHES,
     OSM_EXTRACT_PATH,
-    PMTILES_OUTPUT_PATH,
+    SURFACE_DEFAULT_ZOOM,
+    SURFACE_MAX_ZOOM,
+    build_config_hashes,
+    build_profile_settings,
+    normalize_build_profile,
+    pmtiles_output_path,
+    pmtiles_url_path,
+    profile_fine_surface_enabled,
 )
 from db_postgis import (
     build_engine,
@@ -25,6 +32,7 @@ from db_postgis import (
     load_available_resolutions,
     load_runtime_manifest,
 )
+from precompute import surface as _surface
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -32,13 +40,22 @@ INDEX_HTML_PATH = STATIC_DIR / "index.html"
 MISSING_PRECOMPUTE_MESSAGE = "No PostGIS precompute found for current config"
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
+SURFACE_TILE_RE = re.compile(r"^/tiles/surface/(\d+)/(\d+)/(\d+)/(\d+)\.png$")
 
 
-def _missing_precompute_message(reason: str | None = None) -> str:
+def _missing_precompute_message(
+    reason: str | None = None,
+    *,
+    profile: str = "full",
+    config_hash: str | None = None,
+) -> str:
+    normalized_profile = normalize_build_profile(profile)
+    resolved_hash = config_hash or build_config_hashes(normalized_profile).config_hash
+    precompute_flag = "--precompute-dev" if normalized_profile == "dev" else "--precompute"
     message = (
         f"{MISSING_PRECOMPUTE_MESSAGE} "
-        f"(config_hash={HASHES.config_hash}, extract_path={OSM_EXTRACT_PATH}). "
-        "Run --precompute first."
+        f"(profile={normalized_profile}, config_hash={resolved_hash}, extract_path={OSM_EXTRACT_PATH}). "
+        f"Run {precompute_flag} first."
     )
     if reason:
         return f"{message} Reason: {reason}."
@@ -48,43 +65,138 @@ def _missing_precompute_message(reason: str | None = None) -> str:
 @dataclass(frozen=True)
 class RuntimeState:
     build_key: str
+    build_profile: str
     map_center: dict[str, float]
-    resolutions: list[int]
+    coarse_vector_resolutions: list[int]
+    fine_resolutions: list[int]
+    surface_zoom_breaks: list[tuple[int, int]]
     amenity_counts: dict[str, int]
+    fine_surface_enabled: bool
+    surface_shell_dir: Path | None
+    surface_score_dir: Path | None
+    surface_tile_dir: Path | None
 
 
 class RuntimeService:
-    def __init__(self, engine) -> None:
+    def __init__(self, engine, *, profile: str = "full") -> None:
         self._engine = engine
+        self._profile = normalize_build_profile(profile)
+        self._profile_settings = build_profile_settings(self._profile)
+        self._hashes = build_config_hashes(self._profile)
+        self._pmtiles_url = pmtiles_url_path(self._profile)
         self._state: RuntimeState | None = None
+        self._surface_runtime: _surface.FineSurfaceRuntime | None = None
+
+    @staticmethod
+    def _resolution_list(values: Any, fallback: list[int]) -> list[int]:
+        if not isinstance(values, list):
+            return [int(value) for value in fallback]
+        return [int(value) for value in values]
+
+    @staticmethod
+    def _zoom_breaks(values: Any, fallback: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        if not isinstance(values, list):
+            return [(int(min_zoom), int(resolution_m)) for min_zoom, resolution_m in fallback]
+        normalized: list[tuple[int, int]] = []
+        for entry in values:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                continue
+            normalized.append((int(entry[0]), int(entry[1])))
+        if normalized:
+            return normalized
+        return [(int(min_zoom), int(resolution_m)) for min_zoom, resolution_m in fallback]
 
     def _load_state(self) -> RuntimeState:
         manifest = load_runtime_manifest(
             self._engine,
             extract_path=str(OSM_EXTRACT_PATH),
-            config_hash=HASHES.config_hash,
+            config_hash=self._hashes.config_hash,
         )
         if manifest is None:
-            raise RuntimeError(_missing_precompute_message())
+            raise RuntimeError(
+                _missing_precompute_message(
+                    profile=self._profile,
+                    config_hash=self._hashes.config_hash,
+                )
+            )
 
         summary_json = manifest.get("summary_json", {}) or {}
         resolutions = load_available_resolutions(self._engine, manifest["build_key"])
         if not resolutions:
-            raise RuntimeError(_missing_precompute_message("incomplete build: no walk rows found"))
+            raise RuntimeError(
+                _missing_precompute_message(
+                    "incomplete build: no walk rows found",
+                    profile=self._profile,
+                    config_hash=self._hashes.config_hash,
+                )
+            )
 
         map_center = summary_json.get("map_center")
         if not map_center:
-            raise RuntimeError(_missing_precompute_message("missing map center in manifest"))
+            raise RuntimeError(
+                _missing_precompute_message(
+                    "missing map center in manifest",
+                    profile=self._profile,
+                    config_hash=self._hashes.config_hash,
+                )
+            )
 
         amenity_counts = {
             category: int((summary_json.get("amenity_counts", {}) or {}).get(category, 0))
             for category in sorted(CATEGORY_COLORS)
         }
+        profile_name = str(summary_json.get("build_profile") or self._profile)
+        fine_resolutions = self._resolution_list(
+            summary_json.get("fine_resolutions_m"),
+            list(self._profile_settings.fine_resolutions_m),
+        )
+        surface_zoom_breaks = self._zoom_breaks(
+            summary_json.get("surface_zoom_breaks"),
+            list(self._profile_settings.surface_zoom_breaks),
+        )
+        fine_surface_enabled = False
+        surface_shell_dir: Path | None = None
+        surface_score_dir: Path | None = None
+        surface_tile_dir: Path | None = None
+        if profile_fine_surface_enabled(self._profile):
+            surface_shell_hash = _surface.build_surface_shell_hash(str(manifest["reach_hash"]))
+            surface_shell_dir = _surface.surface_shell_dir(
+                CACHE_DIR,
+                surface_shell_hash=surface_shell_hash,
+            )
+            surface_score_dir = _surface.surface_score_dir(
+                CACHE_DIR,
+                score_hash=str(manifest["score_hash"]),
+            )
+            surface_tile_dir = _surface.surface_tile_dir(
+                CACHE_DIR,
+                score_hash=str(manifest["score_hash"]),
+                render_hash=str(manifest["render_hash"]),
+            )
+            _surface.ensure_surface_tile_cache_manifest(
+                surface_tile_dir,
+                score_hash=str(manifest["score_hash"]),
+                render_hash=str(manifest["render_hash"]),
+            )
+            fine_surface_enabled = _surface.surface_analysis_ready(
+                surface_shell_dir,
+                surface_score_dir,
+                expected_surface_shell_hash=surface_shell_hash,
+                expected_score_hash=str(manifest["score_hash"]),
+            )
+
         return RuntimeState(
             build_key=str(manifest["build_key"]),
+            build_profile=profile_name,
             map_center={"lat": float(map_center["lat"]), "lon": float(map_center["lon"])},
-            resolutions=[int(value) for value in resolutions],
+            coarse_vector_resolutions=[int(value) for value in resolutions],
+            fine_resolutions=fine_resolutions,
+            surface_zoom_breaks=surface_zoom_breaks,
             amenity_counts=amenity_counts,
+            fine_surface_enabled=fine_surface_enabled,
+            surface_shell_dir=surface_shell_dir,
+            surface_score_dir=surface_score_dir,
+            surface_tile_dir=surface_tile_dir,
         )
 
     def state(self) -> RuntimeState:
@@ -93,16 +205,64 @@ class RuntimeService:
         return self._state
 
     def get_runtime(self) -> dict[str, Any]:
+        payload = self._get_runtime_base()
+        state = self.state()
+        if state.fine_surface_enabled:
+            payload["surface_tile_url_template"] = "/tiles/surface/{resolution_m}/{z}/{x}/{y}.png"
+            payload["inspect_url"] = "/api/inspect"
+        return payload
+
+    def _get_runtime_base(self) -> dict[str, Any]:
         state = self.state()
         return {
             "build_key": state.build_key,
+            "build_profile": state.build_profile,
             "map_center": state.map_center,
-            "grid_sizes_m": state.resolutions,
+            "grid_sizes_m": state.coarse_vector_resolutions,
+            "coarse_vector_resolutions_m": state.coarse_vector_resolutions,
+            "fine_resolutions_m": list(state.fine_resolutions) if state.fine_surface_enabled else [],
+            "surface_zoom_breaks": [
+                {"min_zoom": int(min_zoom), "resolution_m": int(resolution_m)}
+                for min_zoom, resolution_m in state.surface_zoom_breaks
+            ],
             "amenity_counts": state.amenity_counts,
             "category_colors": CATEGORY_COLORS,
-            "default_zoom": 6,
-            "pmtiles_url": "/tiles/livability.pmtiles",
+            "default_zoom": SURFACE_DEFAULT_ZOOM,
+            "max_zoom": SURFACE_MAX_ZOOM,
+            "fine_surface_enabled": state.fine_surface_enabled,
+            "pmtiles_url": self._pmtiles_url,
         }
+
+    def surface_runtime(self) -> _surface.FineSurfaceRuntime:
+        state = self.state()
+        if (
+            not state.fine_surface_enabled
+            or state.surface_shell_dir is None
+            or state.surface_score_dir is None
+            or state.surface_tile_dir is None
+        ):
+            raise RuntimeError("Fine surface runtime is unavailable for this build.")
+        if self._surface_runtime is None:
+            self._surface_runtime = _surface.FineSurfaceRuntime(
+                state.surface_shell_dir,
+                state.surface_score_dir,
+                state.surface_tile_dir,
+            )
+        return self._surface_runtime
+
+    def get_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> bytes:
+        normalized_resolution = int(resolution_m)
+        if normalized_resolution not in self.state().fine_resolutions:
+            raise ValueError(f"Unsupported fine surface resolution: {resolution_m}")
+        return self.surface_runtime().render_tile(
+            resolution_m=normalized_resolution,
+            z=int(z),
+            x=int(x),
+            y=int(y),
+        )
+
+    def inspect(self, *, lat: float, lon: float, zoom: float | None = None) -> dict[str, Any]:
+        return self.surface_runtime().inspect(lat=float(lat), lon=float(lon), zoom=zoom)
 
 
 class LivabilityHTTPServer(ThreadingHTTPServer):
@@ -115,12 +275,14 @@ class LivabilityHTTPServer(ThreadingHTTPServer):
         static_dir: Path,
         index_html: bytes,
         pmtiles_path: Path,
+        pmtiles_url_path: str,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.service = service
         self.static_dir = static_dir.resolve()
         self.index_html = index_html
         self.pmtiles_path = pmtiles_path
+        self.pmtiles_url_path = str(pmtiles_url_path)
 
 
 class LivabilityRequestHandler(BaseHTTPRequestHandler):
@@ -149,7 +311,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         # MapLibre/PMTiles will send HEAD for the archive on some flows.
         parsed = urlsplit(self.path)
-        if parsed.path == "/tiles/livability.pmtiles":
+        if parsed.path == self.livability_server.pmtiles_url_path:
             try:
                 self._serve_pmtiles(head_only=True)
             except CLIENT_DISCONNECT_ERRORS as exc:
@@ -169,14 +331,27 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
                 "text/html; charset=utf-8",
             )
             return
-        if parsed.path == "/tiles/livability.pmtiles":
+        if parsed.path == self.livability_server.pmtiles_url_path:
             self._serve_pmtiles()
+            return
+        surface_match = SURFACE_TILE_RE.match(parsed.path)
+        if surface_match:
+            resolution_m, z, x, y = (int(value) for value in surface_match.groups())
+            self._serve_surface_tile(
+                resolution_m=resolution_m,
+                z=z,
+                x=x,
+                y=y,
+            )
             return
         if parsed.path.startswith("/static/"):
             self._serve_static(self.livability_server.static_dir / parsed.path.removeprefix("/static/"))
             return
         if parsed.path == "/api/runtime":
             self._write_json(HTTPStatus.OK, self.livability_server.service.get_runtime())
+            return
+        if parsed.path == "/api/inspect":
+            self._serve_inspect(parsed.query)
             return
         self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
@@ -254,6 +429,42 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
+    def _serve_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> None:
+        payload = self.livability_server.service.get_surface_tile(
+            resolution_m=resolution_m,
+            z=z,
+            x=x,
+            y=y,
+        )
+        self._write_bytes(
+            HTTPStatus.OK,
+            payload,
+            "image/png",
+            extra_headers={"Cache-Control": "public, max-age=3600"},
+        )
+
+    def _serve_inspect(self, raw_query: str) -> None:
+        query = parse_qs(raw_query, keep_blank_values=False)
+        try:
+            lat = float(query["lat"][0])
+            lon = float(query["lon"][0])
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ValueError("inspect requires numeric lat and lon query parameters") from exc
+
+        zoom_value: float | None = None
+        if "zoom" in query and query["zoom"]:
+            try:
+                zoom_value = float(query["zoom"][0])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("inspect zoom must be numeric when provided") from exc
+
+        payload = self.livability_server.service.inspect(
+            lat=lat,
+            lon=lon,
+            zoom=zoom_value,
+        )
+        self._write_json(HTTPStatus.OK, payload)
+
     def _try_write_json(self, path: str, status: HTTPStatus, payload: dict[str, Any]) -> bool:
         try:
             self._write_json(status, payload)
@@ -299,29 +510,34 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         print(f"Client disconnected during {path}: {exc}")
 
 
-def build_runtime_service() -> RuntimeService:
+def build_runtime_service(*, profile: str = "full") -> RuntimeService:
     engine = build_engine()
     ensure_database_ready(engine)
-    return RuntimeService(engine)
+    return RuntimeService(engine, profile=profile)
 
 
 def create_http_server(
     *,
     service: RuntimeService | None = None,
+    profile: str = "full",
     host: str = DEFAULT_SERVER_HOST,
     port: int = DEFAULT_SERVER_PORT,
     static_dir: Path = STATIC_DIR,
-    pmtiles_path: Path = PMTILES_OUTPUT_PATH,
+    pmtiles_path: Path | None = None,
 ) -> LivabilityHTTPServer:
-    runtime_service = service or build_runtime_service()
+    normalized_profile = normalize_build_profile(profile)
+    resolved_pmtiles_path = pmtiles_path or pmtiles_output_path(normalized_profile)
+    resolved_pmtiles_url_path = pmtiles_url_path(normalized_profile)
+    runtime_service = service or build_runtime_service(profile=normalized_profile)
     index_html_path = static_dir / "index.html"
     if not index_html_path.exists():
         raise RuntimeError(f"static index.html not found at {index_html_path}")
     index_html = index_html_path.read_bytes()
-    if not pmtiles_path.exists():
+    if not resolved_pmtiles_path.exists():
+        precompute_flag = "--precompute-dev" if normalized_profile == "dev" else "--precompute"
         raise RuntimeError(
-            f"PMTiles archive not found at {pmtiles_path}. "
-            "Run --precompute to bake it before serving; the map cannot load without it."
+            f"PMTiles archive not found at {resolved_pmtiles_path}. "
+            f"Run {precompute_flag} to bake it before serving; the map cannot load without it."
         )
     return LivabilityHTTPServer(
         (host, int(port)),
@@ -329,7 +545,8 @@ def create_http_server(
         service=runtime_service,
         static_dir=static_dir,
         index_html=index_html,
-        pmtiles_path=pmtiles_path,
+        pmtiles_path=resolved_pmtiles_path,
+        pmtiles_url_path=resolved_pmtiles_url_path,
     )
 
 
@@ -337,12 +554,14 @@ def serve_livability_app(
     *,
     host: str = DEFAULT_SERVER_HOST,
     port: int = DEFAULT_SERVER_PORT,
+    profile: str = "full",
 ) -> str:
-    httpd = create_http_server(host=host, port=port)
+    normalized_profile = normalize_build_profile(profile)
+    httpd = create_http_server(host=host, port=port, profile=normalized_profile)
     bound_host, bound_port = httpd.server_address[:2]
     url = f"http://{bound_host}:{bound_port}/"
     print("Phase R1 - serving      ... done")
-    print(f"Serving livability MapLibre app -> {url}")
+    print(f"Serving livability MapLibre app ({normalized_profile}) -> {url}")
     print("Press Ctrl+C to stop.")
     try:
         httpd.serve_forever()

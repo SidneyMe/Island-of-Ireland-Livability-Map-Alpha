@@ -7,11 +7,10 @@ from typing import Any
 
 from config import (
     CACHE_DIR,
-    PMTILES_OUTPUT_PATH,
     CACHE_SCHEMA_VERSION,
     CAPS,
     FORCE_RECOMPUTE,
-    GRID_SIZES_M,
+    LIVABILITY_SURFACE_THREADS,
     MANIFEST_NAME,
     OSM_EXTRACT_PATH,
     OUTPUT_HTML,
@@ -20,10 +19,13 @@ from config import (
     WALKGRAPH_BIN,
     WALKGRAPH_BBOX_PADDING_M,
     WALK_RADIUS_M,
-    ZOOM_BREAKS,
     build_hashes_for_import,
+    build_profile_settings,
     current_normalization_scope_hash,
+    normalize_build_profile,
     package_snapshot,
+    pmtiles_output_path,
+    profile_fine_surface_enabled,
     python_version,
 )
 from db_postgis import (
@@ -49,6 +51,7 @@ from . import grid as _grid
 from . import network as _network
 from . import phases as _phases
 from . import publish as _publish
+from . import surface as _surface
 from . import tiers as _tiers
 from . import workflow as _workflow
 from .bake_pmtiles import bake_pmtiles as _bake_pmtiles
@@ -56,10 +59,15 @@ from .bake_pmtiles import bake_pmtiles as _bake_pmtiles
 
 @dataclass
 class _BuildState:
+    profile: str
+    settings: Any
     hashes: Any
     geo_cache_dir: Path
     reach_cache_dir: Path
     score_cache_dir: Path
+    surface_shell_dir: Path
+    surface_score_dir: Path
+    surface_tile_dir: Path
     tier_valid: dict[Path, bool] = field(default_factory=dict)
     tiers_building: set[Path] = field(default_factory=set)
     source_state: Any = None
@@ -68,22 +76,58 @@ class _BuildState:
 
     @classmethod
     def bootstrap(cls) -> _BuildState:
-        hashes = build_hashes_for_import("bootstrap")
+        profile = normalize_build_profile()
+        settings = build_profile_settings(profile)
+        hashes = build_hashes_for_import("bootstrap", profile=profile)
         return cls(
+            profile=profile,
+            settings=settings,
             hashes=hashes,
             geo_cache_dir=CACHE_DIR / f"geo_{hashes.geo_hash}",
             reach_cache_dir=CACHE_DIR / f"reach_{hashes.reach_hash}",
             score_cache_dir=CACHE_DIR / f"score_{hashes.score_hash}",
+            surface_shell_dir=_surface.surface_shell_dir(
+                CACHE_DIR,
+                surface_shell_hash=hashes.surface_shell_hash,
+            ),
+            surface_score_dir=_surface.surface_score_dir(
+                CACHE_DIR,
+                score_hash=hashes.score_hash,
+            ),
+            surface_tile_dir=_surface.surface_tile_dir(
+                CACHE_DIR,
+                score_hash=hashes.score_hash,
+                render_hash=hashes.render_hash,
+            ),
         )
 
-    def activate(self, import_fingerprint: str) -> None:
-        self.hashes = build_hashes_for_import(import_fingerprint)
+    def activate(self, import_fingerprint: str, *, profile: str) -> None:
+        self.profile = normalize_build_profile(profile)
+        self.settings = build_profile_settings(self.profile)
+        self.hashes = build_hashes_for_import(import_fingerprint, profile=self.profile)
         self.geo_cache_dir = CACHE_DIR / f"geo_{self.hashes.geo_hash}"
         self.reach_cache_dir = CACHE_DIR / f"reach_{self.hashes.reach_hash}"
         self.score_cache_dir = CACHE_DIR / f"score_{self.hashes.score_hash}"
+        self.surface_shell_dir = _surface.surface_shell_dir(
+            CACHE_DIR,
+            surface_shell_hash=self.hashes.surface_shell_hash,
+        )
+        self.surface_score_dir = _surface.surface_score_dir(
+            CACHE_DIR,
+            score_hash=self.hashes.score_hash,
+        )
+        self.surface_tile_dir = _surface.surface_tile_dir(
+            CACHE_DIR,
+            score_hash=self.hashes.score_hash,
+            render_hash=self.hashes.render_hash,
+        )
 
 
 _STATE = _BuildState.bootstrap()
+
+
+def _active_fine_surface_enabled() -> bool:
+    return profile_fine_surface_enabled(_STATE.profile)
 
 
 def cache_exists(key: str, cache_dir: Path) -> bool:
@@ -218,6 +262,15 @@ def _can_finalize_reach_tier(
     )
 
 
+def _surface_analysis_ready() -> bool:
+    return _surface.surface_analysis_ready(
+        _STATE.surface_shell_dir,
+        _STATE.surface_score_dir,
+        expected_surface_shell_hash=_STATE.hashes.surface_shell_hash,
+        expected_score_hash=_STATE.hashes.score_hash,
+    )
+
+
 def validate_all_tiers() -> None:
     _tiers.validate_all_tiers(
         geo_cache_dir=_STATE.geo_cache_dir,
@@ -231,7 +284,7 @@ def validate_all_tiers() -> None:
         cache_schema_version=CACHE_SCHEMA_VERSION,
         cache_load_for_finalize=_cache_load_for_finalize,
         cache_load_large_for_finalize=_cache_load_large_for_finalize,
-        grid_sizes_m=list(GRID_SIZES_M),
+        grid_sizes_m=list(_STATE.settings.grid_sizes_m),
         tier_valid=_STATE.tier_valid,
     )
 
@@ -248,6 +301,38 @@ def print_cache_status() -> None:
         render_hash=_STATE.hashes.render_hash,
         manifest_name=MANIFEST_NAME,
     )
+    for label, directory in (
+        ("surface_shell", _STATE.surface_shell_dir),
+        ("surface_scores", _STATE.surface_score_dir),
+        ("surface_tiles", _STATE.surface_tile_dir),
+    ):
+        manifest = _surface.load_surface_manifest(directory)
+        if manifest is None:
+            print(f"  {label}  {directory.name}  (no manifest)")
+            continue
+        shard_inventory = manifest.get("shard_inventory", [])
+        completed_shards = manifest.get("completed_shards")
+        total_shards = manifest.get("total_shards")
+        shard_progress = None
+        if isinstance(total_shards, int) and total_shards >= 0:
+            completed_value = (
+                int(completed_shards)
+                if isinstance(completed_shards, int) and completed_shards >= 0
+                else 0
+            )
+            shard_progress = f"{completed_value}/{int(total_shards)}"
+        elif isinstance(shard_inventory, list):
+            shard_progress = str(len(shard_inventory))
+            if label == "surface_shell" and manifest.get("status") == "building":
+                shard_dir = directory / "shards"
+                existing_files = len(list(shard_dir.glob("*.npz"))) if shard_dir.exists() else 0
+                if existing_files > 0:
+                    shard_progress = str(existing_files)
+        print(
+            f"  {label}  {directory.name}  "
+            f"status={manifest.get('status', '?')}  "
+            f"shards={shard_progress if shard_progress is not None else 0}"
+        )
 
 
 def _elapsed(started_at: float) -> str:
@@ -272,12 +357,21 @@ snap_amenities = _network.snap_amenities
 normalize_origin_node_ids = _network.normalize_origin_node_ids
 precompute_counts_by_node = _network.precompute_counts_by_node
 precompute_walk_counts_by_origin_node = _network.precompute_walk_counts_by_origin_node
+precompute_walk_weighted_totals_by_origin_node = _network.precompute_walk_weighted_totals_by_origin_node
 score_cell = _grid.score_cell
 score_cells = _grid.score_cells
 
 
 def _score_grid_fast_path_candidate() -> bool:
-    return all(cache_exists(f"walk_cells_{size}", _STATE.score_cache_dir) for size in GRID_SIZES_M)
+    coarse_ready = all(
+        cache_exists(f"walk_cells_{size}", _STATE.score_cache_dir)
+        for size in _STATE.settings.grid_sizes_m
+    )
+    if not coarse_ready:
+        return False
+    if not _active_fine_surface_enabled():
+        return True
+    return _surface_analysis_ready()
 
 
 def snap_cells_to_nodes(graph, cells: list[dict[str, Any]], key: str, cache_dir: Path) -> list[int]:
@@ -359,6 +453,7 @@ def phase_networks(
 def phase_reachability(
     walk_graph,
     amenity_data: dict[str, list[tuple[float, float]]],
+    amenity_source_rows: list[dict[str, Any]],
     tracker: PrecomputeProgressTracker,
     *,
     walk_origin_node_ids,
@@ -366,6 +461,7 @@ def phase_reachability(
     return _phases.phase_reachability_impl(
         walk_graph,
         amenity_data,
+        amenity_source_rows,
         tracker,
         walk_origin_node_ids=walk_origin_node_ids,
         cache_dir=_STATE.reach_cache_dir,
@@ -381,6 +477,7 @@ def phase_reachability(
         snap_amenities=snap_amenities,
         normalize_origin_node_ids=normalize_origin_node_ids,
         precompute_walk_counts_by_origin_node=precompute_walk_counts_by_origin_node,
+        precompute_walk_weighted_totals_by_origin_node=precompute_walk_weighted_totals_by_origin_node,
     )
 
 
@@ -388,14 +485,16 @@ def phase_grids(
     engine,
     study_area_metric,
     amenity_data: dict[str, list[tuple[float, float]]],
+    amenity_source_rows: list[dict[str, Any]],
     tracker: PrecomputeProgressTracker,
 ):
     return _phases.phase_grids_impl(
         engine,
         study_area_metric,
         amenity_data,
+        amenity_source_rows,
         tracker,
-        grid_sizes_m=list(GRID_SIZES_M),
+        grid_sizes_m=list(_STATE.settings.grid_sizes_m),
         cache_dir=_STATE.score_cache_dir,
         score_hash=_STATE.hashes.score_hash,
         tiers_building=_STATE.tiers_building,
@@ -413,6 +512,18 @@ def phase_grids(
         clone_grid_shells=_clone_grid_shells,
         snap_cells_to_nodes=snap_cells_to_nodes,
         score_cells=score_cells,
+        fine_surface_enabled=_active_fine_surface_enabled(),
+        reach_hash=_STATE.hashes.reach_hash,
+        surface_shell_hash=_STATE.hashes.surface_shell_hash,
+        surface_shell_dir=_STATE.surface_shell_dir,
+        surface_score_dir=_STATE.surface_score_dir,
+        ensure_surface_shell_cache=_surface.ensure_surface_shell_cache,
+        ensure_surface_score_cache=_surface.ensure_surface_score_cache,
+        collect_surface_origin_nodes=_surface.collect_surface_origin_nodes,
+        surface_analysis_ready=_surface.surface_analysis_ready,
+        graph_dir=_STATE.geo_cache_dir / "walk_graph",
+        walkgraph_bin=WALKGRAPH_BIN,
+        surface_threads=LIVABILITY_SURFACE_THREADS,
     )
 
 
@@ -456,11 +567,13 @@ def _summary_json(
         walk_grids,
         amenity_data,
         hashes=_STATE.hashes,
+        build_profile=_STATE.profile,
         source_state=_STATE.source_state,
         osm_extract_path=OSM_EXTRACT_PATH,
-        grid_sizes_m=list(GRID_SIZES_M),
+        grid_sizes_m=list(_STATE.settings.grid_sizes_m),
+        fine_resolutions_m=list(_STATE.settings.fine_resolutions_m),
         output_html=OUTPUT_HTML,
-        zoom_breaks=ZOOM_BREAKS,
+        zoom_breaks=list(_STATE.settings.surface_zoom_breaks),
     )
 
 
@@ -468,16 +581,22 @@ def run_precompute(
     force_precompute: bool = False,
     *,
     auto_refresh_import: bool = False,
+    profile: str = "full",
 ) -> str:
+    normalized_profile = normalize_build_profile(profile)
     return _workflow.run_precompute_impl(
         force_precompute=force_precompute,
         auto_refresh_import=auto_refresh_import,
         cache_dir=CACHE_DIR,
-        current_normalization_scope_hash=current_normalization_scope_hash,
+        build_profile=normalized_profile,
+        current_normalization_scope_hash=lambda: current_normalization_scope_hash(normalized_profile),
         build_engine=build_engine,
         ensure_database_ready=ensure_database_ready,
         resolve_source_state=resolve_source_state,
-        activate_build_hashes=_STATE.activate,
+        activate_build_hashes=lambda import_fingerprint: _STATE.activate(
+            import_fingerprint,
+            profile=normalized_profile,
+        ),
         print_cache_status=print_cache_status,
         validate_all_tiers=validate_all_tiers,
         phase_geometry=phase_geometry,
@@ -496,12 +615,14 @@ def run_precompute(
         python_version=python_version,
         get_hashes=lambda: _STATE.hashes,
         set_source_state=lambda source_state: setattr(_STATE, "source_state", source_state),
+        fine_surface_ready=_surface_analysis_ready if profile_fine_surface_enabled(normalized_profile) else None,
         bake_pmtiles=_bake_pmtiles,
-        pmtiles_output_path=PMTILES_OUTPUT_PATH,
+        pmtiles_output_path=pmtiles_output_path(normalized_profile),
     )
 
 
 def refresh_local_import(force_refresh: bool = True) -> str:
+    normalized_profile = normalize_build_profile()
     return _workflow.run_import_refresh_impl(
         force_refresh=force_refresh,
         cache_dir=CACHE_DIR,
@@ -509,7 +630,10 @@ def refresh_local_import(force_refresh: bool = True) -> str:
         build_engine=build_engine,
         ensure_database_ready=ensure_database_ready,
         resolve_source_state=resolve_source_state,
-        activate_build_hashes=_STATE.activate,
+        activate_build_hashes=lambda import_fingerprint: _STATE.activate(
+            import_fingerprint,
+            profile=normalized_profile,
+        ),
         phase_geometry=phase_geometry,
         import_payload_ready=import_payload_ready,
         ensure_local_osm_import=ensure_local_osm_import,

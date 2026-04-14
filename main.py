@@ -21,6 +21,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run derived livability precompute using the existing raw OSM import state.",
     )
     parser.add_argument(
+        "--precompute-dev",
+        action="store_true",
+        help="Run the coarse-only dev precompute profile using the existing raw OSM import state.",
+    )
+    parser.add_argument(
         "--render",
         action="store_true",
         help="Start the local MapLibre web app (legacy alias for --serve).",
@@ -31,6 +36,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Start the local MapLibre web app from static assets and PostGIS runtime data.",
     )
     parser.add_argument(
+        "--render-dev",
+        action="store_true",
+        help="Start the coarse-only dev MapLibre web app (legacy alias for --serve-dev).",
+    )
+    parser.add_argument(
+        "--serve-dev",
+        action="store_true",
+        help="Start the coarse-only dev MapLibre web app from static assets and PostGIS runtime data.",
+    )
+    parser.add_argument(
         "--force-precompute",
         action="store_true",
         help="Rebuild and replace the current PostGIS build even if a complete manifest already exists.",
@@ -38,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--auto-refresh-import",
         action="store_true",
-        help="Allow --precompute to refresh raw OSM import state when it is missing instead of failing fast.",
+        help="Allow --precompute/--precompute-dev to refresh raw OSM import state when it is missing instead of failing fast.",
     )
     parser.add_argument(
         "--host",
@@ -58,29 +73,39 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.force_precompute and not args.precompute:
-        parser.error("--force-precompute requires --precompute")
-    if args.auto_refresh_import and not args.precompute:
-        parser.error("--auto-refresh-import requires --precompute")
+    precompute_requested = args.precompute or args.precompute_dev
+    serve_full_requested = args.render or args.serve
+    serve_dev_requested = args.render_dev or args.serve_dev
 
-    run_render = args.render or args.serve or (not args.precompute and not args.refresh_import)
+    if args.precompute and args.precompute_dev:
+        parser.error("--precompute and --precompute-dev are mutually exclusive")
+    if serve_full_requested and serve_dev_requested:
+        parser.error("--serve/--render and --serve-dev/--render-dev are mutually exclusive")
+    if args.force_precompute and not precompute_requested:
+        parser.error("--force-precompute requires --precompute or --precompute-dev")
+    if args.auto_refresh_import and not precompute_requested:
+        parser.error("--auto-refresh-import requires --precompute or --precompute-dev")
+
+    run_render = serve_full_requested or serve_dev_requested or (not precompute_requested and not args.refresh_import)
+    serve_profile = "dev" if serve_dev_requested else "full"
 
     try:
         if args.refresh_import:
             from precompute import refresh_local_import as _refresh_local_import
 
             _refresh_local_import()
-        if args.precompute:
+        if precompute_requested:
             from precompute import run_precompute as _run_precompute
 
             _run_precompute(
+                profile="dev" if args.precompute_dev else "full",
                 force_precompute=args.force_precompute,
                 auto_refresh_import=args.auto_refresh_import,
             )
         if run_render:
             from render_from_db import run_render_from_db as _run_render_from_db
 
-            _run_render_from_db(host=args.host, port=args.port)
+            _run_render_from_db(profile=serve_profile, host=args.host, port=args.port)
     except (RuntimeError, ModuleNotFoundError) as exc:
         print(str(exc))
         return 1

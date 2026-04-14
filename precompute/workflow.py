@@ -26,6 +26,7 @@ def _bootstrap_workflow_context(
 def _print_build_context(source_state, hashes) -> None:
     print(f"Local extract: {source_state.extract_path}")
     print(f"Import fingerprint: {source_state.import_fingerprint}")
+    print(f"Build profile: {getattr(hashes, 'build_profile', 'full')}")
     print(f"Config hash: {hashes.config_hash}")
     print(f"Build key: {hashes.build_key}")
     print()
@@ -141,6 +142,7 @@ def run_precompute_impl(
     force_precompute: bool = False,
     auto_refresh_import: bool = False,
     *,
+    build_profile: str = "full",
     cache_dir: Path,
     current_normalization_scope_hash,
     build_engine,
@@ -165,11 +167,12 @@ def run_precompute_impl(
     python_version,
     get_hashes,
     set_source_state,
+    fine_surface_ready=None,
     bake_pmtiles=None,
     pmtiles_output_path: Path | None = None,
 ) -> str:
     total_started_at = time.perf_counter()
-    print("=== Livability Score Map Precompute ===\n")
+    print(f"=== Livability Score Map Precompute ({build_profile}) ===\n")
 
     engine, source_state, hashes = _bootstrap_workflow_context(
         build_engine=build_engine,
@@ -184,27 +187,33 @@ def run_precompute_impl(
     if has_complete_build(engine, hashes.build_key) and not force_precompute:
         bake_configured = _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path)
         pmtiles_missing = bake_configured and not pmtiles_output_path.exists()
-        if not pmtiles_missing:
+        surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
+        if not pmtiles_missing and not surface_missing:
             print(
                 f"Complete PostGIS precompute already exists for build_key={hashes.build_key}. "
                 "Skipping. Use --force-precompute to rebuild."
             )
             return hashes.build_key
+        if not surface_missing:
+            print(
+                f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
+                f"but PMTiles archive is missing at {pmtiles_output_path}. "
+                "Re-baking PMTiles only."
+            )
+            bake_seconds = _run_pmtiles_bake(
+                bake_pmtiles=bake_pmtiles,
+                engine=engine,
+                build_key=hashes.build_key,
+                pmtiles_output_path=pmtiles_output_path,
+            )
+            print(
+                f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
+            )
+            return hashes.build_key
         print(
-            f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
-            f"but PMTiles archive is missing at {pmtiles_output_path}. "
-            "Re-baking PMTiles only."
+            f"Complete coarse PostGIS build exists for build_key={hashes.build_key}, "
+            "but the fine surface cache is missing. Rebuilding fine raster artifacts."
         )
-        bake_seconds = _run_pmtiles_bake(
-            bake_pmtiles=bake_pmtiles,
-            engine=engine,
-            build_key=hashes.build_key,
-            pmtiles_output_path=pmtiles_output_path,
-        )
-        print(
-            f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
-        )
-        return hashes.build_key
 
     normalization_scope_hash = current_normalization_scope_hash()
     import_was_ready = import_payload_ready(
@@ -254,6 +263,7 @@ def run_precompute_impl(
         engine,
         study_area_metric,
         amenity_data,
+        amenity_source_rows,
         tracker,
     )
     print()
