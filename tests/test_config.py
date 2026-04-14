@@ -204,6 +204,70 @@ class SurfaceThreadEnvTests(TestCase):
                         config._optional_positive_int_env("LIVABILITY_SURFACE_THREADS")
 
 
+class WalkgraphBinResolutionTests(TestCase):
+    def _write_walkgraph_bin(self, base_dir: Path, relative_path: str) -> str:
+        candidate = base_dir / "walkgraph" / "target" / Path(relative_path)
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        candidate.write_text("walkgraph")
+        return str(candidate)
+
+    def test_default_walkgraph_bin_prefers_windows_release_exe(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            base_dir = Path(tmp_name)
+            expected = self._write_walkgraph_bin(base_dir, "release/walkgraph.exe")
+            self._write_walkgraph_bin(base_dir, "release/walkgraph")
+
+            with (
+                mock.patch.object(config, "BASE_DIR", base_dir),
+                mock.patch.object(config.os, "name", "nt"),
+            ):
+                self.assertEqual(config._default_walkgraph_bin(), expected)
+
+    def test_default_walkgraph_bin_prefers_posix_release_binary(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            base_dir = Path(tmp_name)
+            expected = self._write_walkgraph_bin(base_dir, "release/walkgraph")
+            self._write_walkgraph_bin(base_dir, "release/walkgraph.exe")
+
+            with (
+                mock.patch.object(config, "BASE_DIR", base_dir),
+                mock.patch.object(config.os, "name", "posix"),
+            ):
+                self.assertEqual(config._default_walkgraph_bin(), expected)
+
+    def test_default_walkgraph_bin_returns_debug_binary_when_release_missing(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            base_dir = Path(tmp_name)
+            expected = self._write_walkgraph_bin(base_dir, "debug/walkgraph")
+
+            with (
+                mock.patch.object(config, "BASE_DIR", base_dir),
+                mock.patch.object(config.os, "name", "posix"),
+            ):
+                self.assertEqual(config._default_walkgraph_bin(), expected)
+
+    def test_default_walkgraph_bin_finds_alternate_suffix_when_only_one_exists(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            base_dir = Path(tmp_name)
+            expected = self._write_walkgraph_bin(base_dir, "release/walkgraph.exe")
+
+            with (
+                mock.patch.object(config, "BASE_DIR", base_dir),
+                mock.patch.object(config.os, "name", "posix"),
+            ):
+                self.assertEqual(config._default_walkgraph_bin(), expected)
+
+    def test_default_walkgraph_bin_falls_back_to_path_lookup(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            base_dir = Path(tmp_name)
+
+            with (
+                mock.patch.object(config, "BASE_DIR", base_dir),
+                mock.patch.object(config.os, "name", "nt"),
+            ):
+                self.assertEqual(config._default_walkgraph_bin(), "walkgraph")
+
+
 class LocalOsmExtractValidationTests(TestCase):
     def test_validate_local_osm_extract_rejects_pdf_typo(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "not a PDF"):

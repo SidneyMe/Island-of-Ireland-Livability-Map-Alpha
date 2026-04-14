@@ -649,6 +649,52 @@ class DbReadTests(TestCase):
         self.assertEqual(rows[0]["effective_area_ratio"], 0.8)
         self.assertEqual(rows[0]["centre_geom"], "centre-geom-2")
 
+    def test_load_point_scores_for_build_short_circuits_empty_points(self) -> None:
+        engine = mock.MagicMock()
+
+        rows = db_postgis.load_point_scores_for_build(engine, "build-key", [])
+
+        self.assertEqual(rows, [])
+        engine.connect.assert_not_called()
+
+    def test_load_point_scores_for_build_uses_st_covers_and_smallest_resolution(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.mappings.return_value.all.return_value = [
+            {
+                "point_id": "pt-1",
+                "lat": 53.4,
+                "lon": -6.2,
+                "resolution_m": 5000,
+                "total_score": 61.5,
+                "scores_json": {"shops": 10.0},
+                "counts_json": {"shops": 2},
+            }
+        ]
+
+        rows = db_postgis.load_point_scores_for_build(
+            engine,
+            "build-key",
+            [
+                {"id": "pt-1", "lat": 53.4, "lon": -6.2},
+                {"id": "pt-2", "lat": 53.5, "lon": -6.3},
+            ],
+        )
+
+        statement = str(connection.execute.call_args.args[0])
+        params = connection.execute.call_args.args[1]
+
+        self.assertIn("ST_Covers", statement)
+        self.assertIn("ORDER BY g.resolution_m ASC", statement)
+        self.assertEqual(params["build_key"], "build-key")
+        self.assertEqual(params["point_id_0"], "pt-1")
+        self.assertEqual(params["lat_0"], 53.4)
+        self.assertEqual(params["lon_0"], -6.2)
+        self.assertEqual(rows[0]["resolution_m"], 5000)
+        self.assertEqual(rows[0]["total_score"], 61.5)
+        self.assertEqual(rows[0]["scores_json"], {"shops": 10.0})
+        self.assertEqual(rows[0]["counts_json"], {"shops": 2})
+
 
 class TextCleanupTests(TestCase):
     def test_lua_no_network_ways(self) -> None:
