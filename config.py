@@ -34,7 +34,7 @@ NI_BOUNDARY_PATH = BOUNDARIES_DIR / "osni_open_data_largescale_boundaries_ni_out
 NI_BOUNDARY_LAYER = None
 
 
-OSM_EXTRACT_NAME = "ireland-and-northern-ireland-260405.osm.pbf"
+OSM_EXTRACT_NAME = "ireland-and-northern-ireland-latest.osm.pbf"
 OSM_EXTRACT_PATH = OSM_DIR / OSM_EXTRACT_NAME
 OSM_IMPORT_SCHEMA = "osm_raw"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
@@ -60,13 +60,12 @@ def _optional_positive_int_env(name: str) -> int | None:
 
 def _default_walkgraph_bin() -> str:
     walkgraph_dir = BASE_DIR / "walkgraph" / "target"
-    candidates = [
-        walkgraph_dir / "release" / "walkgraph.exe",
-        walkgraph_dir / "debug" / "walkgraph.exe",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return str(candidate)
+    suffixes = (".exe", "") if os.name == "nt" else ("", ".exe")
+    for build_kind in ("release", "debug"):
+        for suffix in suffixes:
+            candidate = walkgraph_dir / build_kind / f"walkgraph{suffix}"
+            if candidate.exists():
+                return str(candidate)
     return "walkgraph"
 
 
