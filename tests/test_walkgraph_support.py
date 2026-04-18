@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, mock
@@ -72,9 +73,10 @@ class WalkgraphSupportTests(TestCase):
             cargo_toml.write_text("[package]\nname='walkgraph'\n", encoding="utf-8")
             main_rs.write_text("fn main() {}\n", encoding="utf-8")
 
-            os.utime(binary_path, ns=(1_000_000_000, 1_000_000_000))
-            os.utime(cargo_toml, ns=(2_000_000_000, 2_000_000_000))
-            os.utime(main_rs, ns=(3_000_000_000, 3_000_000_000))
+            base_ns = time.time_ns()
+            os.utime(binary_path, ns=(base_ns - 30_000_000_000, base_ns - 30_000_000_000))
+            os.utime(cargo_toml, ns=(base_ns - 20_000_000_000, base_ns - 20_000_000_000))
+            os.utime(main_rs, ns=(base_ns - 10_000_000_000, base_ns - 10_000_000_000))
 
             with (
                 mock.patch.object(walkgraph_support, "WALKGRAPH_PROJECT_DIR", project_dir),
@@ -105,9 +107,10 @@ class WalkgraphSupportTests(TestCase):
             cargo_toml.write_text("[package]\nname='walkgraph'\n", encoding="utf-8")
             main_rs.write_text("fn main() {}\n", encoding="utf-8")
 
-            os.utime(external_binary, ns=(1_000_000_000, 1_000_000_000))
-            os.utime(cargo_toml, ns=(4_000_000_000, 4_000_000_000))
-            os.utime(main_rs, ns=(5_000_000_000, 5_000_000_000))
+            base_ns = time.time_ns()
+            os.utime(external_binary, ns=(base_ns - 30_000_000_000, base_ns - 30_000_000_000))
+            os.utime(cargo_toml, ns=(base_ns - 20_000_000_000, base_ns - 20_000_000_000))
+            os.utime(main_rs, ns=(base_ns - 10_000_000_000, base_ns - 10_000_000_000))
 
             with (
                 mock.patch.object(walkgraph_support, "WALKGRAPH_PROJECT_DIR", project_dir),

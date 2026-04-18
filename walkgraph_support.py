@@ -62,6 +62,16 @@ def _repo_local_binary_is_stale(binary_path: Path) -> bool:
     return latest_source_mtime_ns > 0 and binary_mtime_ns < latest_source_mtime_ns
 
 
+def _coerce_completed_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 @lru_cache(maxsize=None)
 def _probe_walkgraph_help(binary_path: str) -> str:
     try:
@@ -73,7 +83,14 @@ def _probe_walkgraph_help(binary_path: str) -> str:
         )
     except FileNotFoundError as exc:
         raise walkgraph_runtime_error(f"walkgraph binary '{binary_path}' was not found.") from exc
-    output = "\n".join(part for part in (completed.stdout, completed.stderr) if part).strip()
+    output = "\n".join(
+        part
+        for part in (
+            _coerce_completed_output(completed.stdout),
+            _coerce_completed_output(completed.stderr),
+        )
+        if part
+    ).strip()
     if completed.returncode != 0:
         detail = (
             f"Unable to inspect walkgraph binary '{binary_path}' via '--help'."
