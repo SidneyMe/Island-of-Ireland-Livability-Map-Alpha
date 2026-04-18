@@ -330,12 +330,16 @@ pub fn run_surface(args: SurfaceArgs) -> Result<(), Box<dyn Error + Send + Sync>
             shards_to_build.push(entry);
             continue;
         }
+        let x_min_i32 = i32::try_from(entry.x_min_m)
+            .expect("shard x_min_m exceeds i32 range");
+        let y_min_i32 = i32::try_from(entry.y_min_m)
+            .expect("shard y_min_m exceeds i32 range");
         let is_valid = validate_shell_npz(
             &out_path,
             entry.cells_per_side,
             entry.cells_per_side,
-            entry.x_min_m as i32,
-            entry.y_min_m as i32,
+            x_min_i32,
+            y_min_i32,
         );
         if is_valid {
             reusable_shards += 1;

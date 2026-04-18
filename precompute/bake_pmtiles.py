@@ -8,19 +8,46 @@ runs the same on Windows, macOS, and Linux.
 The frontend serves this archive statically via HTTP range requests
 (``/tiles/livability.pmtiles``) and renders it on the GPU through MapLibre,
 removing PostGIS from the request hot path entirely.
+
+Parallelism: when ``workers > 1`` the per-tile work (PostGIS round trips +
+``gzip.compress``) is dispatched to a ``ProcessPoolExecutor``. Each worker
+process opens its own SQLAlchemy engine on first use and reuses it across
+chunks. The PMTiles writer accepts out-of-order writes (it sorts entries at
+``finalize()``) so the main thread simply writes results as they arrive.
 """
 
 from __future__ import annotations
 
 import gzip
 import math
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
+from typing import Iterable, Iterator
 
-from pmtiles.tile import Compression, TileType, zxy_to_tileid
+from pmtiles.tile import Compression, TileType, tileid_to_zxy, zxy_to_tileid
 from pmtiles.writer import Writer
 from sqlalchemy import text
 
-from config import zoom_bounds_for_resolution
+from config import BAKE_PMTILES_WORKERS, database_url, zoom_bounds_for_resolution
+
+# The worker lives in a top-level module (not under ``precompute``) so that
+# ``ProcessPoolExecutor`` spawn subprocesses on Windows only re-import the
+# minimal dependency graph for it. Importing ``precompute._bake_worker``
+# would trigger ``precompute/__init__.py`` in each subprocess, which pulls
+# scipy/sklearn/geopandas/pandas/numpy and exhausts the Windows paging file.
+from pmtiles_bake_worker import (  # noqa: E402  (intentional top-level worker)
+    _AMENITY_TILE_SQL,
+    _GRID_TILE_SQL,
+    _LAYER_AMENITIES,
+    _LAYER_GRID,
+    _LAYER_SERVICE_DESERTS,
+    _LAYER_TRANSPORT_REALITY,
+    _SERVICE_DESERT_TILE_SQL,
+    _TRANSPORT_REALITY_TILE_SQL,
+    _bake_chunk_worker,
+    _resolution_for_zoom,
+    _tile_mvt_bytes_by_flags,
+)
 
 
 # Zoom + bbox window for the bake. The frontend min/max zoom mirrors these.
@@ -33,6 +60,11 @@ DEFAULT_BBOX = (-11.0, 51.3, -5.3, 55.5)
 AMENITY_MIN_ZOOM = 9
 TRANSPORT_REALITY_MIN_ZOOM = 9
 GRID_AMENITY_CATEGORIES = ("shops", "transport", "healthcare", "parks")
+
+# Chunk size: how many tile specs go into one worker task. Larger chunks
+# amortize IPC overhead; smaller chunks improve load balancing across zooms.
+# 512 is a happy medium for the Ireland workload (~400 chunks total).
+_CHUNK_SIZE = 512
 
 
 def _grid_layer_fields() -> dict[str, str]:
@@ -107,14 +139,6 @@ def _pmtiles_metadata(
     }
 
 
-def _resolution_for_zoom(zoom: int) -> int:
-    if zoom >= 10:
-        return 5000
-    if zoom >= 8:
-        return 10000
-    return 20000
-
-
 def _lon_to_tile_x(lon: float, zoom: int) -> int:
     return int(math.floor((lon + 180.0) / 360.0 * (1 << zoom)))
 
@@ -144,140 +168,6 @@ def _tile_range_for_bbox(
     return x_min, x_max, y_min, y_max
 
 
-_GRID_TILE_SQL = text(
-    """
-    WITH tile AS (
-        SELECT
-            ST_TileEnvelope(:z, :x, :y) AS env_3857,
-            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
-    ),
-    mvtgeom AS (
-        SELECT
-            g.cell_id,
-            g.resolution_m,
-            g.total_score,
-            COALESCE((g.counts_json ->> 'shops')::integer, 0) AS count_shops,
-            COALESCE((g.scores_json ->> 'shops')::double precision, 0.0) AS score_shops,
-            COALESCE((g.counts_json ->> 'transport')::integer, 0) AS count_transport,
-            COALESCE((g.scores_json ->> 'transport')::double precision, 0.0) AS score_transport,
-            COALESCE((g.counts_json ->> 'healthcare')::integer, 0) AS count_healthcare,
-            COALESCE((g.scores_json ->> 'healthcare')::double precision, 0.0) AS score_healthcare,
-            COALESCE((g.counts_json ->> 'parks')::integer, 0) AS count_parks,
-            COALESCE((g.scores_json ->> 'parks')::double precision, 0.0) AS score_parks,
-            ST_AsMVTGeom(
-                ST_Transform(g.cell_geom, 3857),
-                tile.env_3857,
-                4096,
-                64,
-                true
-            ) AS geom
-        FROM grid_walk AS g, tile
-        WHERE g.build_key = :build_key
-          AND g.resolution_m = :resolution_m
-          AND g.cell_geom && tile.env_4326
-          AND ST_Intersects(g.cell_geom, tile.env_4326)
-    )
-    SELECT ST_AsMVT(mvtgeom, 'grid', 4096, 'geom') FROM mvtgeom
-    """
-)
-
-
-_AMENITY_TILE_SQL = text(
-    """
-    WITH tile AS (
-        SELECT
-            ST_TileEnvelope(:z, :x, :y) AS env_3857,
-            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
-    ),
-    mvtgeom AS (
-        SELECT
-            a.category,
-            a.source,
-            a.source_ref,
-            ST_AsMVTGeom(
-                ST_Transform(a.geom, 3857),
-                tile.env_3857,
-                4096,
-                64,
-                true
-            ) AS geom
-        FROM amenities AS a, tile
-        WHERE a.build_key = :build_key
-          AND a.geom && tile.env_4326
-          AND ST_Intersects(a.geom, tile.env_4326)
-    )
-    SELECT ST_AsMVT(mvtgeom, 'amenities', 4096, 'geom') FROM mvtgeom
-    """
-)
-
-
-_TRANSPORT_REALITY_TILE_SQL = text(
-    """
-    WITH tile AS (
-        SELECT
-            ST_TileEnvelope(:z, :x, :y) AS env_3857,
-            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
-    ),
-    mvtgeom AS (
-        SELECT
-            t.source_ref,
-            t.stop_name,
-            t.feed_id,
-            t.stop_id,
-            t.reality_status,
-            t.source_status,
-            t.school_only_state,
-            t.public_departures_7d,
-            t.public_departures_30d,
-            t.school_only_departures_30d,
-            ST_AsMVTGeom(
-                ST_Transform(t.geom, 3857),
-                tile.env_3857,
-                4096,
-                64,
-                true
-            ) AS geom
-        FROM transport_reality AS t, tile
-        WHERE t.build_key = :build_key
-          AND t.geom && tile.env_4326
-          AND ST_Intersects(t.geom, tile.env_4326)
-    )
-    SELECT ST_AsMVT(mvtgeom, 'transport_reality', 4096, 'geom') FROM mvtgeom
-    """
-)
-
-
-_SERVICE_DESERT_TILE_SQL = text(
-    """
-    WITH tile AS (
-        SELECT
-            ST_TileEnvelope(:z, :x, :y) AS env_3857,
-            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
-    ),
-    mvtgeom AS (
-        SELECT
-            s.cell_id,
-            s.resolution_m,
-            s.baseline_reachable_stop_count,
-            s.reachable_public_departures_7d,
-            ST_AsMVTGeom(
-                ST_Transform(s.cell_geom, 3857),
-                tile.env_3857,
-                4096,
-                64,
-                true
-            ) AS geom
-        FROM service_deserts AS s, tile
-        WHERE s.build_key = :build_key
-          AND s.resolution_m = :resolution_m
-          AND s.cell_geom && tile.env_4326
-          AND ST_Intersects(s.cell_geom, tile.env_4326)
-    )
-    SELECT ST_AsMVT(mvtgeom, 'service_deserts', 4096, 'geom') FROM mvtgeom
-    """
-)
-
-
 _AMENITY_POINT_SQL = text(
     """
     SELECT
@@ -298,81 +188,6 @@ _TRANSPORT_REALITY_POINT_SQL = text(
     WHERE t.build_key = :build_key
     """
 )
-
-
-def _tile_mvt_bytes(
-    connection,
-    *,
-    build_key: str,
-    z: int,
-    x: int,
-    y: int,
-    include_grid: bool,
-    include_amenities: bool,
-    include_transport_reality: bool,
-    include_service_deserts: bool,
-) -> bytes:
-    """Build a single MVT for ``(z, x, y)`` containing both grid and amenities.
-
-    The MVT format is a top-level repeated ``Layer`` message, so two
-    independent ``ST_AsMVT`` calls can simply be concatenated to produce a
-    valid multi-layer tile without any reparsing.
-    """
-    grid_bytes = b""
-    if include_grid:
-        resolution_m = _resolution_for_zoom(z)
-        grid_bytes = (
-            connection.execute(
-                _GRID_TILE_SQL,
-                {
-                    "z": z,
-                    "x": x,
-                    "y": y,
-                    "build_key": build_key,
-                    "resolution_m": resolution_m,
-                },
-            ).scalar()
-            or b""
-        )
-    amenity_bytes = b""
-    if include_amenities:
-        amenity_bytes = (
-            connection.execute(
-                _AMENITY_TILE_SQL,
-                {"z": z, "x": x, "y": y, "build_key": build_key},
-            ).scalar()
-            or b""
-        )
-    transport_reality_bytes = b""
-    if include_transport_reality:
-        transport_reality_bytes = (
-            connection.execute(
-                _TRANSPORT_REALITY_TILE_SQL,
-                {"z": z, "x": x, "y": y, "build_key": build_key},
-            ).scalar()
-            or b""
-        )
-    service_desert_bytes = b""
-    if include_service_deserts:
-        service_desert_bytes = (
-            connection.execute(
-                _SERVICE_DESERT_TILE_SQL,
-                {
-                    "z": z,
-                    "x": x,
-                    "y": y,
-                    "build_key": build_key,
-                    "resolution_m": _resolution_for_zoom(z),
-                },
-            ).scalar()
-            or b""
-        )
-    return (
-        bytes(grid_bytes)
-        + bytes(amenity_bytes)
-        + bytes(transport_reality_bytes)
-        + bytes(service_desert_bytes)
-    )
 
 
 def _load_amenity_points(connection, *, build_key: str) -> list[tuple[float, float]]:
@@ -418,6 +233,142 @@ def _point_tile_coordinates(
     return _amenity_tile_coordinates(points, zoom=zoom, bbox=bbox)
 
 
+def _iter_tile_specs(
+    *,
+    min_zoom: int,
+    max_zoom: int,
+    bbox: tuple[float, float, float, float],
+    amenity_points: list[tuple[float, float]],
+    transport_reality_points: list[tuple[float, float]],
+    coarse_grid_max_zoom: int,
+    amenity_min_zoom: int,
+    transport_reality_min_zoom: int,
+) -> Iterator[tuple[int, int, int, int]]:
+    """Yield ``(z, x, y, layer_bitmask)`` tuples for every tile that will be baked.
+
+    Iteration order matches the original sequential loop (low-zoom bbox scan
+    first, then high-zoom point-derived tiles) so the PMTiles writer still
+    sees an approximately-sorted stream when workers=1.
+    """
+    for zoom in range(min_zoom, max_zoom + 1):
+        include_amenities = zoom >= amenity_min_zoom
+        include_transport_reality = zoom >= transport_reality_min_zoom
+        include_grid = zoom <= coarse_grid_max_zoom
+        include_service_deserts = zoom <= coarse_grid_max_zoom
+
+        layers = 0
+        if include_grid:
+            layers |= _LAYER_GRID
+        if include_amenities:
+            layers |= _LAYER_AMENITIES
+        if include_transport_reality:
+            layers |= _LAYER_TRANSPORT_REALITY
+        if include_service_deserts:
+            layers |= _LAYER_SERVICE_DESERTS
+        if layers == 0:
+            continue
+
+        if include_grid or include_service_deserts:
+            x_min, x_max, y_min, y_max = _tile_range_for_bbox(zoom, bbox)
+            for x in range(x_min, x_max + 1):
+                for y in range(y_min, y_max + 1):
+                    yield zoom, x, y, layers
+            continue
+
+        tile_coords: set[tuple[int, int]] = set()
+        if include_amenities:
+            tile_coords.update(
+                _point_tile_coordinates(amenity_points, zoom=zoom, bbox=bbox)
+            )
+        if include_transport_reality:
+            tile_coords.update(
+                _point_tile_coordinates(transport_reality_points, zoom=zoom, bbox=bbox)
+            )
+        for x, y in sorted(tile_coords):
+            yield zoom, x, y, layers
+
+
+def _chunked(iterable: Iterable, size: int) -> Iterator[list]:
+    chunk: list = []
+    for item in iterable:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def _bake_sequential(
+    connection,
+    *,
+    writer: Writer,
+    build_key: str,
+    tile_specs: Iterator[tuple[int, int, int, int]],
+) -> tuple[int, int, dict[int, int]]:
+    tiles_written = 0
+    tiles_empty = 0
+    per_zoom: dict[int, int] = {}
+    for z, x, y, layers in tile_specs:
+        payload = _tile_mvt_bytes_by_flags(
+            connection,
+            build_key=build_key,
+            z=z,
+            x=x,
+            y=y,
+            layers=layers,
+        )
+        if not payload:
+            tiles_empty += 1
+            continue
+        writer.write_tile(zxy_to_tileid(z, x, y), gzip.compress(payload))
+        tiles_written += 1
+        per_zoom[z] = per_zoom.get(z, 0) + 1
+    return tiles_written, tiles_empty, per_zoom
+
+
+def _bake_parallel(
+    *,
+    writer: Writer,
+    build_key: str,
+    db_url: str,
+    tile_specs: Iterable[tuple[int, int, int, int]],
+    workers: int,
+    total_tile_count: int,
+) -> tuple[int, int, dict[int, int]]:
+    chunks = list(_chunked(tile_specs, _CHUNK_SIZE))
+    tiles_written = 0
+    per_zoom: dict[int, int] = {}
+    completed_specs = 0
+
+    # Report progress roughly every 10% of tiles (but at least every chunk).
+    report_every = max(1, total_tile_count // 10)
+    next_report = report_every
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_bake_chunk_worker, chunk, build_key, db_url)
+            for chunk in chunks
+        ]
+        for chunk_index, future in enumerate(futures):
+            results = future.result()
+            for tileid, blob in results:
+                writer.write_tile(tileid, blob)
+                z = tileid_to_zxy(tileid)[0]
+                per_zoom[z] = per_zoom.get(z, 0) + 1
+                tiles_written += 1
+            completed_specs += len(chunks[chunk_index])
+            if completed_specs >= next_report and total_tile_count > 0:
+                print(
+                    f"  bake progress: {completed_specs:,}/{total_tile_count:,} "
+                    f"specs processed ({tiles_written:,} non-empty so far)"
+                )
+                next_report = completed_specs + report_every
+
+    tiles_empty = max(0, completed_specs - tiles_written)
+    return tiles_written, tiles_empty, per_zoom
+
+
 def bake_pmtiles(
     engine,
     build_key: str,
@@ -428,6 +379,7 @@ def bake_pmtiles(
     max_zoom: int = DEFAULT_MAX_ZOOM,
     amenity_min_zoom: int = AMENITY_MIN_ZOOM,
     transport_reality_min_zoom: int = TRANSPORT_REALITY_MIN_ZOOM,
+    workers: int | None = None,
     **_legacy_kwargs,
 ) -> Path:
     """Bake the build into a PMTiles archive at ``output_path``.
@@ -435,90 +387,67 @@ def bake_pmtiles(
     Iterates every (z, x, y) tile that intersects ``bbox`` between
     ``min_zoom`` and ``max_zoom`` (inclusive), asks PostGIS for the MVT
     bytes, gzips them, and writes them to a PMTiles file. Empty tiles are
-    skipped.
+    skipped. When ``workers > 1`` the per-tile work is dispatched to a
+    ``ProcessPoolExecutor``; each worker opens its own engine on first use.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     min_lon, min_lat, max_lon, max_lat = bbox
 
-    tiles_written = 0
-    tiles_empty = 0
+    resolved_workers = int(workers if workers is not None else BAKE_PMTILES_WORKERS)
+    if resolved_workers < 1:
+        resolved_workers = 1
 
     with output_path.open("wb") as handle, engine.connect() as connection:
         writer = Writer(handle)
         amenity_points = _load_amenity_points(connection, build_key=build_key)
-        transport_reality_points = _load_transport_reality_points(connection, build_key=build_key)
+        transport_reality_points = _load_transport_reality_points(
+            connection, build_key=build_key
+        )
         _, coarse_grid_max_zoom = zoom_bounds_for_resolution(5000)
-        for zoom in range(min_zoom, max_zoom + 1):
-            include_amenities = zoom >= amenity_min_zoom
-            include_transport_reality = zoom >= transport_reality_min_zoom
-            include_grid = zoom <= coarse_grid_max_zoom
-            include_service_deserts = zoom <= coarse_grid_max_zoom
-            zoom_started = tiles_written
-            if include_grid or include_service_deserts:
-                x_min, x_max, y_min, y_max = _tile_range_for_bbox(zoom, bbox)
-                for x in range(x_min, x_max + 1):
-                    for y in range(y_min, y_max + 1):
-                        payload = _tile_mvt_bytes(
-                            connection,
-                            build_key=build_key,
-                            z=zoom,
-                            x=x,
-                            y=y,
-                            include_grid=include_grid,
-                            include_amenities=include_amenities,
-                            include_transport_reality=include_transport_reality,
-                            include_service_deserts=include_service_deserts,
-                        )
-                        if not payload:
-                            tiles_empty += 1
-                            continue
-                        writer.write_tile(zxy_to_tileid(zoom, x, y), gzip.compress(payload))
-                        tiles_written += 1
-                print(
-                    f"  z{zoom}: {tiles_written - zoom_started:,} non-empty tiles "
-                    f"(bbox scan {x_min}..{x_max} x {y_min}..{y_max})"
-                )
-                continue
 
-            tile_coords: set[tuple[int, int]] = set()
-            if include_amenities:
-                tile_coords.update(
-                    _point_tile_coordinates(
-                        amenity_points,
-                        zoom=zoom,
-                        bbox=bbox,
-                    )
-                )
-            if include_transport_reality:
-                tile_coords.update(
-                    _point_tile_coordinates(
-                        transport_reality_points,
-                        zoom=zoom,
-                        bbox=bbox,
-                    )
-                )
-            for x, y in tile_coords:
-                payload = _tile_mvt_bytes(
-                    connection,
-                    build_key=build_key,
-                    z=zoom,
-                    x=x,
-                    y=y,
-                    include_grid=False,
-                    include_amenities=include_amenities,
-                    include_transport_reality=include_transport_reality,
-                    include_service_deserts=False,
-                )
-                if not payload:
-                    tiles_empty += 1
-                    continue
-                writer.write_tile(zxy_to_tileid(zoom, x, y), gzip.compress(payload))
-                tiles_written += 1
-            print(
-                f"  z{zoom}: {tiles_written - zoom_started:,} non-empty tiles "
-                f"(amenity tiles={len(tile_coords):,})"
+        tile_specs_list = list(
+            _iter_tile_specs(
+                min_zoom=min_zoom,
+                max_zoom=max_zoom,
+                bbox=bbox,
+                amenity_points=amenity_points,
+                transport_reality_points=transport_reality_points,
+                coarse_grid_max_zoom=coarse_grid_max_zoom,
+                amenity_min_zoom=amenity_min_zoom,
+                transport_reality_min_zoom=transport_reality_min_zoom,
             )
+        )
+        total_specs = len(tile_specs_list)
+
+        if resolved_workers <= 1 or total_specs == 0:
+            print(f"  bake_pmtiles: sequential ({total_specs:,} tile specs)")
+            tiles_written, tiles_empty, per_zoom = _bake_sequential(
+                connection,
+                writer=writer,
+                build_key=build_key,
+                tile_specs=iter(tile_specs_list),
+            )
+        else:
+            print(
+                f"  bake_pmtiles: parallel, {resolved_workers} workers "
+                f"({total_specs:,} tile specs)"
+            )
+            # Release the main connection while workers run — their own
+            # engines connect independently, and holding an idle connection
+            # just wastes a slot.
+            connection.close()
+            tiles_written, tiles_empty, per_zoom = _bake_parallel(
+                writer=writer,
+                build_key=build_key,
+                db_url=database_url(),
+                tile_specs=tile_specs_list,
+                workers=resolved_workers,
+                total_tile_count=total_specs,
+            )
+
+        for zoom in sorted(per_zoom):
+            print(f"  z{zoom}: {per_zoom[zoom]:,} non-empty tiles")
 
         center_lon = (min_lon + max_lon) / 2.0
         center_lat = (min_lat + max_lat) / 2.0

@@ -527,7 +527,9 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             return False
 
     def _write_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
-        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        body = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":"), default=str
+        ).encode("utf-8")
         use_gzip = "gzip" in (self.headers.get("Accept-Encoding", "") or "").lower()
         if use_gzip:
             body = gzip.compress(body)

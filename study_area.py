@@ -13,6 +13,7 @@ from shapely.ops import transform, unary_union
 
 from config import (
     COASTAL_ARTIFACT_WIDTH_M,
+    COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
     COASTAL_COMPONENT_PRESERVE_AREA_M2,
     M1_CORRIDOR_ANCHORS_WGS84,
     M1_CORRIDOR_BUFFER_M,
@@ -275,10 +276,21 @@ def _cleanup_coastal_component(
     *,
     artifact_width_m: float,
     component_index: int = -1,
+    skip_area_threshold_m2: float = 0.0,
 ):
     original_component = _as_2d(component)
     if original_component is None or original_component.is_empty:
         return "skip", original_component, None
+
+    # Mainland short-circuit: components above the configured area threshold
+    # skip the morphological opening (erode 50m / dilate 50m) entirely. The
+    # cleanup only catches narrow coastal spurs; a mainland body has none, so
+    # spending ~100s on it is wasted work. Default 0.0 disables this gate.
+    if (
+        skip_area_threshold_m2 > 0.0
+        and float(original_component.area) > skip_area_threshold_m2
+    ):
+        return "skipped_large", original_component, None
 
     try:
         opened = _open_coastal_component(
@@ -363,6 +375,7 @@ def _clean_coastal_artifact_components(
     *,
     artifact_width_m: float,
     preserve_area_m2: float,
+    skip_area_threshold_m2: float = 0.0,
     progress_cb=None,
 ):
     parts = [
@@ -395,11 +408,12 @@ def _clean_coastal_artifact_components(
             part,
             artifact_width_m=artifact_width_m,
             component_index=component_index,
+            skip_area_threshold_m2=skip_area_threshold_m2,
         )
         if diagnostic is not None:
             fallback_diagnostics.append(diagnostic)
 
-        if cleanup_mode == "original":
+        if cleanup_mode in ("original", "skipped_large"):
             cleaned_parts.append(cleaned)
         elif cleaned is None or cleaned.is_empty:
             if part.area >= float(preserve_area_m2):
@@ -429,6 +443,7 @@ def clean_coastal_artifacts(
     *,
     artifact_width_m: float = COASTAL_ARTIFACT_WIDTH_M,
     preserve_area_m2: float = COASTAL_COMPONENT_PRESERVE_AREA_M2,
+    skip_area_threshold_m2: float = COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
     progress_cb=None,
 ):
     """Remove ultra-narrow coastal spurs via morphological opening in metric space.
@@ -439,11 +454,15 @@ def clean_coastal_artifacts(
     pruned from the original component so surviving shoreline vertices stay sharp.
     Components that would otherwise be erased entirely are kept if their original
     area is at least *preserve_area_m2* (protects real islands from being discarded).
+    Components whose area exceeds *skip_area_threshold_m2* skip the cleanup entirely
+    (default 0.0 disables the gate; use it to avoid ~100s spent opening the mainland,
+    which has no narrow coastal spurs that would be caught by erode/dilate).
     """
     cleaned_parts, fallback_diagnostics = _clean_coastal_artifact_components(
         geometry,
         artifact_width_m=artifact_width_m,
         preserve_area_m2=preserve_area_m2,
+        skip_area_threshold_m2=skip_area_threshold_m2,
         progress_cb=progress_cb,
     )
 

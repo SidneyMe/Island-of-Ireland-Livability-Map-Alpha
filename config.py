@@ -83,6 +83,19 @@ def _positive_float_env(name: str, default: float) -> float:
     return float(value)
 
 
+def _non_negative_float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return float(default)
+    try:
+        value = float(raw_value.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a non-negative number when set; got {raw_value!r}.") from exc
+    if not math.isfinite(value) or value < 0.0:
+        raise RuntimeError(f"{name} must be a non-negative number when set; got {raw_value!r}.")
+    return float(value)
+
+
 def _default_walkgraph_bin() -> str:
     walkgraph_dir = BASE_DIR / "walkgraph" / "target"
     suffixes = (".exe", "") if os.name == "nt" else ("", ".exe")
@@ -260,6 +273,25 @@ ENABLE_FINE_RASTER_SURFACE = (
 COASTAL_ARTIFACT_WIDTH_M = 75
 COASTAL_COMPONENT_PRESERVE_AREA_M2 = 100_000
 COASTAL_CLEANUP_ALGORITHM_VERSION = 3
+# Opt-in: components whose area exceeds this threshold (m²) skip the
+# morphological opening step in clean_coastal_artifacts. Default 0 = disabled.
+# A mainland (Ireland ~7e10 m², NI ~1.4e10 m²) has no narrow coastal spurs
+# that the erode/dilate pipeline catches, so skipping it saves ~100s without
+# affecting the large islands that do benefit from cleanup (Achill ~1.5e8 m²).
+COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2 = _non_negative_float_env(
+    "COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2", 0.0
+)
+
+# Worker count for the parallel PMTiles bake in precompute.bake_pmtiles.
+# 1 = sequential (original behaviour). Default = min(8, cpu_count()).
+def _default_bake_pmtiles_workers() -> int:
+    cpu = os.cpu_count() or 1
+    return max(1, min(8, cpu))
+
+
+BAKE_PMTILES_WORKERS = _positive_int_env(
+    "LIVABILITY_BAKE_WORKERS", _default_bake_pmtiles_workers()
+)
 
 
 WALK_RADIUS_M = 500
@@ -595,6 +627,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "coastal_artifact_width_m": COASTAL_ARTIFACT_WIDTH_M,
         "coastal_component_preserve_area_m2": COASTAL_COMPONENT_PRESERVE_AREA_M2,
         "coastal_cleanup_algorithm_version": COASTAL_CLEANUP_ALGORITHM_VERSION,
+        "coastal_cleanup_skip_mainland_area_m2": COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
         "schema_version": CACHE_SCHEMA_VERSION,
     }
     geo_hash = hash_dict(geo_params)

@@ -266,7 +266,8 @@ pub fn process_shard(
                 continue;
             }
             let cx_centre = shard_x0 + (col as f64) * res + half;
-            node_idx[flat] = kd.nearest(cx_centre, cy_centre) as i32;
+            node_idx[flat] = i32::try_from(kd.nearest(cx_centre, cy_centre))
+                .expect("walk-graph node index exceeds i32 range");
         }
     }
 
@@ -278,8 +279,10 @@ pub fn process_shard(
         std::fs::create_dir_all(parent)?;
     }
 
-    let x_min_arr = [entry.x_min_m as i32];
-    let y_min_arr = [entry.y_min_m as i32];
+    let x_min_arr = [i32::try_from(entry.x_min_m)
+        .expect("shard x_min_m exceeds i32 range")];
+    let y_min_arr = [i32::try_from(entry.y_min_m)
+        .expect("shard y_min_m exceeds i32 range")];
 
     let npz_entries: &[(&str, Vec<u8>)] = &[
         ("origin_node_idx", npy_i32(&node_idx, &[n, n])),

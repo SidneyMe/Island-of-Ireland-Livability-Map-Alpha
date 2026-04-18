@@ -15,6 +15,29 @@ maplibregl.addProtocol("pmtiles", protocol.tile);
 const MIN_ZOOM = 5;
 const DEBUG_GRID_QUERY_PARAM = "debug-grid";
 const SCORE_SECTIONS = ["shops", "transport", "healthcare", "parks"];
+const RUNTIME_FETCH_TIMEOUT_MS = 10000;
+const INSPECT_FETCH_TIMEOUT_MS = 15000;
+
+function fetchWithTimeout(input, init, timeoutMs) {
+  const controller = new AbortController();
+  const externalSignal = init && init.signal;
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      externalSignal.addEventListener("abort", function () {
+        controller.abort();
+      }, { once: true });
+    }
+  }
+  const timer = window.setTimeout(function () {
+    controller.abort();
+  }, timeoutMs);
+  const opts = Object.assign({}, init || {}, { signal: controller.signal });
+  return fetch(input, opts).finally(function () {
+    window.clearTimeout(timer);
+  });
+}
 
 const elements = {
   statusPill: document.getElementById("status-pill"),
@@ -42,7 +65,8 @@ const state = {
   gridVisible: true,
   debugGridVisible: false,
   transportRealityVisible: false,
-  serviceDesertsVisible: false
+  serviceDesertsVisible: false,
+  pendingInspect: null
 };
 
 function updateStatus(message) {
@@ -93,6 +117,24 @@ function updatePanelVisibility() {
   document.body.classList.toggle("panel-hidden", state.panelHidden);
   elements.panelToggle.textContent = state.panelHidden ? "Show panel" : "Hide panel";
   elements.panelToggle.setAttribute("aria-expanded", state.panelHidden ? "false" : "true");
+}
+
+function resizeMapAfterPanelTransition() {
+  const panel = elements.controlPanel;
+  if (!panel) {
+    state.map.resize();
+    return;
+  }
+  let done = false;
+  const finish = function () {
+    if (done) return;
+    done = true;
+    panel.removeEventListener("transitionend", finish);
+    if (state.map) state.map.resize();
+  };
+  panel.addEventListener("transitionend", finish);
+  // Fallback in case transitionend never fires (transitions disabled, reduced-motion, etc.).
+  window.setTimeout(finish, 400);
 }
 
 function applyGridVisibility() {
@@ -337,19 +379,33 @@ function coarseGridPopupHtml(properties) {
 }
 
 async function fetchInspect(lngLat) {
-  const params = new URLSearchParams({
-    lat: String(lngLat.lat),
-    lon: String(lngLat.lng),
-    zoom: String(state.map.getZoom())
-  });
-  const response = await fetch(String(state.runtime.inspect_url) + "?" + params.toString());
-  if (!response.ok) {
-    const payload = await response.json().catch(function () {
-      return {};
-    });
-    throw new Error(payload.error || response.statusText);
+  if (state.pendingInspect) {
+    state.pendingInspect.abort();
   }
-  return response.json();
+  const controller = new AbortController();
+  state.pendingInspect = controller;
+  const url = new URL(String(state.runtime.inspect_url), window.location.origin);
+  url.searchParams.set("lat", String(lngLat.lat));
+  url.searchParams.set("lon", String(lngLat.lng));
+  url.searchParams.set("zoom", String(state.map.getZoom()));
+  try {
+    const response = await fetchWithTimeout(
+      url,
+      { signal: controller.signal },
+      INSPECT_FETCH_TIMEOUT_MS
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(function () {
+        return {};
+      });
+      throw new Error(payload.error || response.statusText);
+    }
+    return response.json();
+  } finally {
+    if (state.pendingInspect === controller) {
+      state.pendingInspect = null;
+    }
+  }
 }
 
 function wireUi() {
@@ -357,9 +413,7 @@ function wireUi() {
     state.panelHidden = !state.panelHidden;
     updatePanelVisibility();
     if (state.map) {
-      window.setTimeout(function () {
-        state.map.resize();
-      }, 190);
+      resizeMapAfterPanelTransition();
     }
   });
 
@@ -446,6 +500,9 @@ function initializeMap() {
           .setHTML(inspectPopupHtml(payload))
           .addTo(state.map);
       } catch (error) {
+        if (error && error.name === "AbortError") {
+          return;
+        }
         updateStatus(error.message || "Inspect failed");
         elements.statusPill.style.display = "";
       }
@@ -507,7 +564,7 @@ function initializeApp(runtime) {
   initializeMap();
 }
 
-fetch("/api/runtime")
+fetchWithTimeout("/api/runtime", undefined, RUNTIME_FETCH_TIMEOUT_MS)
   .then(function (response) {
     if (!response.ok) {
       return response.json().then(function (payload) {
@@ -518,6 +575,9 @@ fetch("/api/runtime")
   })
   .then(initializeApp)
   .catch(function (error) {
-    updateStatus(error.message || "Failed to load runtime");
+    const message = error && error.name === "AbortError"
+      ? "Timed out loading runtime"
+      : (error && error.message) || "Failed to load runtime";
+    updateStatus(message);
     elements.gridToggle.disabled = true;
   });

@@ -25,6 +25,13 @@ impl NodeKdTree {
             return Err(format!("nodes.bin size {} is not a multiple of 8", bytes.len()).into());
         }
         let node_count = bytes.len() / 8;
+        if node_count == 0 {
+            return Err(format!("nodes.bin at {} contains no nodes", nodes_bin.display()).into());
+        }
+        // Validate up front that node indices fit in u32, since `nearest()` casts to u32.
+        u32::try_from(node_count).map_err(|_| {
+            format!("nodes.bin contains {} nodes, exceeds u32::MAX", node_count)
+        })?;
 
         let mut tree: Tree = KdTree::with_capacity(node_count);
 
@@ -43,13 +50,11 @@ impl NodeKdTree {
     pub fn nearest(&self, easting: f64, northing: f64) -> u32 {
         self.tree
             .nearest_one::<SquaredEuclidean>(&[easting, northing])
-            .item
-            .try_into()
-            .unwrap()
+            .item as u32
     }
 
     /// Number of nodes in the tree.
     pub fn len(&self) -> usize {
-        self.tree.size().try_into().unwrap()
+        self.tree.size() as usize
     }
 }

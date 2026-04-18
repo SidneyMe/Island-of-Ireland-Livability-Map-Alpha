@@ -93,17 +93,17 @@ def download_extract(
             return {"skipped": True, "reason": "not-modified", "manifest": existing_manifest}
         raise
 
-    last_modified: str | None = response.headers.get("Last-Modified")
-    downloaded_utc = datetime.now(timezone.utc).isoformat()
-
     tmp_path = OSM_EXTRACT_PATH.with_name(OSM_EXTRACT_PATH.name + ".tmp")
     try:
-        with tmp_path.open("wb") as fh:
-            while True:
-                chunk = response.read(_DOWNLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                fh.write(chunk)
+        with response:
+            last_modified: str | None = response.headers.get("Last-Modified")
+            downloaded_utc = datetime.now(timezone.utc).isoformat()
+            with tmp_path.open("wb") as fh:
+                while True:
+                    chunk = response.read(_DOWNLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
     except BaseException:
         try:
             tmp_path.unlink(missing_ok=True)

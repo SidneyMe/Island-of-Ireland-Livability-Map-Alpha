@@ -1,0 +1,328 @@
+"""Minimal worker module for the parallel PMTiles bake.
+
+This module is **deliberately tiny** on imports. When the bake dispatches
+tile chunks via ``ProcessPoolExecutor``, Windows ``spawn`` subprocesses
+re-import the module that owns the worker function. Keeping it out of the
+``precompute`` package means subprocesses avoid re-running
+``precompute/__init__.py`` — which pulls in scipy / sklearn / geopandas /
+pandas / numpy and exhausts the Windows paging file at 8-way concurrency.
+
+All code here must only import:
+  - stdlib (``gzip``)
+  - ``pmtiles.tile`` (tiny, pure-Python)
+  - ``sqlalchemy`` (imported lazily inside the worker-engine getter)
+
+Do not add package-relative imports or anything that transitively pulls the
+scientific stack.
+"""
+
+from __future__ import annotations
+
+import gzip
+
+from pmtiles.tile import zxy_to_tileid
+from sqlalchemy import text
+
+
+# ── Layer bitmask encoding ──────────────────────────────────────────────────
+
+_LAYER_GRID = 1 << 0
+_LAYER_AMENITIES = 1 << 1
+_LAYER_TRANSPORT_REALITY = 1 << 2
+_LAYER_SERVICE_DESERTS = 1 << 3
+
+
+# ── Per-tile SQL (one ST_AsMVT call per layer) ──────────────────────────────
+
+_GRID_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            g.cell_id,
+            g.resolution_m,
+            g.total_score,
+            COALESCE((g.counts_json ->> 'shops')::integer, 0) AS count_shops,
+            COALESCE((g.scores_json ->> 'shops')::double precision, 0.0) AS score_shops,
+            COALESCE((g.counts_json ->> 'transport')::integer, 0) AS count_transport,
+            COALESCE((g.scores_json ->> 'transport')::double precision, 0.0) AS score_transport,
+            COALESCE((g.counts_json ->> 'healthcare')::integer, 0) AS count_healthcare,
+            COALESCE((g.scores_json ->> 'healthcare')::double precision, 0.0) AS score_healthcare,
+            COALESCE((g.counts_json ->> 'parks')::integer, 0) AS count_parks,
+            COALESCE((g.scores_json ->> 'parks')::double precision, 0.0) AS score_parks,
+            ST_AsMVTGeom(
+                ST_Transform(g.cell_geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM grid_walk AS g, tile
+        WHERE g.build_key = :build_key
+          AND g.resolution_m = :resolution_m
+          AND g.cell_geom && tile.env_4326
+          AND ST_Intersects(g.cell_geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'grid', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
+_AMENITY_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            a.category,
+            a.source,
+            a.source_ref,
+            ST_AsMVTGeom(
+                ST_Transform(a.geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM amenities AS a, tile
+        WHERE a.build_key = :build_key
+          AND a.geom && tile.env_4326
+          AND ST_Intersects(a.geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'amenities', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
+_TRANSPORT_REALITY_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    grouped AS (
+        SELECT
+            COALESCE(NULLIF(BTRIM(t.stop_name), ''), t.source_ref) AS stop_label,
+            ST_X(t.geom) AS lon,
+            ST_Y(t.geom) AS lat,
+            STRING_AGG(DISTINCT t.source_ref, ',' ORDER BY t.source_ref) AS source_ref,
+            STRING_AGG(DISTINCT t.feed_id, ',' ORDER BY t.feed_id) AS feed_id,
+            STRING_AGG(DISTINCT t.stop_id, ',' ORDER BY t.stop_id) AS stop_id,
+            MIN(t.source_status) AS source_status,
+            CASE
+                WHEN SUM(t.public_departures_30d) > 0 THEN 'active_confirmed'
+                WHEN SUM(t.school_only_departures_30d) > 0 THEN 'school_only_confirmed'
+                ELSE 'inactive_confirmed'
+            END AS reality_status,
+            CASE
+                WHEN SUM(t.public_departures_30d) > 0 THEN 'no'
+                WHEN SUM(t.school_only_departures_30d) > 0 THEN 'yes'
+                ELSE 'no'
+            END AS school_only_state,
+            SUM(t.public_departures_7d) AS public_departures_7d,
+            SUM(t.public_departures_30d) AS public_departures_30d,
+            SUM(t.school_only_departures_30d) AS school_only_departures_30d,
+            ST_SetSRID(ST_MakePoint(ST_X(t.geom), ST_Y(t.geom)), 4326) AS geom
+        FROM transport_reality AS t, tile
+        WHERE t.build_key = :build_key
+          AND t.geom && tile.env_4326
+          AND ST_Intersects(t.geom, tile.env_4326)
+        GROUP BY
+            COALESCE(NULLIF(BTRIM(t.stop_name), ''), t.source_ref),
+            ST_X(t.geom),
+            ST_Y(t.geom)
+    ),
+    mvtgeom AS (
+        SELECT
+            g.source_ref,
+            g.stop_label AS stop_name,
+            g.feed_id,
+            g.stop_id,
+            g.reality_status,
+            g.source_status,
+            g.school_only_state,
+            g.public_departures_7d,
+            g.public_departures_30d,
+            g.school_only_departures_30d,
+            ST_AsMVTGeom(
+                ST_Transform(g.geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM grouped AS g, tile
+    )
+    SELECT ST_AsMVT(mvtgeom, 'transport_reality', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
+_SERVICE_DESERT_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            s.cell_id,
+            s.resolution_m,
+            s.baseline_reachable_stop_count,
+            s.reachable_public_departures_7d,
+            ST_AsMVTGeom(
+                ST_Transform(s.cell_geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM service_deserts AS s, tile
+        WHERE s.build_key = :build_key
+          AND s.resolution_m = :resolution_m
+          AND s.cell_geom && tile.env_4326
+          AND ST_Intersects(s.cell_geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'service_deserts', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
+def _resolution_for_zoom(zoom: int) -> int:
+    if zoom >= 10:
+        return 5000
+    if zoom >= 8:
+        return 10000
+    return 20000
+
+
+def _tile_mvt_bytes_by_flags(
+    connection,
+    *,
+    build_key: str,
+    z: int,
+    x: int,
+    y: int,
+    layers: int,
+) -> bytes:
+    """Build a single MVT for ``(z, x, y)`` containing the layers selected by ``layers``.
+
+    The MVT format is a top-level repeated ``Layer`` message, so independent
+    ``ST_AsMVT`` calls can be concatenated into a valid multi-layer tile.
+    """
+    chunks: list[bytes] = []
+    if layers & _LAYER_GRID:
+        resolution_m = _resolution_for_zoom(z)
+        grid_bytes = (
+            connection.execute(
+                _GRID_TILE_SQL,
+                {
+                    "z": z,
+                    "x": x,
+                    "y": y,
+                    "build_key": build_key,
+                    "resolution_m": resolution_m,
+                },
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(grid_bytes))
+    if layers & _LAYER_AMENITIES:
+        amenity_bytes = (
+            connection.execute(
+                _AMENITY_TILE_SQL,
+                {"z": z, "x": x, "y": y, "build_key": build_key},
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(amenity_bytes))
+    if layers & _LAYER_TRANSPORT_REALITY:
+        transport_reality_bytes = (
+            connection.execute(
+                _TRANSPORT_REALITY_TILE_SQL,
+                {"z": z, "x": x, "y": y, "build_key": build_key},
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(transport_reality_bytes))
+    if layers & _LAYER_SERVICE_DESERTS:
+        service_desert_bytes = (
+            connection.execute(
+                _SERVICE_DESERT_TILE_SQL,
+                {
+                    "z": z,
+                    "x": x,
+                    "y": y,
+                    "build_key": build_key,
+                    "resolution_m": _resolution_for_zoom(z),
+                },
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(service_desert_bytes))
+    return b"".join(chunks)
+
+
+# ── Worker-process state ────────────────────────────────────────────────────
+
+_WORKER_ENGINE = None  # type: ignore[var-annotated]
+_WORKER_DB_URL: str | None = None
+
+
+def _worker_get_engine(db_url: str):
+    global _WORKER_ENGINE, _WORKER_DB_URL
+    if _WORKER_ENGINE is None or _WORKER_DB_URL != db_url:
+        from sqlalchemy import create_engine
+
+        _WORKER_ENGINE = create_engine(db_url, future=True, pool_pre_ping=True)
+        _WORKER_DB_URL = db_url
+    return _WORKER_ENGINE
+
+
+def _bake_chunk_worker(
+    chunk: list[tuple[int, int, int, int]],
+    build_key: str,
+    db_url: str,
+) -> list[tuple[int, bytes]]:
+    """Run inside a worker process. Bake one chunk of tile specs."""
+    engine = _worker_get_engine(db_url)
+    out: list[tuple[int, bytes]] = []
+    with engine.connect() as connection:
+        for z, x, y, layers in chunk:
+            payload = _tile_mvt_bytes_by_flags(
+                connection,
+                build_key=build_key,
+                z=z,
+                x=x,
+                y=y,
+                layers=layers,
+            )
+            if not payload:
+                continue
+            out.append((zxy_to_tileid(z, x, y), gzip.compress(payload)))
+    return out
+
+
+__all__ = [
+    "_LAYER_GRID",
+    "_LAYER_AMENITIES",
+    "_LAYER_TRANSPORT_REALITY",
+    "_LAYER_SERVICE_DESERTS",
+    "_GRID_TILE_SQL",
+    "_AMENITY_TILE_SQL",
+    "_TRANSPORT_REALITY_TILE_SQL",
+    "_SERVICE_DESERT_TILE_SQL",
+    "_resolution_for_zoom",
+    "_tile_mvt_bytes_by_flags",
+    "_worker_get_engine",
+    "_bake_chunk_worker",
+]

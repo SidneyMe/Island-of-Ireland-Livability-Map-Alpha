@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -91,8 +92,10 @@ def write_tier_manifest(
             "render_hash": render_hash,
         }
 
-    with manifest_path.open("w", encoding="utf-8") as handle:
+    tmp_path = manifest_path.with_name(manifest_path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2, default=str)
+    os.replace(tmp_path, manifest_path)
 
 
 def mark_building(

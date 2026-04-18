@@ -38,6 +38,15 @@ class _MockHTTPResponse:
     def read(self, n: int = -1) -> bytes:
         return self._stream.read(n)
 
+    def close(self) -> None:
+        self._stream.close()
+
+    def __enter__(self) -> "_MockHTTPResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
