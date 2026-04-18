@@ -64,16 +64,14 @@ class WalkgraphSupportTests(TestCase):
 
             binary_path.parent.mkdir(parents=True, exist_ok=True)
             binary_path.write_text("walkgraph", encoding="utf-8")
-            binary_mtime_ns = binary_path.stat().st_mtime_ns
 
             with (
-                mock.patch.object(walkgraph_support, "WALKGRAPH_PROJECT_DIR", project_dir),
                 mock.patch.object(walkgraph_support, "WALKGRAPH_TARGET_DIR", target_dir),
                 mock.patch.object(
                     walkgraph_support,
-                    "_latest_repo_source_mtime_ns",
-                    return_value=binary_mtime_ns + 1,
-                ),
+                    "_repo_local_binary_is_stale",
+                    return_value=True,
+                ) as stale_mock,
                 mock.patch.object(walkgraph_support.subprocess, "run") as run_mock,
             ):
                 with self.assertRaisesRegex(RuntimeError, "older than the current Rust source"):
@@ -82,27 +80,42 @@ class WalkgraphSupportTests(TestCase):
                         "gtfs-refresh",
                     )
 
+        stale_mock.assert_called_once()
         self.assertFalse(run_mock.called)
+
+    def test_repo_local_binary_is_stale_when_source_is_newer(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            target_dir = Path(tmp_name) / "target"
+            binary_path = target_dir / "release" / "walkgraph.exe"
+
+            binary_path.parent.mkdir(parents=True, exist_ok=True)
+            binary_path.write_text("walkgraph", encoding="utf-8")
+            binary_mtime_ns = binary_path.stat().st_mtime_ns
+
+            with mock.patch.object(
+                walkgraph_support,
+                "_latest_repo_source_mtime_ns",
+                return_value=binary_mtime_ns + 1,
+            ):
+                is_stale = walkgraph_support._repo_local_binary_is_stale(binary_path)
+
+        self.assertTrue(is_stale)
 
     def test_external_path_binary_skips_repo_stale_check(self) -> None:
         with TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
-            project_dir = tmp / "walkgraph"
-            target_dir = project_dir / "target"
+            target_dir = tmp / "walkgraph" / "target"
             external_binary = tmp / "tools" / "walkgraph.exe"
 
             external_binary.parent.mkdir(parents=True, exist_ok=True)
             external_binary.write_text("walkgraph", encoding="utf-8")
-            external_binary_mtime_ns = external_binary.stat().st_mtime_ns
 
             with (
-                mock.patch.object(walkgraph_support, "WALKGRAPH_PROJECT_DIR", project_dir),
                 mock.patch.object(walkgraph_support, "WALKGRAPH_TARGET_DIR", target_dir),
                 mock.patch.object(
                     walkgraph_support,
-                    "_latest_repo_source_mtime_ns",
-                    return_value=external_binary_mtime_ns + 1,
-                ),
+                    "_repo_local_binary_is_stale",
+                ) as stale_mock,
                 mock.patch.object(walkgraph_support.shutil, "which", return_value=str(external_binary)),
                 mock.patch.object(
                     walkgraph_support.subprocess,
@@ -116,3 +129,4 @@ class WalkgraphSupportTests(TestCase):
                 )
 
         self.assertEqual(resolved_path, external_binary.resolve())
+        stale_mock.assert_not_called()
