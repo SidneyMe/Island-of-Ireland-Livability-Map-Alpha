@@ -1,0 +1,113 @@
+# Changelog
+
+Format: date, version tag (where applicable), what changed, what scoring logic changed.
+
+---
+
+## 2026-04-18 — Phase 1 Complete: GTFS ingestion and transit reality pipeline
+
+### Added
+
+#### GTFS ingestion
+
+- `transit/` module (11 files): feed downloading, ZIP parsing, service window expansion, school-run classification, departure summarisation, stop reality derivation, GeoJSON export, Rust subprocess bridge, workflow orchestration
+- Three feeds configured and ingested: NTA (Republic of Ireland), Translink (Northern Ireland), TFI Local Link (rural/regional)
+- Rust GTFS pipeline (`walkgraph/src/gtfs/`): processes all feeds, expands calendar windows, counts departures per stop per service, writes CSV artifacts consumed by the Python loader
+- `walkgraph/tests/gtfs_cli.rs`: integration test harness for the Rust GTFS CLI path
+- `walkgraph_support.py`: Python bridge that locates and invokes the walkgraph binary
+
+#### Transit reality
+
+- Phantom stop detection: stops with zero public departures in the 30-day analysis window flagged `inactive_confirmed` and excluded from scoring
+- School-run filtering: services detected as school-only (keyword match + time-bucket concentration + weekday-only pattern) excluded from public departure counts; stops serving only school runs flagged `school_only_confirmed`
+- Service desert classification: grid cells with at least one nominal stop but zero real weekly departures flagged as service deserts
+- `transit/classification.py`: multi-factor school-only heuristic (keyword list configurable via `GTFS_SCHOOL_KEYWORDS`, AM/PM hour buckets configurable via env)
+- `transit/export.py`: standalone GeoJSON + manifest + ZIP bundle written to `cache/exports/` after each reality refresh; publishable independently of the livability map
+
+#### Database schema
+
+- `transit_raw` schema: `feed_manifest`, `stops` (with PostGIS geometry), `routes`, `trips`, `stop_times`, `calendar_services`, `calendar_dates`
+- `transit_derived` schema: `reality_manifest`, `service_classification`, `gtfs_stop_service_summary`, `gtfs_stop_reality`, `service_desert_cells`
+- `transport_reality` and `service_deserts` tables in public schema for scoring and UI consumption
+- Migrations `000002` → `000005`: initial schema, selected-departures column, drop of OSM stop-matching layer (went GTFS-first after OSM coverage gap discovered — ~12k OSM stops vs ~29k GTFS), drop of `reality_confidence` column
+
+#### Fingerprint-based caching
+
+- Feed fingerprint: hash of ZIP size + content; reality fingerprint: hash of analysis date + all GTFS config parameters + feed fingerprints
+- Pipeline skips re-parsing and re-derivation when fingerprints match manifests already in the database; full rebuild triggered only on feed update or config change
+
+#### Overture Places
+
+- `overture/` module: Overture Places GeoParquet loaded as a POI rescue layer
+- Confidence-aware conflict detection: Overture POIs merged with OSM amenities, resolving duplicates by source confidence
+
+#### Frontend
+
+- `transport_reality_popup.js` / `.test.js`: map popup component showing stop name, reality status (active / inactive / school-only), departure counts, route modes, and last-service date for any clicked transit stop
+
+#### Tests
+
+- `tests/test_transit_phase1.py`: unit tests for ZIP parsing, service window expansion, school-only classification, departure aggregation, stop reality derivation, export bundle generation
+- `tests/test_db_postgis_writes.py`: DB write path tests covering feed and reality artifact loading
+- `tests/test_walkgraph_support.py`: walkgraph binary detection and invocation tests
+
+### Changed
+
+- `config.py`: GTFS feed configuration (`TransitFeedConfig`, `TransitFeedState`, `TransitRealityState`), fingerprint helpers, analysis-date resolution; `TRANSIT_REALITY_ALGO_VERSION = 5`
+- `CACHE_SCHEMA_VERSION` bumped to `9` (transport reality rows now part of scoring state)
+- `precompute/__init__.py`: `refresh_transit()` entry point added; transport reality rows and service desert cells integrated into the precompute build graph
+- `db_postgis/writes.py`, `reads.py`, `schema.py`, `tables.py`, `manifests.py`: extended with all transit raw and derived table operations
+- `schema.sql` updated to reflect the full transit schema alongside existing grid and amenity tables
+- `serve_from_db.py`: transport reality endpoint added for local dev inspection
+- OSM ↔ GTFS cross-reference approach dropped: OSM Ireland coverage (~12k stops) is too sparse (~60% gap vs GTFS) to be a reliable join key; scoring now sources stops directly from GTFS feeds
+
+### Weights (unchanged from Phase 0)
+
+shops: cap=5 (25%) · transport: cap=5 (25%) · healthcare: cap=3 (25%) · parks: cap=2 (25%)
+
+---
+
+## 2026-04-08 — Phase 0 complete
+
+### Added
+
+- Coastal grid-cell clipping: cells now store `effective_area_m2` and `effective_area_ratio`
+- Coastal amenity density normalization: shops, transport, healthcare normalized by clipped area (floor 0.25)
+- Park scoring switched from raw feature count to reachable polygon area; `_PARK_AREA_UNIT_M2 = 50_000`
+- Livability sanity fixture: hand-picked reference locations with expected score ranges in `fixtures/`
+- `scripts/sanity_check.py`: fixture runner wired into CI
+- `scripts/refresh_osm.py` / `sanity_check.py`: OSM refresh and validation scripts
+- Automated OSM re-import scheduled refresh workflow (`.github/workflows/scheduled_refresh.yml`)
+- Basic CI: Python 3.12 + Rust stable matrix on GitHub Actions
+- Platform-aware walkgraph binary detection (`_default_walkgraph_bin()` in `config.py`)
+
+### Schema and config changes
+
+- `GRID_GEOMETRY_SCHEMA_VERSION` bumped to reflect new persisted grid metadata
+- `OSM_EXTRACT_NAME` updated to `ireland-and-northern-ireland-latest.osm.pbf`
+- `IMPORTER_CONFIG_VERSION` set to `2026-04-08`
+- Walk graph format version: `WALKGRAPH_FORMAT_VERSION = 3`
+
+### Weights (Phase 0)
+
+shops: cap=5 (25%) · transport: cap=5 (25%) · healthcare: cap=3 (25%) · parks: cap=2 (25%)
+
+---
+
+## 2026-04-01 — Alpha baseline
+
+### Added
+
+- Initial pipeline: OSM import → PostGIS → walkgraph reachability → grid scoring → PMTiles output
+- Study area: Island of Ireland (Republic + Northern Ireland), EPSG:2157
+- Grid resolutions: 50 m (canonical) through 20 km (coarse vector), zoom-based rendering
+- Scoring categories: shops, transport, healthcare, parks — capped presence count
+- Rust `walkgraph` binary: pedestrian graph construction from OSM PBF, BFS reachability at 500 m
+- MapLibre GL frontend with PMTiles tile source
+- Local dev server (`serve_from_db.py`)
+- Cache and schema versioning via `config.py` (`CACHE_SCHEMA_VERSION`, `GRID_GEOMETRY_SCHEMA_VERSION`, `PMTILES_SCHEMA_VERSION`)
+- Multi-resolution build profiles: `full` (50 m → 20 km) and `dev` (5 km → 20 km)
+
+### Weights (alpha baseline)
+
+shops: cap=5 (25%) · transport: cap=5 (25%) · healthcare: cap=3 (25%) · parks: cap=2 (25%)

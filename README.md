@@ -199,6 +199,30 @@ psql "postgresql://user:password@localhost:5432/database_name" -f schema.sql
 
 If your app `DATABASE_URL` uses the SQLAlchemy driver form `postgresql+psycopg://`, remove `+psycopg` for the `psql` command. If you use split `POSTGRES_*` variables instead, run the schema command with the matching `psql` connection arguments for your database. Existing databases should be upgraded through Alembic on startup rather than by reapplying `schema.sql`.
 
+## GTFS Phase 1 Setup
+
+Phase 1 transport reality uses local GTFS zip files first and only downloads feeds when you explicitly configure feed URLs.
+
+Default local zip paths:
+
+```text
+transit/nta_gtfs.zip
+transit/translink_gtfs.zip
+```
+
+Useful environment overrides:
+
+```text
+GTFS_NTA_ZIP_PATH=transit/nta_gtfs.zip
+GTFS_TRANSLINK_ZIP_PATH=transit/translink_gtfs.zip
+GTFS_AS_OF_DATE=2026-04-14
+GTFS_ANALYSIS_WINDOW_DAYS=30
+GTFS_SERVICE_DESERT_WINDOW_DAYS=7
+GTFS_MATCH_RADIUS_M=40
+```
+
+Optional `GTFS_NTA_URL` and `GTFS_TRANSLINK_URL` values can be set when you want `--refresh-transit` to refresh those local zip files before parsing.
+
 ## Usage Commands
 
 Each example shows `python` first and the `python3` POSIX alternative second. Use whichever form matches your shell.
@@ -210,12 +234,27 @@ python main.py --refresh-import
 python3 main.py --refresh-import
 ```
 
+Refresh GTFS-derived transport reality and rebuild the standalone export bundle:
+
+```text
+python main.py --refresh-transit
+python3 main.py --refresh-transit
+```
+
+`--refresh-transit` now reuses the existing transit reality when the GTFS inputs and current OSM import fingerprint still match. Use `--force-transit-refresh` when you want a full rebuild anyway.
+
 Run precompute using an existing raw import:
 
 ```text
 python main.py --precompute
 python3 main.py --precompute
 ```
+
+`--precompute` now ensures Phase 1 transit reality exists before transport scoring runs. The publish step also writes:
+
+- `transport_reality` PMTiles/runtime layer
+- `service_deserts` PMTiles/runtime layer
+- `.livability_cache/exports/transport-reality.zip`
 
 Allow precompute to refresh the import if the raw import is missing:
 
