@@ -58,15 +58,18 @@ class WalkgraphSupportTests(TestCase):
 
     def test_repo_local_binary_older_than_source_raises_rebuild_error(self) -> None:
         with TemporaryDirectory() as tmp_name:
-            project_dir = Path(tmp_name) / "walkgraph"
-            target_dir = project_dir / "target"
+            target_dir = Path(tmp_name) / "walkgraph" / "target"
             binary_path = target_dir / "release" / "walkgraph.exe"
 
             binary_path.parent.mkdir(parents=True, exist_ok=True)
             binary_path.write_text("walkgraph", encoding="utf-8")
 
             with (
-                mock.patch.object(walkgraph_support, "WALKGRAPH_TARGET_DIR", target_dir),
+                mock.patch.object(
+                    walkgraph_support,
+                    "_is_repo_local_binary",
+                    return_value=True,
+                ),
                 mock.patch.object(
                     walkgraph_support,
                     "_repo_local_binary_is_stale",
@@ -104,14 +107,17 @@ class WalkgraphSupportTests(TestCase):
     def test_external_path_binary_skips_repo_stale_check(self) -> None:
         with TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
-            target_dir = tmp / "walkgraph" / "target"
             external_binary = tmp / "tools" / "walkgraph.exe"
 
             external_binary.parent.mkdir(parents=True, exist_ok=True)
             external_binary.write_text("walkgraph", encoding="utf-8")
 
             with (
-                mock.patch.object(walkgraph_support, "WALKGRAPH_TARGET_DIR", target_dir),
+                mock.patch.object(
+                    walkgraph_support,
+                    "_is_repo_local_binary",
+                    return_value=False,
+                ),
                 mock.patch.object(
                     walkgraph_support,
                     "_repo_local_binary_is_stale",
