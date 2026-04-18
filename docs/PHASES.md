@@ -125,7 +125,7 @@ Every stop the model counts is assumed to exist in practice. Right now that assu
 
 Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 
-### GTFS ingestion [blocker]
+### ~~GTFS ingestion~~ [blocker]
 
 **What:** Pull and normalize GTFS feeds from NTA (Republic) and Translink (Northern Ireland).
 
@@ -137,32 +137,28 @@ Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 - Keep `stop_id` as the join key; geocode stops by their lat/lon.
 - Track the feed version so stale feeds don't silently poison scores.
 
-### OSM ↔ GTFS cross-reference
+### ~~OSM ↔ GTFS cross-reference~~ [superseded]
 
 **What:** Match OSM `highway=bus_stop` / `railway=station` nodes to GTFS stops.
 
-**How:**
+**Why this was dropped:** OSM Ireland coverage is ~12k transport stops versus ~29k in the GTFS feeds — a ~60% gap. With the majority of real stops absent from OSM, cross-referencing OSM nodes against GTFS is the wrong direction. The implementation went GTFS-first instead: transport scoring sources stops directly from GTFS, inherently excluding phantom and inactive stops without needing to join against incomplete OSM data. The standalone dataset therefore uses GTFS stop IDs as its primary key, not OSM node refs.
 
-- Spatial join with a small radius (~30–50 m).
-- Fallback on stop name similarity for ambiguous matches.
-- Record a match confidence score. Low-confidence matches should not be used to flag stops as active — err on the side of keeping OSM stops visible when the match is uncertain.
+### ~~Phantom stop detection [blocker]~~
 
-### Phantom stop detection [blocker] [design-needed]
-
-**What:** Flag OSM stops with zero scheduled services in the last 30 days as inactive and exclude them from scoring.
+**What:** Flag stops with zero scheduled services in the last 30 days as inactive and exclude them from scoring.
 
 **How:**
 
 - Compute real service events per stop by joining `stop_times.txt` × `calendar.txt` × `calendar_dates.txt` over a rolling 30-day window.
 - Binary flag: zero scheduled departures in the window → inactive.
-- Store the flag on the OSM node in the derived transport layer.
+- Store the flag on the GTFS stop in the derived transport layer.
 
 **Open questions:**
 
 - How strict is "zero"? A stop with one departure a month is technically active but practically not. The binary active/inactive call is enough for this phase; frequency-weighting is Phase 3's job.
 - How to handle the cross-border case — a stop in NI matched against a Republic feed, or vice versa.
 
-### School-only route filtering
+### ~~School-only route filtering~~
 
 **What:** Routes that only run during term-time school hours shouldn't count as general transit access.
 
@@ -172,7 +168,7 @@ Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 - Flag matching stops as school-only; exclude from general transit scoring.
 - Optionally keep them in a separate "school runs" overlay — useful for parents, not for general livability.
 
-### Service desert overlay
+### ~~Service desert overlay~~
 
 **What:** Grid cells where nominal OSM transport features resolve to zero real weekly departures. Exposed as a dedicated map layer.
 
@@ -182,15 +178,17 @@ Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 - Cells with at least one OSM stop but zero real departures get the service-desert flag.
 - Render as a distinct overlay layer in the UI.
 
-### Standalone reality dataset
+### Standalone reality dataset [hosted publishing pending Phase 8]
 
 **What:** A downloadable GeoJSON of active vs inactive Irish transport stops, licensed ODbL, built to be cited independently of the livability map.
 
 **How:**
 
-- Export the flagged OSM stops with: active/inactive status, last-departure date, GTFS match confidence, route modes served.
-- Publish on the hosted site as a download.
+- Export the GTFS-derived stops with: active/inactive status, last-departure date, route modes served.
+- Publish on the hosted site as a download — blocked on Phase 8 hosting.
 - Include a short README in the archive explaining the methodology and caveats. The caveats matter — the dataset should be defensible to journalists, researchers, and transport authorities, not just useful for scoring.
+
+**Done so far:** ZIP export (GeoJSON + manifest + README) is generated locally to `cache/exports/` after each transit reality refresh. Publishing to the hosted site is Phase 8.
 
 ---
 

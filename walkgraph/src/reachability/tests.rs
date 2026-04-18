@@ -45,8 +45,7 @@ fn write_graph_meta(graph_dir: &Path, node_count: u64, edge_count: u64) {
         edge_count,
         created_utc: "2026-01-01T00:00:00Z".to_string(),
     };
-    write_meta_json(&meta, &graph_dir.join("walk_graph.meta.json"))
-        .expect("write graph metadata");
+    write_meta_json(&meta, &graph_dir.join("walk_graph.meta.json")).expect("write graph metadata");
 }
 
 fn write_graph_sidecars(
@@ -127,7 +126,9 @@ fn load_origins_rejects_node_ids_outside_graph() {
 
     let err = load_origins(origins.path(), 3).expect_err("origin id should be rejected");
 
-    assert!(err.to_string().contains("origin node id exceeds graph node count"));
+    assert!(err
+        .to_string()
+        .contains("origin node id exceeds graph node count"));
 }
 
 #[test]
@@ -177,9 +178,7 @@ fn load_graph_csr_rejects_target_or_length_count_mismatch() {
 
     let err = load_graph_csr(graph_dir.path()).expect_err("edge mismatch should fail");
 
-    assert!(err
-        .to_string()
-        .contains("adjacency edge length mismatch"));
+    assert!(err.to_string().contains("adjacency edge length mismatch"));
 }
 
 #[test]

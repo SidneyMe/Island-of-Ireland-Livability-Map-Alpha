@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from config import BASE_DIR, OSM_IMPORT_SCHEMA
+from config import BASE_DIR, OSM_IMPORT_SCHEMA, TRANSIT_DERIVED_SCHEMA, TRANSIT_RAW_SCHEMA
 
 try:
     from alembic import command
@@ -16,13 +16,26 @@ from ._dependencies import Engine, inspect, text
 from .common import _count_import_rows, root_module
 from .tables import (
     IMPORTER_OWNED_RAW_TABLES,
-    REQUIRED_PUBLIC_TABLES,
-    REQUIRED_RAW_TABLES,
     amenities,
     build_manifest,
     features,
     grid_walk,
     import_manifest,
+    service_deserts,
+    transport_reality,
+    transit_calendar_dates,
+    transit_calendar_services,
+    transit_feed_manifest,
+    transit_gtfs_stop_service_summary,
+    transit_gtfs_stop_reality,
+    transit_reality_manifest,
+    transit_routes,
+    transit_service_classification,
+    transit_service_desert_cells,
+    transit_stop_times,
+    transit_stops,
+    transit_trips,
+    REQUIRED_MANAGED_SCHEMA_TABLES,
 )
 
 
@@ -41,8 +54,22 @@ class _ManagedIndexSpec:
 _MANAGED_TABLES = (
     grid_walk,
     amenities,
+    transport_reality,
+    service_deserts,
     build_manifest,
     import_manifest,
+    transit_feed_manifest,
+    transit_stops,
+    transit_routes,
+    transit_trips,
+    transit_stop_times,
+    transit_calendar_services,
+    transit_calendar_dates,
+    transit_reality_manifest,
+    transit_service_classification,
+    transit_gtfs_stop_service_summary,
+    transit_gtfs_stop_reality,
+    transit_service_desert_cells,
 )
 
 _MANAGED_INDEX_SPECS = (
@@ -54,6 +81,11 @@ _MANAGED_INDEX_SPECS = (
     _ManagedIndexSpec("amenities_build_category_idx", "amenities"),
     _ManagedIndexSpec("amenities_config_category_idx", "amenities"),
     _ManagedIndexSpec("amenities_geom_gist", "amenities"),
+    _ManagedIndexSpec("transport_reality_build_source_idx", "transport_reality"),
+    _ManagedIndexSpec("transport_reality_status_idx", "transport_reality"),
+    _ManagedIndexSpec("transport_reality_geom_gist", "transport_reality"),
+    _ManagedIndexSpec("service_deserts_build_resolution_cell_idx", "service_deserts"),
+    _ManagedIndexSpec("service_deserts_geom_gist", "service_deserts"),
     _ManagedIndexSpec("build_manifest_status_idx", "build_manifest"),
     _ManagedIndexSpec("build_manifest_extract_config_idx", "build_manifest"),
     _ManagedIndexSpec("build_manifest_import_idx", "build_manifest"),
@@ -62,6 +94,109 @@ _MANAGED_INDEX_SPECS = (
         "import_manifest",
         schema=OSM_IMPORT_SCHEMA,
     ),
+    _ManagedIndexSpec(
+        "transit_raw_feed_manifest_feed_idx",
+        "feed_manifest",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_stops_feed_stop_idx",
+        "stops",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_stops_geom_gist",
+        "stops",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_routes_feed_route_idx",
+        "routes",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_trips_feed_trip_idx",
+        "trips",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_trips_feed_service_idx",
+        "trips",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_stop_times_feed_trip_seq_idx",
+        "stop_times",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_stop_times_feed_stop_idx",
+        "stop_times",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_calendar_services_feed_service_idx",
+        "calendar_services",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_raw_calendar_dates_feed_service_date_idx",
+        "calendar_dates",
+        schema=TRANSIT_RAW_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_reality_manifest_import_idx",
+        "reality_manifest",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_service_classification_reality_service_idx",
+        "service_classification",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_gtfs_stop_service_summary_reality_stop_idx",
+        "gtfs_stop_service_summary",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_gtfs_stop_reality_reality_source_idx",
+        "gtfs_stop_reality",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_gtfs_stop_reality_status_idx",
+        "gtfs_stop_reality",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_gtfs_stop_reality_geom_gist",
+        "gtfs_stop_reality",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_service_desert_cells_build_resolution_cell_idx",
+        "service_desert_cells",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+    _ManagedIndexSpec(
+        "transit_derived_service_desert_cells_geom_gist",
+        "service_desert_cells",
+        schema=TRANSIT_DERIVED_SCHEMA,
+    ),
+)
+
+_LEGACY_MANAGED_TABLES = (
+    grid_walk,
+    amenities,
+    build_manifest,
+    import_manifest,
+)
+
+_LEGACY_MANAGED_INDEX_SPECS = tuple(
+    spec
+    for spec in _MANAGED_INDEX_SPECS
+    if spec.schema in {"public", OSM_IMPORT_SCHEMA}
 )
 
 _EXPECTED_SERVE_INDEXES = (
@@ -82,12 +217,14 @@ def _table_column_names(table) -> tuple[str, ...]:
 
 
 def _table_names_by_schema(inspector) -> dict[str, set[str]]:
-    public_tables = {str(name) for name in inspector.get_table_names()}
-    raw_tables = {str(name) for name in inspector.get_table_names(schema=OSM_IMPORT_SCHEMA)}
-    return {
-        "public": public_tables,
-        OSM_IMPORT_SCHEMA: raw_tables,
-    }
+    schemas = ("public", OSM_IMPORT_SCHEMA, TRANSIT_RAW_SCHEMA, TRANSIT_DERIVED_SCHEMA)
+    tables_by_schema: dict[str, set[str]] = {}
+    for schema_name in schemas:
+        table_names = inspector.get_table_names(
+            schema=None if schema_name == "public" else schema_name
+        )
+        tables_by_schema[schema_name] = {str(name) for name in table_names}
+    return tables_by_schema
 
 
 def _present_index_names(inspector, table_name: str, *, schema: str) -> set[str]:
@@ -142,11 +279,55 @@ def _managed_schema_mismatches(inspector) -> list[str]:
     return mismatches
 
 
+def _legacy_managed_schema_mismatches(inspector) -> list[str]:
+    mismatches: list[str] = []
+    tables_by_schema = _table_names_by_schema(inspector)
+
+    for table in _LEGACY_MANAGED_TABLES:
+        schema_name = _table_schema_name(table)
+        table_name = str(table.name)
+        if table_name not in tables_by_schema.get(schema_name, set()):
+            mismatches.append(f"missing table {schema_name}.{table_name}")
+            continue
+
+        present_columns = {
+            str(column["name"])
+            for column in inspector.get_columns(
+                table_name,
+                schema=None if schema_name == "public" else schema_name,
+            )
+        }
+        missing_columns = [
+            column_name
+            for column_name in _table_column_names(table)
+            if column_name not in present_columns
+        ]
+        mismatches.extend(
+            f"missing column {schema_name}.{table_name}.{column_name}"
+            for column_name in missing_columns
+        )
+
+    for index_spec in _LEGACY_MANAGED_INDEX_SPECS:
+        if index_spec.table_name not in tables_by_schema.get(index_spec.schema, set()):
+            continue
+        present_indexes = _present_index_names(
+            inspector,
+            index_spec.table_name,
+            schema=index_spec.schema,
+        )
+        if index_spec.index_name not in present_indexes:
+            mismatches.append(
+                f"missing index {index_spec.schema}.{index_spec.index_name}"
+            )
+
+    return mismatches
+
+
 def _managed_schema_is_empty(inspector) -> bool:
     tables_by_schema = _table_names_by_schema(inspector)
-    return not (
-        REQUIRED_PUBLIC_TABLES.intersection(tables_by_schema["public"])
-        or REQUIRED_RAW_TABLES.intersection(tables_by_schema[OSM_IMPORT_SCHEMA])
+    return not any(
+        required_tables.intersection(tables_by_schema.get(schema_name, set()))
+        for schema_name, required_tables in REQUIRED_MANAGED_SCHEMA_TABLES
     )
 
 
@@ -171,25 +352,30 @@ def _alembic_version_exists(inspector) -> bool:
 
 
 def _apply_schema_migrations(engine: Engine) -> None:
+    needs_stamp = False
     with engine.connect() as connection:
         inspector = inspect(connection)
         has_alembic_version = _alembic_version_exists(inspector)
-        migration_config = _alembic_config(connection)
 
         if not has_alembic_version:
-            if _managed_schema_is_empty(inspector):
-                pass
-            else:
-                mismatches = _managed_schema_mismatches(inspector)
+            if not _managed_schema_is_empty(inspector):
+                mismatches = _legacy_managed_schema_mismatches(inspector)
                 if mismatches:
                     raise RuntimeError(
                         "Managed schema exists without alembic_version but does not match the "
                         "supported legacy schema shape. Unsupported drift/manual intervention "
                         f"required: {', '.join(mismatches)}."
                     )
-                command.stamp(migration_config, ALEMBIC_INITIAL_REVISION)
+                needs_stamp = True
 
-        command.upgrade(migration_config, "head")
+    # Run Alembic without an external connection so it manages its own
+    # connection and transaction commits. Passing an external connection
+    # from engine.connect() caused DDL to be rolled back when the outer
+    # SQLAlchemy context manager exited without an explicit commit().
+    migration_config = _alembic_config()
+    if needs_stamp:
+        command.stamp(migration_config, ALEMBIC_INITIAL_REVISION)
+    command.upgrade(migration_config, "head")
 
 
 def table_exists(engine: Engine, table_name: str, schema: str | None = None) -> bool:
@@ -244,6 +430,8 @@ def ensure_database_ready(engine: Engine) -> None:
                 text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis')")
             ).scalar_one()
             connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {OSM_IMPORT_SCHEMA}"))
+            connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {TRANSIT_RAW_SCHEMA}"))
+            connection.execute(text(f"CREATE SCHEMA IF NOT EXISTS {TRANSIT_DERIVED_SCHEMA}"))
     except RuntimeError:
         raise
     except Exception as exc:  # pragma: no cover - depends on environment

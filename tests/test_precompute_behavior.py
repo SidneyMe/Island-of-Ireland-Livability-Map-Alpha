@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -181,6 +181,9 @@ def _workflow_kwargs(**overrides):
         "tracker_factory": mock.Mock(return_value=tracker),
         "walk_rows": mock.Mock(return_value=[]),
         "amenity_rows": mock.Mock(return_value=[]),
+        "transport_reality_rows": mock.Mock(return_value=[]),
+        "service_desert_rows": mock.Mock(return_value=[]),
+        "compute_service_deserts": mock.Mock(),
         "publish_precomputed_artifacts": mock.Mock(),
         "summary_json": mock.Mock(return_value={"summary": True}),
         "package_snapshot": mock.Mock(return_value={"package": "1.0"}),
@@ -631,18 +634,94 @@ class PrecomputeReachabilityTests(TestCase):
         self.assertTrue(is_valid)
 
 
+class TransitServiceDesertTests(TestCase):
+    def test_compute_service_deserts_skips_cells_with_upcoming_public_service(self) -> None:
+        cell = _grid_cell("cell-1", geometry=box(0.0, 0.0, 1.0, 1.0))
+
+        with TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            with (
+                mock.patch.object(precompute._STATE, "transit_reality_state", SimpleNamespace(reality_fingerprint="reality-123", analysis_date=date(2026, 4, 14))),
+                mock.patch.object(precompute._STATE, "study_area_metric", box(0.0, 0.0, 1.0, 1.0)),
+                mock.patch.object(precompute._STATE, "hashes", SimpleNamespace(build_key="build-123", import_fingerprint="import-123")),
+                mock.patch.object(precompute._STATE, "geo_cache_dir", cache_dir),
+                mock.patch.object(precompute._STATE, "score_cache_dir", cache_dir),
+                mock.patch.object(precompute, "load_walk_graph_index", return_value=mock.sentinel.walk_graph),
+                mock.patch.object(precompute, "load_transport_reality_points", return_value=[{"geom": Point(-6.26, 53.35), "public_departures_7d": 3, "source_status": "gtfs_direct"}]),
+                mock.patch.object(precompute, "snap_amenities", return_value={"transport": [101]}),
+                mock.patch.object(precompute, "nearest_nodes", return_value=[101]),
+                mock.patch.object(precompute, "cache_load", return_value=[101]),
+                mock.patch.object(precompute, "normalize_origin_node_ids", return_value=[101]),
+                mock.patch.object(precompute, "precompute_walk_counts_by_origin_node", return_value={101: {"transport": 1}}),
+                mock.patch.object(precompute, "precompute_walk_weighted_totals_by_origin_node", return_value={101: {"public_departures_7d": 3}}),
+                mock.patch.object(precompute, "replace_service_desert_rows") as replace_mock,
+            ):
+                precompute._compute_service_deserts(
+                    mock.sentinel.engine,
+                    {1000: [cell]},
+                )
+
+        replace_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            build_key="build-123",
+            desert_rows=[],
+        )
+
+    def test_compute_service_deserts_skips_cells_with_gtfs_direct_public_service(self) -> None:
+        cell = _grid_cell("cell-1", geometry=box(0.0, 0.0, 1.0, 1.0))
+
+        with TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            with (
+                mock.patch.object(precompute._STATE, "transit_reality_state", SimpleNamespace(reality_fingerprint="reality-123", analysis_date=date(2026, 4, 14))),
+                mock.patch.object(precompute._STATE, "study_area_metric", box(0.0, 0.0, 1.0, 1.0)),
+                mock.patch.object(precompute._STATE, "hashes", SimpleNamespace(build_key="build-123", import_fingerprint="import-123")),
+                mock.patch.object(precompute._STATE, "geo_cache_dir", cache_dir),
+                mock.patch.object(precompute._STATE, "score_cache_dir", cache_dir),
+                mock.patch.object(precompute, "load_walk_graph_index", return_value=mock.sentinel.walk_graph),
+                mock.patch.object(precompute, "load_transport_reality_points", return_value=[{"geom": Point(-6.26, 53.35), "public_departures_7d": 3, "source_status": "gtfs_direct"}]),
+                mock.patch.object(precompute, "snap_amenities", return_value={"transport": [101]}),
+                mock.patch.object(precompute, "nearest_nodes", return_value=[101]),
+                mock.patch.object(precompute, "cache_load", return_value=[101]),
+                mock.patch.object(precompute, "normalize_origin_node_ids", return_value=[101]),
+                mock.patch.object(precompute, "precompute_walk_counts_by_origin_node", return_value={101: {"transport": 1}}),
+                mock.patch.object(precompute, "precompute_walk_weighted_totals_by_origin_node", return_value={101: {"public_departures_7d": 3}}),
+                mock.patch.object(precompute, "replace_service_desert_rows") as replace_mock,
+            ):
+                precompute._compute_service_deserts(
+                    mock.sentinel.engine,
+                    {1000: [cell]},
+                )
+
+        replace_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            build_key="build-123",
+            desert_rows=[],
+        )
+
+
 class WorkflowTests(TestCase):
-    def test_precompute_skips_before_geometry_and_import_when_complete_build_exists(self) -> None:
+    def test_precompute_runs_transit_preflight_before_geometry(self) -> None:
+        kwargs = _workflow_kwargs(
+            transit_preflight=mock.Mock(side_effect=RuntimeError("gtfs-refresh unavailable")),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "gtfs-refresh unavailable"):
+            precompute._workflow.run_precompute_impl(**kwargs)
+
+        kwargs["phase_geometry"].assert_not_called()
+
+    def test_precompute_skips_after_geometry_when_complete_build_exists(self) -> None:
         kwargs = _workflow_kwargs(has_complete_build=mock.Mock(return_value=True))
 
         build_key = precompute._workflow.run_precompute_impl(**kwargs)
 
         self.assertEqual(build_key, "build-key-123")
-        kwargs["phase_geometry"].assert_not_called()
+        kwargs["phase_geometry"].assert_called_once()
         kwargs["ensure_local_osm_import"].assert_not_called()
-        kwargs["tracker_factory"].assert_not_called()
-        kwargs["print_cache_status"].assert_not_called()
-        kwargs["validate_all_tiers"].assert_not_called()
+        kwargs["tracker_factory"].assert_called_once()
+        kwargs["print_cache_status"].assert_called_once()
+        kwargs["validate_all_tiers"].assert_called_once()
 
     def test_precompute_skips_when_complete_build_and_pmtiles_present(self) -> None:
         with TemporaryDirectory() as tmp_name:
@@ -659,7 +738,7 @@ class WorkflowTests(TestCase):
 
         self.assertEqual(build_key, "build-key-123")
         bake_mock.assert_not_called()
-        kwargs["phase_geometry"].assert_not_called()
+        kwargs["phase_geometry"].assert_called_once()
         kwargs["publish_precomputed_artifacts"].assert_not_called()
 
     def test_precompute_rebakes_pmtiles_only_when_complete_build_but_archive_missing(self) -> None:
@@ -681,7 +760,7 @@ class WorkflowTests(TestCase):
             "build-key-123",
             pmtiles_path,
         )
-        kwargs["phase_geometry"].assert_not_called()
+        kwargs["phase_geometry"].assert_called_once()
         kwargs["publish_precomputed_artifacts"].assert_not_called()
 
     def test_precompute_propagates_pmtiles_bake_failure(self) -> None:
@@ -743,6 +822,8 @@ class WorkflowTests(TestCase):
         self.assertEqual(publish_kwargs["walk_rows"], walk_payload)
         self.assertEqual(publish_kwargs["amenity_rows"], amenity_payload)
         self.assertEqual(publish_kwargs["summary_json"], summary_payload)
+        self.assertEqual(publish_kwargs["transport_reality_rows"], [])
+        self.assertEqual(publish_kwargs["service_desert_rows"], [])
         self.assertNotIn("drive_rows", publish_kwargs)
         self.assertNotIn("hotspot_rows", publish_kwargs)
 
@@ -770,6 +851,96 @@ class WorkflowTests(TestCase):
         kwargs["ensure_local_osm_import"].assert_called_once()
         kwargs["tracker_factory"].assert_called_once()
         kwargs["publish_precomputed_artifacts"].assert_not_called()
+
+
+class TransitRefreshPreflightTests(TestCase):
+    def test_refresh_transit_fails_before_geometry_when_gtfs_preflight_fails(self) -> None:
+        source_state = SimpleNamespace(import_fingerprint="import-fingerprint-123")
+
+        with (
+            mock.patch.object(precompute, "build_engine", return_value=mock.sentinel.engine),
+            mock.patch.object(precompute, "ensure_database_ready"),
+            mock.patch.object(precompute, "resolve_source_state", return_value=source_state),
+            mock.patch.object(precompute._STATE, "activate"),
+            mock.patch.object(
+                precompute,
+                "_preflight_transit_rebuild",
+                side_effect=RuntimeError("gtfs-refresh unavailable"),
+            ),
+            mock.patch.object(precompute, "phase_geometry") as phase_geometry_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "gtfs-refresh unavailable"):
+                precompute.refresh_transit()
+
+        phase_geometry_mock.assert_not_called()
+
+    def test_refresh_transit_reuses_cached_manifest_without_geometry(self) -> None:
+        source_state = SimpleNamespace(import_fingerprint="import-fingerprint-123")
+        reality_state = SimpleNamespace(reality_fingerprint="reality-123")
+
+        with (
+            mock.patch.object(precompute, "build_engine", return_value=mock.sentinel.engine),
+            mock.patch.object(precompute, "ensure_database_ready"),
+            mock.patch.object(precompute, "resolve_source_state", return_value=source_state),
+            mock.patch.object(precompute._STATE, "activate"),
+            mock.patch.object(
+                precompute,
+                "_preflight_transit_rebuild",
+                return_value=(reality_state, False),
+            ) as preflight_mock,
+            mock.patch.object(
+                precompute,
+                "_ensure_transit_reality",
+                return_value=reality_state,
+            ) as ensure_transit_mock,
+            mock.patch.object(precompute, "phase_geometry") as phase_geometry_mock,
+        ):
+            result = precompute.refresh_transit()
+
+        self.assertEqual(result, "reality-123")
+        preflight_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            force_refresh=False,
+            refresh_download=True,
+        )
+        ensure_transit_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            import_fingerprint="import-fingerprint-123",
+            study_area_wgs84=None,
+            force_refresh=False,
+            refresh_download=False,
+            reality_state=reality_state,
+        )
+        phase_geometry_mock.assert_not_called()
+
+    def test_preflight_transit_rebuild_skips_walkgraph_when_transit_reality_is_cached(self) -> None:
+        with (
+            mock.patch.object(
+                precompute._STATE,
+                "source_state",
+                SimpleNamespace(import_fingerprint="import-fingerprint-123"),
+            ),
+            mock.patch.object(
+                precompute,
+                "_transit_reality_refresh_required",
+                return_value=(mock.sentinel.state, False),
+            ) as refresh_required_mock,
+            mock.patch.object(
+                precompute,
+                "ensure_walkgraph_subcommand_available",
+            ) as ensure_subcommand_mock,
+        ):
+            state, refresh_required = precompute._preflight_transit_rebuild(mock.sentinel.engine)
+
+        refresh_required_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            import_fingerprint="import-fingerprint-123",
+            refresh_download=False,
+            force_refresh=False,
+        )
+        self.assertIs(state, mock.sentinel.state)
+        self.assertFalse(refresh_required)
+        ensure_subcommand_mock.assert_not_called()
 
 
 class GridArtifactTests(TestCase):

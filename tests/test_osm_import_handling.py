@@ -6,7 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
-from config import OSM_IMPORT_SCHEMA, SourceState
+from config import OSM_IMPORT_SCHEMA, SourceState, TRANSIT_DERIVED_SCHEMA, TRANSIT_RAW_SCHEMA
 import db_postgis
 import db_postgis.reads as db_reads
 import db_postgis.schema as db_schema
@@ -105,6 +105,8 @@ def _managed_schema_inspector(
 
     public_tables = []
     raw_tables = []
+    transit_raw_tables = []
+    transit_derived_tables = []
     for table in db_schema._MANAGED_TABLES:
         schema_name = str(table.schema or "public")
         table_name = str(table.name)
@@ -114,6 +116,10 @@ def _managed_schema_inspector(
             public_tables.append(table_name)
         elif schema_name == OSM_IMPORT_SCHEMA:
             raw_tables.append(table_name)
+        elif schema_name == TRANSIT_RAW_SCHEMA:
+            transit_raw_tables.append(table_name)
+        elif schema_name == TRANSIT_DERIVED_SCHEMA:
+            transit_derived_tables.append(table_name)
     if include_alembic_version:
         public_tables.append("alembic_version")
 
@@ -124,6 +130,10 @@ def _managed_schema_inspector(
             return list(public_tables)
         if schema == OSM_IMPORT_SCHEMA:
             return list(raw_tables)
+        if schema == TRANSIT_RAW_SCHEMA:
+            return list(transit_raw_tables)
+        if schema == TRANSIT_DERIVED_SCHEMA:
+            return list(transit_derived_tables)
         return []
 
     def _get_columns(table_name, schema=None):
@@ -490,13 +500,12 @@ class DbPostgisImportStateTests(TestCase):
         connect_connection = mock.MagicMock()
         engine.begin.return_value.__enter__.return_value = begin_connection
         engine.connect.return_value.__enter__.return_value = connect_connection
+        empty_managed_tables = {
+            (str(table.schema or "public"), str(table.name))
+            for table in db_schema._MANAGED_TABLES
+        }
         legacy_inspector = _managed_schema_inspector(
-            missing_tables={
-                ("public", "grid_walk"),
-                ("public", "amenities"),
-                ("public", "build_manifest"),
-                (OSM_IMPORT_SCHEMA, "import_manifest"),
-            }
+            missing_tables=empty_managed_tables,
         )
         final_inspector = _managed_schema_inspector(include_alembic_version=True)
 
@@ -567,7 +576,8 @@ class DbReadTests(TestCase):
     def test_load_source_amenity_rows_preserves_polygon_park_area(self) -> None:
         engine = mock.MagicMock()
         connection = engine.connect.return_value.__enter__.return_value
-        connection.execute.return_value.mappings.return_value.all.return_value = [
+        connection.execution_options.return_value = connection
+        connection.execute.return_value.yield_per.return_value.mappings.return_value = [
             {
                 "category": "parks",
                 "osm_type": "way",
@@ -600,6 +610,39 @@ class DbReadTests(TestCase):
         self.assertEqual(rows[0]["park_area_m2"], 125_000.0)
         self.assertEqual(rows[1]["source_ref"], "node/456")
         self.assertEqual(rows[1]["park_area_m2"], 0.0)
+
+    def test_load_transport_reality_rows_for_scoring_keeps_gtfs_direct_active_rows(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.mappings.return_value.all.return_value = [
+            {
+                "source_ref": "gtfs/nta/S1",
+                "geom": "gtfs-point",
+            }
+        ]
+        root = SimpleNamespace(
+            from_shape=mock.Mock(return_value="study-area"),
+            to_shape=lambda geom: geom,
+        )
+
+        with mock.patch.object(db_reads, "root_module", return_value=root):
+            rows = db_postgis.load_transport_reality_rows_for_scoring(
+                engine,
+                "reality-123",
+                mock.sentinel.study_area_wgs84,
+            )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "category": "transport",
+                    "source_ref": "gtfs/nta/S1",
+                    "geom": "gtfs-point",
+                    "park_area_m2": 0.0,
+                }
+            ],
+        )
 
     def test_load_walk_rows_includes_effective_area_fields(self) -> None:
         engine = mock.MagicMock()

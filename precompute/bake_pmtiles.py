@@ -31,6 +31,7 @@ DEFAULT_BBOX = (-11.0, 51.3, -5.3, 55.5)
 # Amenity points are only meaningful once you can actually see individual
 # features; below this zoom they would be unreadable noise.
 AMENITY_MIN_ZOOM = 9
+TRANSPORT_REALITY_MIN_ZOOM = 9
 GRID_AMENITY_CATEGORIES = ("shops", "transport", "healthcare", "parks")
 
 
@@ -52,6 +53,7 @@ def _pmtiles_metadata(
     max_zoom: int,
     grid_max_zoom: int,
     amenity_min_zoom: int,
+    transport_reality_min_zoom: int,
 ) -> dict[str, object]:
     return {
         "name": "livability",
@@ -71,6 +73,34 @@ def _pmtiles_metadata(
                     "category": "String",
                     "source": "String",
                     "source_ref": "String",
+                },
+            },
+            {
+                "id": "transport_reality",
+                "minzoom": transport_reality_min_zoom,
+                "maxzoom": max_zoom,
+                "fields": {
+                    "source_ref": "String",
+                    "stop_name": "String",
+                    "feed_id": "String",
+                    "stop_id": "String",
+                    "reality_status": "String",
+                    "source_status": "String",
+                    "school_only_state": "String",
+                    "public_departures_7d": "Number",
+                    "public_departures_30d": "Number",
+                    "school_only_departures_30d": "Number",
+                },
+            },
+            {
+                "id": "service_deserts",
+                "minzoom": min_zoom,
+                "maxzoom": grid_max_zoom,
+                "fields": {
+                    "cell_id": "String",
+                    "resolution_m": "Number",
+                    "baseline_reachable_stop_count": "Number",
+                    "reachable_public_departures_7d": "Number",
                 },
             },
         ],
@@ -181,6 +211,73 @@ _AMENITY_TILE_SQL = text(
 )
 
 
+_TRANSPORT_REALITY_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            t.source_ref,
+            t.stop_name,
+            t.feed_id,
+            t.stop_id,
+            t.reality_status,
+            t.source_status,
+            t.school_only_state,
+            t.public_departures_7d,
+            t.public_departures_30d,
+            t.school_only_departures_30d,
+            ST_AsMVTGeom(
+                ST_Transform(t.geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM transport_reality AS t, tile
+        WHERE t.build_key = :build_key
+          AND t.geom && tile.env_4326
+          AND ST_Intersects(t.geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'transport_reality', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
+_SERVICE_DESERT_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            s.cell_id,
+            s.resolution_m,
+            s.baseline_reachable_stop_count,
+            s.reachable_public_departures_7d,
+            ST_AsMVTGeom(
+                ST_Transform(s.cell_geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM service_deserts AS s, tile
+        WHERE s.build_key = :build_key
+          AND s.resolution_m = :resolution_m
+          AND s.cell_geom && tile.env_4326
+          AND ST_Intersects(s.cell_geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'service_deserts', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
 _AMENITY_POINT_SQL = text(
     """
     SELECT
@@ -188,6 +285,17 @@ _AMENITY_POINT_SQL = text(
         ST_Y(a.geom) AS lat
     FROM amenities AS a
     WHERE a.build_key = :build_key
+    """
+)
+
+
+_TRANSPORT_REALITY_POINT_SQL = text(
+    """
+    SELECT
+        ST_X(t.geom) AS lon,
+        ST_Y(t.geom) AS lat
+    FROM transport_reality AS t
+    WHERE t.build_key = :build_key
     """
 )
 
@@ -201,6 +309,8 @@ def _tile_mvt_bytes(
     y: int,
     include_grid: bool,
     include_amenities: bool,
+    include_transport_reality: bool,
+    include_service_deserts: bool,
 ) -> bytes:
     """Build a single MVT for ``(z, x, y)`` containing both grid and amenities.
 
@@ -233,12 +343,49 @@ def _tile_mvt_bytes(
             ).scalar()
             or b""
         )
-    return bytes(grid_bytes) + bytes(amenity_bytes)
+    transport_reality_bytes = b""
+    if include_transport_reality:
+        transport_reality_bytes = (
+            connection.execute(
+                _TRANSPORT_REALITY_TILE_SQL,
+                {"z": z, "x": x, "y": y, "build_key": build_key},
+            ).scalar()
+            or b""
+        )
+    service_desert_bytes = b""
+    if include_service_deserts:
+        service_desert_bytes = (
+            connection.execute(
+                _SERVICE_DESERT_TILE_SQL,
+                {
+                    "z": z,
+                    "x": x,
+                    "y": y,
+                    "build_key": build_key,
+                    "resolution_m": _resolution_for_zoom(z),
+                },
+            ).scalar()
+            or b""
+        )
+    return (
+        bytes(grid_bytes)
+        + bytes(amenity_bytes)
+        + bytes(transport_reality_bytes)
+        + bytes(service_desert_bytes)
+    )
 
 
 def _load_amenity_points(connection, *, build_key: str) -> list[tuple[float, float]]:
     rows = connection.execute(
         _AMENITY_POINT_SQL,
+        {"build_key": build_key},
+    ).mappings().all()
+    return [(float(row["lon"]), float(row["lat"])) for row in rows]
+
+
+def _load_transport_reality_points(connection, *, build_key: str) -> list[tuple[float, float]]:
+    rows = connection.execute(
+        _TRANSPORT_REALITY_POINT_SQL,
         {"build_key": build_key},
     ).mappings().all()
     return [(float(row["lon"]), float(row["lat"])) for row in rows]
@@ -262,6 +409,15 @@ def _amenity_tile_coordinates(
     return sorted(tile_coords)
 
 
+def _point_tile_coordinates(
+    points: list[tuple[float, float]],
+    *,
+    zoom: int,
+    bbox: tuple[float, float, float, float],
+) -> list[tuple[int, int]]:
+    return _amenity_tile_coordinates(points, zoom=zoom, bbox=bbox)
+
+
 def bake_pmtiles(
     engine,
     build_key: str,
@@ -271,6 +427,7 @@ def bake_pmtiles(
     min_zoom: int = DEFAULT_MIN_ZOOM,
     max_zoom: int = DEFAULT_MAX_ZOOM,
     amenity_min_zoom: int = AMENITY_MIN_ZOOM,
+    transport_reality_min_zoom: int = TRANSPORT_REALITY_MIN_ZOOM,
     **_legacy_kwargs,
 ) -> Path:
     """Bake the build into a PMTiles archive at ``output_path``.
@@ -290,12 +447,15 @@ def bake_pmtiles(
     with output_path.open("wb") as handle, engine.connect() as connection:
         writer = Writer(handle)
         amenity_points = _load_amenity_points(connection, build_key=build_key)
+        transport_reality_points = _load_transport_reality_points(connection, build_key=build_key)
         _, coarse_grid_max_zoom = zoom_bounds_for_resolution(5000)
         for zoom in range(min_zoom, max_zoom + 1):
             include_amenities = zoom >= amenity_min_zoom
+            include_transport_reality = zoom >= transport_reality_min_zoom
             include_grid = zoom <= coarse_grid_max_zoom
+            include_service_deserts = zoom <= coarse_grid_max_zoom
             zoom_started = tiles_written
-            if include_grid:
+            if include_grid or include_service_deserts:
                 x_min, x_max, y_min, y_max = _tile_range_for_bbox(zoom, bbox)
                 for x in range(x_min, x_max + 1):
                     for y in range(y_min, y_max + 1):
@@ -305,8 +465,10 @@ def bake_pmtiles(
                             z=zoom,
                             x=x,
                             y=y,
-                            include_grid=True,
+                            include_grid=include_grid,
                             include_amenities=include_amenities,
+                            include_transport_reality=include_transport_reality,
+                            include_service_deserts=include_service_deserts,
                         )
                         if not payload:
                             tiles_empty += 1
@@ -319,11 +481,23 @@ def bake_pmtiles(
                 )
                 continue
 
-            tile_coords = [] if not include_amenities else _amenity_tile_coordinates(
-                amenity_points,
-                zoom=zoom,
-                bbox=bbox,
-            )
+            tile_coords: set[tuple[int, int]] = set()
+            if include_amenities:
+                tile_coords.update(
+                    _point_tile_coordinates(
+                        amenity_points,
+                        zoom=zoom,
+                        bbox=bbox,
+                    )
+                )
+            if include_transport_reality:
+                tile_coords.update(
+                    _point_tile_coordinates(
+                        transport_reality_points,
+                        zoom=zoom,
+                        bbox=bbox,
+                    )
+                )
             for x, y in tile_coords:
                 payload = _tile_mvt_bytes(
                     connection,
@@ -332,7 +506,9 @@ def bake_pmtiles(
                     x=x,
                     y=y,
                     include_grid=False,
-                    include_amenities=True,
+                    include_amenities=include_amenities,
+                    include_transport_reality=include_transport_reality,
+                    include_service_deserts=False,
                 )
                 if not payload:
                     tiles_empty += 1
@@ -364,6 +540,7 @@ def bake_pmtiles(
             max_zoom=max_zoom,
             grid_max_zoom=coarse_grid_max_zoom,
             amenity_min_zoom=amenity_min_zoom,
+            transport_reality_min_zoom=transport_reality_min_zoom,
         )
         writer.finalize(header, metadata)
 

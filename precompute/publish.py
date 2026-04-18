@@ -224,9 +224,14 @@ def summary_json_impl(
     fine_resolutions_m: list[int],
     output_html,
     zoom_breaks,
+    transit_reality_state=None,
+    transit_analysis_window_days: int | None = None,
+    transit_service_desert_window_days: int | None = None,
+    transport_reality_download_url: str | None = None,
+    service_deserts_enabled: bool = False,
 ) -> dict[str, Any]:
     centre = study_area_wgs84.centroid
-    return {
+    payload = {
         "build_key": hashes.build_key,
         "config_hash": hashes.config_hash,
         "build_profile": str(build_profile),
@@ -242,3 +247,18 @@ def summary_json_impl(
         "zoom_breaks": zoom_breaks,
         "surface_zoom_breaks": zoom_breaks,
     }
+    if transit_reality_state is not None:
+        payload.update(
+            {
+                "transit_analysis_date": transit_reality_state.analysis_date.isoformat(),
+                "transit_analysis_window_days": int(transit_analysis_window_days or 0),
+                "transit_service_desert_window_days": int(
+                    transit_service_desert_window_days or 0
+                ),
+                "transit_reality_fingerprint": transit_reality_state.reality_fingerprint,
+                "transport_reality_enabled": True,
+                "service_deserts_enabled": bool(service_deserts_enabled),
+                "transport_reality_download_url": transport_reality_download_url,
+            }
+        )
+    return payload

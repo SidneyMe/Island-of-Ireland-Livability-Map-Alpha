@@ -28,6 +28,8 @@ def _print_build_context(source_state, hashes) -> None:
     print(f"Import fingerprint: {source_state.import_fingerprint}")
     print(f"Build profile: {getattr(hashes, 'build_profile', 'full')}")
     print(f"Config hash: {hashes.config_hash}")
+    transit_fingerprint = getattr(hashes, "transit_reality_fingerprint", "transit-unavailable")
+    print(f"Transit reality fingerprint: {transit_fingerprint}")
     print(f"Build key: {hashes.build_key}")
     print()
 
@@ -161,12 +163,17 @@ def run_precompute_impl(
     tracker_factory,
     walk_rows,
     amenity_rows,
+    transport_reality_rows,
+    service_desert_rows,
+    compute_service_deserts,
     publish_precomputed_artifacts,
     summary_json,
     package_snapshot,
     python_version,
     get_hashes,
     set_source_state,
+    ensure_transit_reality=None,
+    transit_preflight=None,
     fine_surface_ready=None,
     bake_pmtiles=None,
     pmtiles_output_path: Path | None = None,
@@ -183,6 +190,56 @@ def run_precompute_impl(
         set_source_state=set_source_state,
     )
     _print_build_context(source_state, hashes)
+
+    normalization_scope_hash = current_normalization_scope_hash()
+    import_was_ready = import_payload_ready(
+        engine,
+        source_state.import_fingerprint,
+        normalization_scope_hash,
+    )
+    if not import_was_ready and not auto_refresh_import:
+        raise _import_not_ready_error(source_state)
+
+    if transit_preflight is not None:
+        transit_preflight(engine)
+
+    tracker = tracker_factory(cache_dir / "precompute_timing_stats.json")
+    if import_was_ready:
+        tracker.start_phase("import", detail="checking raw OSM import manifest")
+        tracker.finish_phase("import", "cached", detail="raw OSM import ready")
+
+    study_area_metric, study_area_wgs84 = phase_geometry(tracker)
+    _print_geometry_bounds(study_area_metric)
+
+    if not import_was_ready:
+        tracker.start_phase("import", detail="refreshing raw OSM import")
+        ensure_local_osm_import(
+            engine,
+            source_state,
+            study_area_wgs84=study_area_wgs84,
+            normalization_scope_hash=normalization_scope_hash,
+            force_refresh=False,
+            progress_cb=tracker.phase_callback("import"),
+        )
+        tracker.finish_phase("import", "completed", detail="raw OSM import ready")
+
+    if ensure_transit_reality is not None:
+        ensure_transit_reality(
+            engine,
+            import_fingerprint=source_state.import_fingerprint,
+            study_area_wgs84=study_area_wgs84,
+            progress_cb=tracker.phase_callback("transit"),
+        )
+        hashes = get_hashes()
+        _print_build_context(source_state, hashes)
+
+    print("Cache:")
+    print_cache_status()
+
+    print()
+    print("Tier validation:")
+    validate_all_tiers()
+    print()
 
     if has_complete_build(engine, hashes.build_key) and not force_precompute:
         bake_configured = _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path)
@@ -215,43 +272,6 @@ def run_precompute_impl(
             "but the fine surface cache is missing. Rebuilding fine raster artifacts."
         )
 
-    normalization_scope_hash = current_normalization_scope_hash()
-    import_was_ready = import_payload_ready(
-        engine,
-        source_state.import_fingerprint,
-        normalization_scope_hash,
-    )
-    if not import_was_ready and not auto_refresh_import:
-        raise _import_not_ready_error(source_state)
-
-    print("Cache:")
-    print_cache_status()
-
-    print()
-    print("Tier validation:")
-    validate_all_tiers()
-    print()
-
-    tracker = tracker_factory(cache_dir / "precompute_timing_stats.json")
-    if import_was_ready:
-        tracker.start_phase("import", detail="checking raw OSM import manifest")
-        tracker.finish_phase("import", "cached", detail="raw OSM import ready")
-
-    study_area_metric, study_area_wgs84 = phase_geometry(tracker)
-    _print_geometry_bounds(study_area_metric)
-
-    if not import_was_ready:
-        tracker.start_phase("import", detail="refreshing raw OSM import")
-        ensure_local_osm_import(
-            engine,
-            source_state,
-            study_area_wgs84=study_area_wgs84,
-            normalization_scope_hash=normalization_scope_hash,
-            force_refresh=False,
-            progress_cb=tracker.phase_callback("import"),
-        )
-        tracker.finish_phase("import", "completed", detail="raw OSM import ready")
-
     if score_grid_fast_path_candidate():
         tracker.set_phase_expected("networks", False)
         tracker.set_phase_expected("reachability", False)
@@ -268,6 +288,9 @@ def run_precompute_impl(
     )
     print()
 
+    if compute_service_deserts is not None:
+        compute_service_deserts(engine, walk_grids)
+
     publish_started_at = datetime.now(timezone.utc)
     publish_progress_cb = tracker.phase_callback("publish")
 
@@ -279,6 +302,16 @@ def run_precompute_impl(
     )
     amenity_row_payload = amenity_rows(
         amenity_source_rows,
+        publish_started_at,
+        progress_cb=publish_progress_cb,
+    )
+    transport_reality_row_payload = transport_reality_rows(
+        engine,
+        publish_started_at,
+        progress_cb=publish_progress_cb,
+    )
+    service_desert_row_payload = service_desert_rows(
+        engine,
         publish_started_at,
         progress_cb=publish_progress_cb,
     )
@@ -294,7 +327,12 @@ def run_precompute_impl(
         time.perf_counter() - summary_started_at,
         force_log=True,
     )
-    publish_total_rows = len(walk_row_payload) + len(amenity_row_payload)
+    publish_total_rows = (
+        len(walk_row_payload)
+        + len(amenity_row_payload)
+        + len(transport_reality_row_payload)
+        + len(service_desert_row_payload)
+    )
     tracker.set_phase_totals(
         "publish",
         total_units=publish_total_rows,
@@ -313,6 +351,8 @@ def run_precompute_impl(
         python_version=python_version(),
         packages_json=package_snapshot(),
         summary_json=summary_payload,
+        transport_reality_rows=transport_reality_row_payload,
+        service_desert_rows=service_desert_row_payload,
         progress_cb=publish_progress_cb,
     )
     walk_stats = getattr(walk_row_payload, "stats", None)
@@ -342,6 +382,22 @@ def run_precompute_impl(
             "publish",
             "amenity_row_assembly",
             getattr(amenity_stats, "row_assembly_seconds", 0.0),
+            force_log=True,
+        )
+    transport_reality_stats = getattr(transport_reality_row_payload, "stats", None)
+    if transport_reality_stats is not None:
+        tracker.record_substep(
+            "publish",
+            "transport_reality_row_assembly",
+            getattr(transport_reality_stats, "row_assembly_seconds", 0.0),
+            force_log=True,
+        )
+    service_desert_stats = getattr(service_desert_row_payload, "stats", None)
+    if service_desert_stats is not None:
+        tracker.record_substep(
+            "publish",
+            "service_desert_row_assembly",
+            getattr(service_desert_stats, "row_assembly_seconds", 0.0),
             force_log=True,
         )
     publish_write_seconds = max(

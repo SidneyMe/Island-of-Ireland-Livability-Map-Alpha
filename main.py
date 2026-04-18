@@ -16,6 +16,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh the raw local OSM amenity import without running full scoring.",
     )
     parser.add_argument(
+        "--refresh-transit",
+        action="store_true",
+        help="Refresh GTFS-derived transit reality, reusing unchanged manifests when possible.",
+    )
+    parser.add_argument(
+        "--force-transit-refresh",
+        action="store_true",
+        help="Force a full GTFS transit rebuild even if the current transit reality manifest matches.",
+    )
+    parser.add_argument(
         "--precompute",
         action="store_true",
         help="Run derived livability precompute using the existing raw OSM import state.",
@@ -83,10 +93,14 @@ def main() -> int:
         parser.error("--serve/--render and --serve-dev/--render-dev are mutually exclusive")
     if args.force_precompute and not precompute_requested:
         parser.error("--force-precompute requires --precompute or --precompute-dev")
+    if args.force_transit_refresh and not args.refresh_transit:
+        parser.error("--force-transit-refresh requires --refresh-transit")
     if args.auto_refresh_import and not precompute_requested:
         parser.error("--auto-refresh-import requires --precompute or --precompute-dev")
 
-    run_render = serve_full_requested or serve_dev_requested or (not precompute_requested and not args.refresh_import)
+    run_render = serve_full_requested or serve_dev_requested or (
+        not precompute_requested and not args.refresh_import and not args.refresh_transit
+    )
     serve_profile = "dev" if serve_dev_requested else "full"
 
     try:
@@ -94,6 +108,10 @@ def main() -> int:
             from precompute import refresh_local_import as _refresh_local_import
 
             _refresh_local_import()
+        if args.refresh_transit:
+            from precompute import refresh_transit as _refresh_transit
+
+            _refresh_transit(force_refresh=args.force_transit_refresh, refresh_download=True)
         if precompute_requested:
             from precompute import run_precompute as _run_precompute
 

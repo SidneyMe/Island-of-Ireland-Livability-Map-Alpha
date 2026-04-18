@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest import TestCase, mock
 
+import geopandas as gpd
 from shapely.errors import GEOSException
 from shapely.geometry import MultiPolygon, Point, Polygon, box
 
 import config
+from progress_tracker import PrecomputeProgressTracker
 import study_area
 from precompute.grid import build_scoring_grid
 
@@ -248,6 +253,89 @@ class CoastalArtifactCleanupTests(TestCase):
         self.assertIn("rep=", log_line)
         self.assertIn("area_m2=", log_line)
         self.assertIn("bounds_wgs84=", log_line)
+
+    def test_clean_union_falls_back_when_coverage_fast_path_errors(self) -> None:
+        left = _rect(0, 0, 10, 10)
+        right = _rect(10, 0, 20, 10)
+        expected = study_area._as_2d(study_area.unary_union([left, right]))
+
+        with mock.patch.object(
+            study_area,
+            "_coverage_union_fast_path",
+            side_effect=GEOSException("boom"),
+        ):
+            unioned = study_area.clean_union([left, right])
+
+        self.assertTrue(unioned.equals(expected))
+
+    def test_load_study_area_geometries_records_substeps_and_ordered_details(self) -> None:
+        roi_gdf = gpd.GeoDataFrame(
+            geometry=[
+                _rect(700_000, 800_000, 701_000, 801_000),
+                _rect(710_000, 810_000, 710_150, 810_150),
+            ],
+            crs=config.TARGET_CRS,
+        )
+        ni_gdf = gpd.GeoDataFrame(
+            geometry=[_rect(720_000, 820_000, 720_400, 820_400)],
+            crs=config.TARGET_CRS,
+        )
+
+        with TemporaryDirectory() as tmp_name:
+            stats_path = Path(tmp_name) / "progress.json"
+            tracker = PrecomputeProgressTracker(
+                stats_path,
+                progress_interval_seconds=999.0,
+            )
+
+            with (
+                mock.patch("builtins.print") as print_mock,
+                mock.patch.object(study_area.gpd, "read_file", side_effect=[roi_gdf, ni_gdf]),
+            ):
+                tracker.start_phase("geometry", detail="loading study area geometry")
+                study_area_metric, study_area_wgs84 = study_area.load_study_area_geometries(
+                    progress_cb=tracker.phase_callback("geometry"),
+                )
+                tracker.finish_phase("geometry", "completed", detail="computed study area geometry")
+                tracker.save_successful_timings()
+
+            payload = json.loads(stats_path.read_text(encoding="utf-8"))
+
+        self.assertFalse(study_area_metric.is_empty)
+        self.assertFalse(study_area_wgs84.is_empty)
+        geometry_substeps = payload["substeps"]["geometry"]
+        self.assertTrue(
+            {
+                "roi_read",
+                "roi_project",
+                "roi_union",
+                "ni_read",
+                "ni_project",
+                "ni_union",
+                "island_merge",
+                "island_simplify",
+                "coastal_cleanup_components",
+                "coastal_cleanup_union",
+                "study_area_wgs84_transform",
+            }.issubset(geometry_substeps)
+        )
+
+        output = "\n".join(call.args[0] for call in print_mock.call_args_list if call.args)
+        ordered_details = [
+            f"reading boundary file {config.ROI_BOUNDARY_PATH.name}",
+            f"projecting {config.ROI_BOUNDARY_PATH.name} to {config.TARGET_CRS}",
+            f"unioning geometries from {config.ROI_BOUNDARY_PATH.name}",
+            f"reading boundary file {config.NI_BOUNDARY_PATH.name}",
+            "merging ROI and NI boundaries",
+            "simplifying merged island boundary",
+            "cleaning coastal artifacts across 3 components",
+            "cleaning coastal artifacts: largest component 1/3",
+            "cleaning coastal artifacts: largest component complete (1/3)",
+            "reassembling cleaned coastal components",
+            "transforming study area to WGS84",
+        ]
+        positions = [output.index(detail) for detail in ordered_details]
+        self.assertEqual(positions, sorted(positions))
 
 
 class GridCoastalClipTests(TestCase):

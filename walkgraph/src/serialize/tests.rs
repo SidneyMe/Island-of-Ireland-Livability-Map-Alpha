@@ -1,6 +1,4 @@
-use super::{
-    now_utc_rfc3339, prepare_output_dir, write_meta_json, write_node_sidecars, GraphMeta,
-};
+use super::{now_utc_rfc3339, prepare_output_dir, write_meta_json, write_node_sidecars, GraphMeta};
 use crate::pbf::Bbox;
 use std::fs;
 use tempfile::TempDir;
@@ -27,7 +25,9 @@ fn node_sidecars_reject_length_mismatch() {
     let err = write_node_sidecars(&[(53.0, -6.0)], &[1, 2], &paths)
         .expect_err("mismatched sidecars should fail");
 
-    assert!(err.to_string().contains("coords and osm ids length mismatch"));
+    assert!(err
+        .to_string()
+        .contains("coords and osm ids length mismatch"));
 }
 
 #[test]

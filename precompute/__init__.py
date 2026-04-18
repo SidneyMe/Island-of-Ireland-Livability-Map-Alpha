@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,8 @@ from config import (
     CACHE_SCHEMA_VERSION,
     CAPS,
     FORCE_RECOMPUTE,
+    GTFS_ANALYSIS_WINDOW_DAYS,
+    GTFS_SERVICE_DESERT_WINDOW_DAYS,
     LIVABILITY_SURFACE_THREADS,
     MANIFEST_NAME,
     OSM_EXTRACT_PATH,
@@ -34,7 +37,10 @@ from db_postgis import (
     has_complete_build,
     import_payload_ready,
     load_source_amenity_rows,
+    load_service_desert_rows,
+    load_transport_reality_points,
     publish_precomputed_artifacts,
+    replace_service_desert_rows,
 )
 from local_osm_import import ensure_local_osm_import, resolve_source_state
 from network import (
@@ -45,6 +51,11 @@ from network import (
 )
 from progress_tracker import PrecomputeProgressTracker
 from study_area import load_study_area_geometries, study_area_wgs84_envelope_from_metric
+from transit import (
+    ensure_transit_reality as _ensure_transit_reality_impl,
+    transit_reality_refresh_required as _transit_reality_refresh_required,
+)
+from walkgraph_support import ensure_walkgraph_subcommand_available
 
 from . import cache as _cache
 from . import grid as _grid
@@ -55,6 +66,7 @@ from . import surface as _surface
 from . import tiers as _tiers
 from . import workflow as _workflow
 from .bake_pmtiles import bake_pmtiles as _bake_pmtiles
+import overture.loader as _overture
 
 
 @dataclass
@@ -71,14 +83,20 @@ class _BuildState:
     tier_valid: dict[Path, bool] = field(default_factory=dict)
     tiers_building: set[Path] = field(default_factory=set)
     source_state: Any = None
+    transit_reality_state: Any = None
     study_area_metric: Any = None
     study_area_wgs84: Any = None
+    overture_source_rows: list[dict] = field(default_factory=list)
 
     @classmethod
     def bootstrap(cls) -> _BuildState:
         profile = normalize_build_profile()
         settings = build_profile_settings(profile)
-        hashes = build_hashes_for_import("bootstrap", profile=profile)
+        hashes = build_hashes_for_import(
+            "bootstrap",
+            transit_reality_fingerprint="bootstrap",
+            profile=profile,
+        )
         return cls(
             profile=profile,
             settings=settings,
@@ -101,10 +119,20 @@ class _BuildState:
             ),
         )
 
-    def activate(self, import_fingerprint: str, *, profile: str) -> None:
+    def activate(
+        self,
+        import_fingerprint: str,
+        *,
+        transit_reality_fingerprint: str = "transit-unavailable",
+        profile: str,
+    ) -> None:
         self.profile = normalize_build_profile(profile)
         self.settings = build_profile_settings(self.profile)
-        self.hashes = build_hashes_for_import(import_fingerprint, profile=self.profile)
+        self.hashes = build_hashes_for_import(
+            import_fingerprint,
+            transit_reality_fingerprint=transit_reality_fingerprint,
+            profile=self.profile,
+        )
         self.geo_cache_dir = CACHE_DIR / f"geo_{self.hashes.geo_hash}"
         self.reach_cache_dir = CACHE_DIR / f"reach_{self.hashes.reach_hash}"
         self.score_cache_dir = CACHE_DIR / f"score_{self.hashes.score_hash}"
@@ -411,7 +439,7 @@ def phase_amenities(
     study_area_wgs84,
     tracker: PrecomputeProgressTracker,
 ) -> tuple[dict[str, list[tuple[float, float]]], list[dict[str, Any]]]:
-    return _phases.phase_amenities_impl(
+    result = _phases.phase_amenities_impl(
         engine,
         study_area_wgs84,
         tracker,
@@ -425,7 +453,15 @@ def phase_amenities(
         mark_complete=_mark_complete,
         can_finalize_reach_tier=_can_finalize_reach_tier,
         load_source_amenity_rows=load_source_amenity_rows,
+        transit_reality_fingerprint=_STATE.hashes.transit_reality_fingerprint,
     )
+    # Load Overture places for visualization — never fed to walkgraph scoring
+    if _overture.is_available():
+        _STATE.overture_source_rows = _overture.load_overture_amenity_rows(study_area_wgs84)
+        print(f"  [overture] loaded {len(_STATE.overture_source_rows):,} Overture places rows")
+    else:
+        _STATE.overture_source_rows = []
+    return result
 
 
 def phase_networks(
@@ -549,11 +585,193 @@ def _amenity_rows(
     *,
     progress_cb=None,
 ):
-    return _publish.iter_amenity_rows_impl(
+    osm_stream = _publish.iter_amenity_rows_impl(
         amenity_source_rows,
         created_at,
         hashes=_STATE.hashes,
         progress_cb=progress_cb,
+    )
+    overture_rows = _STATE.overture_source_rows
+    if not overture_rows:
+        return osm_stream
+
+    def _combined():
+        yield from osm_stream
+        yield from _overture.iter_overture_db_rows(overture_rows, created_at, hashes=_STATE.hashes)
+
+    return _publish.PreparedRowStream(
+        osm_stream.row_count + len(overture_rows),
+        _combined,
+        osm_stream.stats,
+    )
+
+
+def _transport_reality_rows(engine, created_at, *, progress_cb=None):
+    del progress_cb
+    if _STATE.transit_reality_state is None:
+        return []
+    rows = load_transport_reality_points(
+        engine,
+        _STATE.transit_reality_state.reality_fingerprint,
+    )
+    return [
+        {
+            "build_key": _STATE.hashes.build_key,
+            "config_hash": _STATE.hashes.config_hash,
+            "import_fingerprint": _STATE.hashes.import_fingerprint,
+            "source_ref": row["source_ref"],
+            "stop_name": row["stop_name"],
+            "reality_status": row["reality_status"],
+            "source_status": row["source_status"],
+            "school_only_state": row["school_only_state"],
+            "feed_id": row["feed_id"],
+            "stop_id": row["stop_id"],
+            "public_departures_7d": row["public_departures_7d"],
+            "public_departures_30d": row["public_departures_30d"],
+            "school_only_departures_30d": row["school_only_departures_30d"],
+            "last_public_service_date": row["last_public_service_date"],
+            "last_any_service_date": row["last_any_service_date"],
+            "route_modes_json": row["route_modes_json"],
+            "source_reason_codes_json": row["source_reason_codes_json"],
+            "reality_reason_codes_json": row["reality_reason_codes_json"],
+            "geom": row["geom"],
+            "created_at": created_at,
+        }
+        for row in rows
+    ]
+
+
+def _service_desert_rows(engine, created_at, *, progress_cb=None):
+    del progress_cb
+    rows = load_service_desert_rows(engine, _STATE.hashes.build_key)
+    return [
+        {
+            "build_key": _STATE.hashes.build_key,
+            "config_hash": _STATE.hashes.config_hash,
+            "import_fingerprint": _STATE.hashes.import_fingerprint,
+            "resolution_m": row["resolution_m"],
+            "cell_id": row["cell_id"],
+            "analysis_date": row["analysis_date"],
+            "baseline_reachable_stop_count": row["baseline_reachable_stop_count"],
+            "reachable_public_departures_7d": row["reachable_public_departures_7d"],
+            "reason_codes_json": row["reason_codes_json"],
+            "cell_geom": row["cell_geom"],
+            "created_at": created_at,
+        }
+        for row in rows
+    ]
+
+
+def _compute_service_deserts(engine, walk_grids: dict[int, list[dict[str, Any]]]) -> None:
+    if _STATE.transit_reality_state is None or _STATE.study_area_metric is None:
+        return
+    walk_graph = load_walk_graph_index(_STATE.geo_cache_dir / "walk_graph")
+    reality_rows = load_transport_reality_points(
+        engine,
+        _STATE.transit_reality_state.reality_fingerprint,
+    )
+    if not reality_rows:
+        replace_service_desert_rows(engine, build_key=_STATE.hashes.build_key, desert_rows=[])
+        return
+
+    baseline_rows = [
+        row
+        for row in reality_rows
+        if str(row.get("source_status") or "gtfs_direct") == "gtfs_direct"
+    ]
+    if not baseline_rows:
+        replace_service_desert_rows(engine, build_key=_STATE.hashes.build_key, desert_rows=[])
+        return
+
+    baseline_points = {
+        "transport": [
+            (float(row["geom"].y), float(row["geom"].x))
+            for row in baseline_rows
+        ]
+    }
+    baseline_nodes_by_category = snap_amenities(walk_graph, baseline_points)
+    public_weight_rows = {
+        "public_departures_7d": []
+    }
+    if baseline_rows:
+        public_nodes = nearest_nodes(
+            walk_graph,
+            [float(row["geom"].x) for row in baseline_rows],
+            [float(row["geom"].y) for row in baseline_rows],
+        )
+        for row, node in zip(baseline_rows, public_nodes):
+            departures = int(row["public_departures_7d"] or 0)
+            if departures <= 0:
+                continue
+            public_weight_rows["public_departures_7d"].append((int(node), departures))
+
+    walk_cell_nodes_by_size: dict[int, list[int]] = {}
+    for resolution_m, cells in walk_grids.items():
+        cached_nodes = cache_load(f"walk_cell_nodes_{resolution_m}", _STATE.score_cache_dir)
+        if cached_nodes is None:
+            cached_nodes = snap_cells_to_nodes(
+                walk_graph,
+                cells,
+                f"walk_cell_nodes_{resolution_m}",
+                _STATE.score_cache_dir,
+            )
+        walk_cell_nodes_by_size[int(resolution_m)] = [int(node) for node in cached_nodes]
+
+    origin_nodes = normalize_origin_node_ids(
+        node
+        for nodes in walk_cell_nodes_by_size.values()
+        for node in nodes
+    )
+    baseline_counts_by_node = precompute_walk_counts_by_origin_node(
+        walk_graph,
+        baseline_nodes_by_category,
+        origin_nodes,
+        cutoff=WALK_RADIUS_M,
+        weight="length_m",
+    )
+    public_totals_by_node = precompute_walk_weighted_totals_by_origin_node(
+        walk_graph,
+        public_weight_rows,
+        origin_nodes,
+        cutoff=WALK_RADIUS_M,
+        weight="length_m",
+    )
+
+    created_at = datetime.now(timezone.utc)
+    desert_rows: list[dict[str, Any]] = []
+    for resolution_m, cells in walk_grids.items():
+        cell_nodes = walk_cell_nodes_by_size[int(resolution_m)]
+        for cell, origin_node in zip(cells, cell_nodes):
+            baseline_stop_count = int(
+                baseline_counts_by_node.get(int(origin_node), {}).get("transport", 0)
+            )
+            reachable_public_departures = int(
+                public_totals_by_node.get(int(origin_node), {}).get("public_departures_7d", 0)
+            )
+            if baseline_stop_count <= 0 or reachable_public_departures > 0:
+                continue
+            cell_geom = cell.get("geometry")
+            if cell_geom is None:
+                cell_geom = materialize_cell_geometry(cell, _STATE.study_area_metric)
+            desert_rows.append(
+                {
+                    "build_key": _STATE.hashes.build_key,
+                    "reality_fingerprint": _STATE.transit_reality_state.reality_fingerprint,
+                    "import_fingerprint": _STATE.hashes.import_fingerprint,
+                    "resolution_m": int(resolution_m),
+                    "cell_id": cell["cell_id"],
+                    "analysis_date": _STATE.transit_reality_state.analysis_date,
+                    "baseline_reachable_stop_count": baseline_stop_count,
+                    "reachable_public_departures_7d": reachable_public_departures,
+                    "reason_codes_json": ["baseline_reachable_without_public_departures_7d"],
+                    "cell_geom": cell_geom,
+                    "created_at": created_at,
+                }
+            )
+    replace_service_desert_rows(
+        engine,
+        build_key=_STATE.hashes.build_key,
+        desert_rows=desert_rows,
     )
 
 
@@ -562,6 +780,12 @@ def _summary_json(
     walk_grids: dict[int, list[dict[str, Any]]],
     amenity_data: dict[str, list[tuple[float, float]]],
 ) -> dict[str, Any]:
+    if _STATE.overture_source_rows:
+        amenity_data = dict(amenity_data)  # don't mutate the original
+        for row in _STATE.overture_source_rows:
+            amenity_data.setdefault(row["category"], []).append(
+                (row["lat"], row["lon"])
+            )
     return _publish.summary_json_impl(
         study_area_wgs84,
         walk_grids,
@@ -574,7 +798,60 @@ def _summary_json(
         fine_resolutions_m=list(_STATE.settings.fine_resolutions_m),
         output_html=OUTPUT_HTML,
         zoom_breaks=list(_STATE.settings.surface_zoom_breaks),
+        transit_reality_state=_STATE.transit_reality_state,
+        transit_analysis_window_days=GTFS_ANALYSIS_WINDOW_DAYS,
+        transit_service_desert_window_days=GTFS_SERVICE_DESERT_WINDOW_DAYS,
+        transport_reality_download_url="/exports/transport-reality.zip",
+        service_deserts_enabled=True,
     )
+
+
+def _ensure_transit_reality(
+    engine,
+    *,
+    import_fingerprint: str,
+    study_area_wgs84=None,
+    force_refresh: bool = False,
+    refresh_download: bool = False,
+    progress_cb=None,
+    reality_state: Any = None,
+) -> Any:
+    del study_area_wgs84
+    transit_state = _ensure_transit_reality_impl(
+        engine,
+        import_fingerprint=import_fingerprint,
+        refresh_download=refresh_download,
+        force_refresh=force_refresh,
+        progress_cb=progress_cb,
+        reality_state=reality_state,
+    )
+    _STATE.transit_reality_state = transit_state
+    _STATE.activate(
+        import_fingerprint,
+        transit_reality_fingerprint=transit_state.reality_fingerprint,
+        profile=_STATE.profile,
+    )
+    return transit_state
+
+
+def _preflight_transit_rebuild(
+    engine,
+    *,
+    force_refresh: bool = False,
+    refresh_download: bool = False,
+) -> tuple[Any, bool]:
+    import_fingerprint = None
+    if _STATE.source_state is not None:
+        import_fingerprint = _STATE.source_state.import_fingerprint
+    reality_state, refresh_required = _transit_reality_refresh_required(
+        engine,
+        import_fingerprint=import_fingerprint,
+        refresh_download=refresh_download,
+        force_refresh=force_refresh,
+    )
+    if refresh_required:
+        ensure_walkgraph_subcommand_available(WALKGRAPH_BIN, "gtfs-refresh")
+    return reality_state, refresh_required
 
 
 def run_precompute(
@@ -606,9 +883,14 @@ def run_precompute(
         has_complete_build=has_complete_build,
         import_payload_ready=import_payload_ready,
         ensure_local_osm_import=ensure_local_osm_import,
+        ensure_transit_reality=_ensure_transit_reality,
+        transit_preflight=_preflight_transit_rebuild,
         tracker_factory=PrecomputeProgressTracker,
         walk_rows=_walk_rows,
         amenity_rows=_amenity_rows,
+        transport_reality_rows=_transport_reality_rows,
+        service_desert_rows=_service_desert_rows,
+        compute_service_deserts=_compute_service_deserts,
         publish_precomputed_artifacts=publish_precomputed_artifacts,
         summary_json=_summary_json,
         package_snapshot=package_snapshot,
@@ -641,3 +923,63 @@ def refresh_local_import(force_refresh: bool = True) -> str:
         get_hashes=lambda: _STATE.hashes,
         set_source_state=lambda source_state: setattr(_STATE, "source_state", source_state),
     )
+
+
+def refresh_transit(
+    force_refresh: bool = False,
+    *,
+    refresh_download: bool = True,
+) -> str:
+    normalized_profile = normalize_build_profile()
+    engine = build_engine()
+    ensure_database_ready(engine)
+    source_state = resolve_source_state()
+    _STATE.source_state = source_state
+    _STATE.activate(source_state.import_fingerprint, profile=normalized_profile)
+
+    reality_state, refresh_required = _preflight_transit_rebuild(
+        engine,
+        force_refresh=force_refresh,
+        refresh_download=refresh_download,
+    )
+    if not refresh_required:
+        transit_state = _ensure_transit_reality(
+            engine,
+            import_fingerprint=source_state.import_fingerprint,
+            study_area_wgs84=None,
+            force_refresh=False,
+            refresh_download=False,
+            reality_state=reality_state,
+        )
+        return transit_state.reality_fingerprint
+
+    tracker = PrecomputeProgressTracker(CACHE_DIR / "precompute_timing_stats.json")
+    study_area_metric, study_area_wgs84 = phase_geometry(tracker)
+    _STATE.study_area_metric = study_area_metric
+    _STATE.study_area_wgs84 = study_area_wgs84
+
+    normalization_scope_hash = current_normalization_scope_hash(normalized_profile)
+    if not import_payload_ready(
+        engine,
+        source_state.import_fingerprint,
+        normalization_scope_hash,
+    ):
+        ensure_local_osm_import(
+            engine,
+            source_state,
+            study_area_wgs84=study_area_wgs84,
+            normalization_scope_hash=normalization_scope_hash,
+            force_refresh=False,
+            progress_cb=tracker.phase_callback("import"),
+        )
+
+    transit_state = _ensure_transit_reality(
+        engine,
+        import_fingerprint=source_state.import_fingerprint,
+        study_area_wgs84=study_area_wgs84,
+        refresh_download=False,
+        force_refresh=force_refresh,
+        progress_cb=tracker.phase_callback("transit"),
+        reality_state=reality_state,
+    )
+    return transit_state.reality_fingerprint

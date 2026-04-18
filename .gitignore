@@ -40,7 +40,11 @@ legacy/
 # Large local geospatial inputs
 osm/*.osm.pbf
 osm/extract_manifest.json
+gtfs/*.zip
 boundaries/*.geojson
+overture/*.geoparquet
+overture/*.geoparquet.state
+overture/*.parquet
 
 # Local databases, logs, and temporary files
 *.db
@@ -49,6 +53,9 @@ boundaries/*.geojson
 *.log
 *.tmp
 *.bak
+
+# Private notes
+docs/notes.md
 
 # OS/editor noise
 .DS_Store

@@ -46,6 +46,12 @@ class _FakeService:
             "default_zoom": 6,
             "max_zoom": 19,
             "pmtiles_url": "/tiles/livability.pmtiles",
+            "transport_reality_enabled": True,
+            "service_deserts_enabled": True,
+            "transport_reality_download_url": "/exports/transport-reality.zip",
+            "transit_analysis_date": "2026-04-14",
+            "transit_analysis_window_days": 30,
+            "transit_service_desert_window_days": 7,
         }
 
     def get_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> bytes:
@@ -147,6 +153,23 @@ class LocalServerEndpointTests(TestCase):
 
         self.assertEqual(content_type, "text/html")
         self.assertIn(b"livability", body.lower())
+
+    def test_export_endpoint_serves_transport_reality_zip(self) -> None:
+        service = _FakeService()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            export_dir = Path(tmp_name) / "exports"
+            export_dir.mkdir()
+            export_path = export_dir / "transport-reality.zip"
+            export_path.write_bytes(b"zip-bytes")
+            with mock.patch.object(serve_from_db, "EXPORTS_DIR", export_dir):
+                with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                    with urlopen(base_url + "/exports/transport-reality.zip") as response:
+                        payload = response.read()
+                        content_type = response.headers.get_content_type()
+
+        self.assertEqual(content_type, "application/zip")
+        self.assertEqual(payload, b"zip-bytes")
 
     def test_pmtiles_full_get(self) -> None:
         body = b"PMTILES_BODY_BYTES" * 100
@@ -299,6 +322,12 @@ class RenderAndCliTests(TestCase):
                 "build_profile": "full",
                 "map_center": {"lat": 53.4, "lon": -7.7},
                 "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "transport_reality_enabled": True,
+                "service_deserts_enabled": True,
+                "transport_reality_download_url": "/exports/transport-reality.zip",
+                "transit_analysis_date": "2026-04-14",
+                "transit_analysis_window_days": 30,
+                "transit_service_desert_window_days": 7,
                 "fine_resolutions_m": [2500, 1000, 500, 250, 100, 50],
                 "surface_zoom_breaks": [
                     [18, 50],
@@ -334,6 +363,10 @@ class RenderAndCliTests(TestCase):
         self.assertTrue(payload["fine_surface_enabled"])
         self.assertEqual(payload["fine_resolutions_m"], [2500, 1000, 500, 250, 100, 50])
         self.assertEqual(payload["inspect_url"], "/api/inspect")
+        self.assertTrue(payload["transport_reality_enabled"])
+        self.assertTrue(payload["service_deserts_enabled"])
+        self.assertEqual(payload["transport_reality_download_url"], "/exports/transport-reality.zip")
+        self.assertEqual(payload["transit_analysis_date"], "2026-04-14")
 
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
         manifest = {
@@ -344,6 +377,8 @@ class RenderAndCliTests(TestCase):
             "summary_json": {
                 "map_center": {"lat": 53.4, "lon": -7.7},
                 "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "transport_reality_enabled": False,
+                "service_deserts_enabled": False,
             },
         }
         with (
@@ -363,6 +398,8 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["fine_resolutions_m"], [])
         self.assertNotIn("surface_tile_url_template", payload)
         self.assertNotIn("inspect_url", payload)
+        self.assertFalse(payload["transport_reality_enabled"])
+        self.assertFalse(payload["service_deserts_enabled"])
 
     def test_runtime_service_uses_dev_config_hash_and_coarse_only_payload(self) -> None:
         manifest = {
@@ -374,6 +411,8 @@ class RenderAndCliTests(TestCase):
                 "build_profile": "dev",
                 "map_center": {"lat": 53.4, "lon": -7.7},
                 "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "transport_reality_enabled": True,
+                "service_deserts_enabled": True,
                 "fine_resolutions_m": [],
                 "surface_zoom_breaks": [
                     [10, 5000],

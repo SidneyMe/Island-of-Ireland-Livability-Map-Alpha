@@ -5,7 +5,7 @@ from typing import Any
 
 from ._dependencies import Engine, delete, insert, select, update
 from .common import root_module
-from .tables import build_manifest, import_manifest
+from .tables import build_manifest, import_manifest, transit_feed_manifest, transit_reality_manifest
 
 
 def load_import_manifest(engine: Engine, import_fingerprint: str) -> dict[str, Any] | None:
@@ -38,6 +38,43 @@ def load_build_manifest(engine: Engine, build_key: str) -> dict[str, Any] | None
             .where(build_manifest.c.build_key == build_key)
         ).mappings().first()
     return dict(row) if row is not None else None
+
+
+def load_transit_feed_manifest(engine: Engine, feed_fingerprint: str) -> dict[str, Any] | None:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(transit_feed_manifest)
+            .where(transit_feed_manifest.c.feed_fingerprint == feed_fingerprint)
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def has_complete_transit_feed_manifest(engine: Engine, feed_fingerprint: str) -> bool:
+    manifest = root_module().load_transit_feed_manifest(engine, feed_fingerprint)
+    return manifest is not None and manifest.get("status") == "complete"
+
+
+def load_transit_reality_manifest(engine: Engine, reality_fingerprint: str) -> dict[str, Any] | None:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(transit_reality_manifest)
+            .where(transit_reality_manifest.c.reality_fingerprint == reality_fingerprint)
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def has_complete_transit_reality_manifest(
+    engine: Engine,
+    reality_fingerprint: str,
+    *,
+    import_fingerprint: str | None = None,
+) -> bool:
+    manifest = root_module().load_transit_reality_manifest(engine, reality_fingerprint)
+    if manifest is None or manifest.get("status") != "complete":
+        return False
+    if import_fingerprint is None:
+        return True
+    return str(manifest.get("import_fingerprint") or "") == import_fingerprint
 
 
 def has_complete_build(engine: Engine, build_key: str) -> bool:

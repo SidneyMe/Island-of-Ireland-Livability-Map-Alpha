@@ -1,6 +1,6 @@
 use super::{
-    is_walkable_tags, open_spool_reader, parse_bbox, read_spooled_edge_pair, Bbox,
-    PRIVATE_VALUES, WALK_EXCLUDED,
+    is_walkable_tags, open_spool_reader, parse_bbox, read_spooled_edge_pair, Bbox, PRIVATE_VALUES,
+    WALK_EXCLUDED,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;

@@ -5,6 +5,7 @@ try:
     from geoalchemy2.shape import from_shape, to_shape
     from sqlalchemy import (
         BigInteger,
+        Date,
         Column,
         DateTime,
         Float,

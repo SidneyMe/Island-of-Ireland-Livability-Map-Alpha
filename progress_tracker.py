@@ -11,6 +11,7 @@ from typing import Any, Callable
 PHASE_ORDER = (
     "import",
     "geometry",
+    "transit",
     "amenities",
     "networks",
     "reachability",
@@ -437,6 +438,18 @@ class PrecomputeProgressTracker:
                 self._set_phase_detail(
                     phase_name,
                     detail,
+                    force_log=bool(info.get("force_log", False)),
+                )
+            return
+
+        if event == "substep":
+            substep_name = info.get("substep_name")
+            seconds = info.get("seconds")
+            if isinstance(substep_name, str) and isinstance(seconds, (int, float)):
+                self._record_substep(
+                    phase_name,
+                    substep_name,
+                    float(seconds),
                     force_log=bool(info.get("force_log", False)),
                 )
             return

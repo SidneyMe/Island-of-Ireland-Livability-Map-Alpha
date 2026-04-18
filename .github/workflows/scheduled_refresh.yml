@@ -40,7 +40,9 @@ jobs:
           python scripts/refresh_osm.py $FLAGS
 
       - name: Run precompute
-        run: python main.py --precompute --auto-refresh-import
+        run: |
+          python main.py --refresh-transit
+          python main.py --precompute --auto-refresh-import
 
       - name: Run sanity fixture
         run: python scripts/sanity_check.py --profile full

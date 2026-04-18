@@ -62,6 +62,14 @@ class DatabaseUrlTests(TestCase):
 
 
 class ConfigHashTests(TestCase):
+    def test_transit_reality_algorithm_version_changes_transit_config_hash(self) -> None:
+        with mock.patch.object(config, "TRANSIT_REALITY_ALGO_VERSION", 1):
+            previous_hash = config.transit_config_hash()
+        with mock.patch.object(config, "TRANSIT_REALITY_ALGO_VERSION", 2):
+            current_hash = config.transit_config_hash()
+
+        self.assertNotEqual(previous_hash, current_hash)
+
     def test_pmtiles_schema_version_changes_render_hash_only(self) -> None:
         with mock.patch.object(config, "PMTILES_SCHEMA_VERSION", 1):
             previous_hashes = config.build_config_hashes()

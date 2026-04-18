@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 import numpy as np
 from config import WALKGRAPH_FORMAT_VERSION
+from walkgraph_support import ensure_walkgraph_subcommand_available, walkgraph_runtime_error
 
 try:
     import igraph as ig
@@ -140,6 +141,7 @@ def run_walkgraph_build(
     extract_fingerprint: str | None = None,
     progress_cb=None,
 ) -> None:
+    ensure_walkgraph_subcommand_available(walkgraph_bin, "build")
     normalized_padding_m = _normalized_padding_m(bbox_padding_m)
     command = [
         walkgraph_bin,
@@ -172,9 +174,8 @@ def run_walkgraph_build(
             bufsize=1,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError(
-            "walkgraph is required to build walk graph sidecars, but it was not found on PATH. "
-            "Build the Rust CLI first or set WALKGRAPH_BIN."
+        raise walkgraph_runtime_error(
+            f"walkgraph binary '{walkgraph_bin}' was not found before subcommand 'build' could run."
         ) from exc
     try:
         for line in _iter_stderr_lines(process):
@@ -199,6 +200,7 @@ def run_walkgraph_reachability(
     walkgraph_bin: str = "walkgraph",
     progress_cb=None,
 ) -> None:
+    ensure_walkgraph_subcommand_available(walkgraph_bin, "reachability")
     command = [
         walkgraph_bin,
         "reachability",
@@ -225,9 +227,9 @@ def run_walkgraph_reachability(
             bufsize=1,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError(
-            "walkgraph is required to run exact walk reachability, but it was not found on PATH. "
-            "Build the Rust CLI first or set WALKGRAPH_BIN."
+        raise walkgraph_runtime_error(
+            "walkgraph binary "
+            f"'{walkgraph_bin}' was not found before subcommand 'reachability' could run."
         ) from exc
 
     try:
@@ -258,6 +260,7 @@ def run_surface_shell_build(
     progress_cb=None,
 ) -> None:
     """Call the Rust `walkgraph surface` subcommand to build shard .npz files."""
+    ensure_walkgraph_subcommand_available(walkgraph_bin, "surface")
     command = [
         walkgraph_bin,
         "surface",
@@ -283,9 +286,8 @@ def run_surface_shell_build(
             bufsize=1,
         )
     except FileNotFoundError as exc:
-        raise RuntimeError(
-            "walkgraph surface subcommand not found. "
-            "Rebuild the Rust CLI or set WALKGRAPH_BIN."
+        raise walkgraph_runtime_error(
+            f"walkgraph binary '{walkgraph_bin}' was not found before subcommand 'surface' could run."
         ) from exc
 
     try:

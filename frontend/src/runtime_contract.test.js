@@ -9,6 +9,7 @@ import {
 const fullRuntime = {
   build_profile: "full",
   pmtiles_url: "/tiles/livability.pmtiles",
+  transport_reality_download_url: "/exports/transport-reality.zip",
   coarse_vector_resolutions_m: [20000, 10000, 5000],
   fine_resolutions_m: [2500, 1000, 500, 250, 100, 50],
   fine_surface_enabled: true,
@@ -30,12 +31,15 @@ const fullRuntime = {
     healthcare: "#d6604d",
     parks: "#1a9850"
   },
+  transport_reality_enabled: true,
+  service_deserts_enabled: true,
   max_zoom: 19
 };
 
 const devRuntime = {
   build_profile: "dev",
   pmtiles_url: "/tiles/livability-dev.pmtiles",
+  transport_reality_download_url: "/exports/transport-reality.zip",
   coarse_vector_resolutions_m: [20000, 10000, 5000],
   fine_resolutions_m: [],
   fine_surface_enabled: false,
@@ -50,6 +54,8 @@ const devRuntime = {
     healthcare: "#d6604d",
     parks: "#1a9850"
   },
+  transport_reality_enabled: true,
+  service_deserts_enabled: true,
   max_zoom: 19
 };
 
@@ -83,10 +89,23 @@ const devRuntime = {
   const surfaceLayers = style.layers.filter(function (layer) {
     return String(layer.id || "").startsWith("surface-");
   });
+  const transportRealityLayer = style.layers.find(function (layer) {
+    return layer.id === "transport-reality-circle";
+  });
+  const serviceDesertsLayer = style.layers.find(function (layer) {
+    return layer.id === "service-deserts-fill";
+  });
 
   assert.equal(surfaceLayers.length, fullRuntime.fine_resolutions_m.length);
   assert.equal(resolutionForZoom(fullRuntime, 12), 2500);
   assert.equal(resolutionForZoom(fullRuntime, 18), 50);
+  assert.equal(transportRealityLayer.source, "livability");
+  assert.equal(transportRealityLayer["source-layer"], "transport_reality");
+  assert.equal(transportRealityLayer.minzoom, 9);
+  assert.equal(transportRealityLayer.paint["circle-stroke-color"], "#ffffff");
+  assert.equal(transportRealityLayer.paint["circle-stroke-width"], 1);
+  assert.equal(style.sources["transport-reality"], undefined);
+  assert.equal(serviceDesertsLayer["source-layer"], "service_deserts");
 }
 
 console.log("frontend runtime contract checks passed");

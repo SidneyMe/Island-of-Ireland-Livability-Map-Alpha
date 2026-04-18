@@ -3,6 +3,7 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::time::Instant;
 use walkgraph::graph::{build_compact_node_index, emit_adjacency_sidecars, emit_edge_sidecar};
+use walkgraph::gtfs::run_gtfs_refresh;
 use walkgraph::pbf::{collect_retained_nodes, parse_bbox, scan_walkable_ways};
 use walkgraph::reachability::run_reachability;
 use walkgraph::serialize::{
@@ -90,6 +91,13 @@ enum Commands {
         /// Number of rayon threads (default: num_cpus).
         #[arg(long)]
         threads: Option<usize>,
+    },
+    /// Parse GTFS feeds, derive transit reality artifacts, and emit CSV sidecars.
+    GtfsRefresh {
+        #[arg(long)]
+        config_json: PathBuf,
+        #[arg(long)]
+        out_dir: PathBuf,
     },
 }
 
@@ -264,6 +272,12 @@ fn main() -> Result<(), Box<dyn Error>> {
                 threads,
             })
             .map_err(|e| -> Box<dyn Error> { Box::from(e.to_string()) })?;
+        }
+        Commands::GtfsRefresh {
+            config_json,
+            out_dir,
+        } => {
+            run_gtfs_refresh(&config_json, &out_dir)?;
         }
     }
     Ok(())

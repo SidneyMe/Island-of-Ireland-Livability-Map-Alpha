@@ -110,3 +110,12 @@ class ProgressTrackerTests(TestCase):
         self.assertEqual(payload["last_total_seconds"], 10.0)
         self.assertEqual(payload["phases"]["geometry"], 5.5)
         self.assertEqual(payload["substeps"]["geometry"], {"union": 1.25})
+
+    def test_phase_callback_records_substep_events(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tracker = PrecomputeProgressTracker(Path(tmp_name) / "progress.json")
+            callback = tracker.phase_callback("geometry")
+
+            callback("substep", substep_name="roi_read", seconds=1.5)
+
+        self.assertEqual(tracker.substeps["geometry"], {"roi_read": 1.5})

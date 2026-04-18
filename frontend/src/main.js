@@ -7,6 +7,7 @@ import {
   fineSurfaceEnabled as runtimeFineSurfaceEnabled,
   resolutionForZoom as runtimeResolutionForZoom
 } from "./runtime_contract.js";
+import { transportRealityPopupHtml } from "./transport_reality_popup.js";
 
 const protocol = new Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
@@ -24,6 +25,9 @@ const elements = {
   resolutionChip: document.getElementById("resolution-chip"),
   amenityControls: document.getElementById("amenity-controls"),
   amenityNote: document.getElementById("amenity-note"),
+  transitControls: document.getElementById("transit-controls"),
+  transitNote: document.getElementById("transit-note"),
+  transportRealityDownload: document.getElementById("transport-reality-download"),
   gridToggle: document.getElementById("grid-toggle"),
   map: document.getElementById("map"),
   mapStage: document.getElementById("map-stage")
@@ -36,7 +40,9 @@ const state = {
   panelHidden: false,
   enabledAmenityCategories: new Set(),
   gridVisible: true,
-  debugGridVisible: false
+  debugGridVisible: false,
+  transportRealityVisible: false,
+  serviceDesertsVisible: false
 };
 
 function updateStatus(message) {
@@ -116,6 +122,24 @@ function applyAmenityFilter() {
   state.map.setFilter("amenities-circle", ["in", ["get", "category"], ["literal", enabled]]);
 }
 
+function applyTransportRealityVisibility() {
+  if (!state.map) return;
+  state.map.setLayoutProperty(
+    "transport-reality-circle",
+    "visibility",
+    state.transportRealityVisible ? "visible" : "none"
+  );
+}
+
+function applyServiceDesertVisibility() {
+  if (!state.map) return;
+  state.map.setLayoutProperty(
+    "service-deserts-fill",
+    "visibility",
+    state.serviceDesertsVisible ? "visible" : "none"
+  );
+}
+
 function buildAmenityControls() {
   elements.amenityControls.replaceChildren();
   const colors = state.runtime.category_colors || {};
@@ -160,6 +184,65 @@ function buildAmenityControls() {
   updateAmenityNote();
 }
 
+function buildTransitControls() {
+  elements.transitControls.replaceChildren();
+  const controls = [];
+  if (state.runtime.transport_reality_enabled) {
+    controls.push({
+      id: "transport-reality-toggle",
+      label: "Show active vs inactive stops",
+      checked: false,
+      onChange: function (checked) {
+        state.transportRealityVisible = checked;
+        applyTransportRealityVisibility();
+      }
+    });
+  }
+  if (state.runtime.service_deserts_enabled) {
+    controls.push({
+      id: "service-deserts-toggle",
+      label: "Show service desert overlay",
+      checked: false,
+      onChange: function (checked) {
+        state.serviceDesertsVisible = checked;
+        applyServiceDesertVisibility();
+      }
+    });
+  }
+
+  controls.forEach(function (control) {
+    const label = document.createElement("label");
+    label.className = "toggle-row";
+    label.htmlFor = control.id;
+
+    const text = document.createElement("span");
+    text.textContent = control.label;
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = control.id;
+    input.checked = control.checked;
+    input.addEventListener("change", function () {
+      control.onChange(input.checked);
+    });
+
+    label.appendChild(text);
+    label.appendChild(input);
+    elements.transitControls.appendChild(label);
+  });
+
+  if (elements.transportRealityDownload) {
+    const href = state.runtime.transport_reality_download_url || "/exports/transport-reality.zip";
+    elements.transportRealityDownload.href = href;
+    elements.transportRealityDownload.style.display = state.runtime.transport_reality_enabled ? "" : "none";
+  }
+
+  if (elements.transitNote) {
+    const analysisDate = state.runtime.transit_analysis_date || "unknown date";
+    elements.transitNote.textContent = "As of " + analysisDate;
+  }
+}
+
 function maybeBuildDebugGridControl() {
   const url = new URL(window.location.href);
   if (url.searchParams.get(DEBUG_GRID_QUERY_PARAM) !== "1") return;
@@ -192,6 +275,17 @@ function amenityPopupHtml(properties) {
     '<div class="popup-content">' +
       "<h3>" + escapeHtml(properties.category || "Amenity") + "</h3>" +
       "<p>" + escapeHtml(properties.source_ref || "OSM feature") + "</p>" +
+    "</div>"
+  );
+}
+
+function serviceDesertPopupHtml(properties) {
+  return (
+    '<div class="popup-content">' +
+      "<h3>Service desert candidate</h3>" +
+      "<p>Resolution: " + escapeHtml(formatResolutionLabel(properties.resolution_m || resolutionForZoom(state.map.getZoom()))) + "</p>" +
+      "<p>Baseline reachable GTFS stops: " + escapeHtml(String(properties.baseline_reachable_stop_count || 0)) + "</p>" +
+      "<p>Reachable public departures (7d): " + escapeHtml(String(properties.reachable_public_departures_7d || 0)) + "</p>" +
     "</div>"
   );
 }
@@ -316,6 +410,8 @@ function initializeMap() {
     applyGridVisibility();
     applyDebugGridVisibility();
     applyAmenityFilter();
+    applyTransportRealityVisibility();
+    applyServiceDesertVisibility();
     updateStatus("");
     elements.statusPill.style.display = "none";
   });
@@ -324,6 +420,15 @@ function initializeMap() {
   state.map.on("zoomend", setResolutionChip);
 
   state.map.on("click", async function (event) {
+    const transportRealityFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["transport-reality-circle"] });
+    if (transportRealityFeatures.length > 0) {
+      state.popup
+        .setLngLat(event.lngLat)
+        .setHTML(transportRealityPopupHtml(transportRealityFeatures[0].properties || {}))
+        .addTo(state.map);
+      return;
+    }
+
     const amenityFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["amenities-circle"] });
     if (amenityFeatures.length > 0) {
       state.popup
@@ -347,6 +452,15 @@ function initializeMap() {
       return;
     }
 
+    const desertFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["service-deserts-fill"] });
+    if (desertFeatures.length > 0) {
+      state.popup
+        .setLngLat(event.lngLat)
+        .setHTML(serviceDesertPopupHtml(desertFeatures[0].properties || {}))
+        .addTo(state.map);
+      return;
+    }
+
     const gridFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["grid-fill-coarse"] });
     if (gridFeatures.length > 0) {
       state.popup
@@ -362,6 +476,18 @@ function initializeMap() {
   state.map.on("mouseleave", "amenities-circle", function () {
     state.map.getCanvas().style.cursor = "";
   });
+  state.map.on("mouseenter", "transport-reality-circle", function () {
+    state.map.getCanvas().style.cursor = "pointer";
+  });
+  state.map.on("mouseleave", "transport-reality-circle", function () {
+    state.map.getCanvas().style.cursor = "";
+  });
+  state.map.on("mouseenter", "service-deserts-fill", function () {
+    state.map.getCanvas().style.cursor = "pointer";
+  });
+  state.map.on("mouseleave", "service-deserts-fill", function () {
+    state.map.getCanvas().style.cursor = "";
+  });
 
   state.map.on("error", function (event) {
     const message = (event && event.error && event.error.message) || "Map error";
@@ -374,6 +500,7 @@ function initializeApp(runtime) {
   state.runtime = runtime;
   state.gridVisible = true;
   buildAmenityControls();
+  buildTransitControls();
   maybeBuildDebugGridControl();
   wireUi();
   updatePanelVisibility();

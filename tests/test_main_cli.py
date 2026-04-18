@@ -9,6 +9,20 @@ import main
 
 
 class MainCliTests(TestCase):
+    def test_force_transit_refresh_requires_refresh_transit(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--force-transit-refresh"]),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--force-transit-refresh requires --refresh-transit",
+            stderr.getvalue(),
+        )
+
     def test_force_precompute_requires_precompute(self) -> None:
         with (
             mock.patch.object(sys, "argv", ["main.py", "--force-precompute"]),
@@ -132,6 +146,42 @@ class MainCliTests(TestCase):
             profile="dev",
             host=main.DEFAULT_SERVER_HOST,
             port=main.DEFAULT_SERVER_PORT,
+        )
+
+    def test_refresh_transit_dispatches_precompute_helper(self) -> None:
+        refresh_transit_mock = mock.Mock(return_value="transit-reality-123")
+        fake_precompute_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--refresh-transit"]),
+            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        refresh_transit_mock.assert_called_once_with(
+            force_refresh=False,
+            refresh_download=True,
+        )
+
+    def test_refresh_transit_passes_force_flag(self) -> None:
+        refresh_transit_mock = mock.Mock(return_value="transit-reality-123")
+        fake_precompute_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--refresh-transit", "--force-transit-refresh"],
+            ),
+            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        refresh_transit_mock.assert_called_once_with(
+            force_refresh=True,
+            refresh_download=True,
         )
 
     def test_render_dev_alias_dispatches_dev_profile(self) -> None:

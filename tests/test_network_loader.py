@@ -9,6 +9,7 @@ from unittest import TestCase, mock
 import numpy as np
 
 from network import loader
+from walkgraph_support import walkgraph_runtime_error
 
 
 class _FakeAttrSeq:
@@ -83,7 +84,10 @@ class NetworkLoaderTests(TestCase):
         progress = mock.Mock()
         process = _FakeProcess(["pass 1/2\n", "pass 2/2\n"])
 
-        with mock.patch.object(loader.subprocess, "Popen", return_value=process) as popen_mock:
+        with (
+            mock.patch.object(loader, "ensure_walkgraph_subcommand_available"),
+            mock.patch.object(loader.subprocess, "Popen", return_value=process) as popen_mock,
+        ):
             loader.run_walkgraph_build(
                 Path("ireland.osm.pbf"),
                 Path("cache/walk_graph"),
@@ -110,7 +114,10 @@ class NetworkLoaderTests(TestCase):
         progress = mock.Mock()
         process = _FakeProcess(["loading graph\n", "completed\n"])
 
-        with mock.patch.object(loader.subprocess, "Popen", return_value=process) as popen_mock:
+        with (
+            mock.patch.object(loader, "ensure_walkgraph_subcommand_available"),
+            mock.patch.object(loader.subprocess, "Popen", return_value=process) as popen_mock,
+        ):
             loader.run_walkgraph_reachability(
                 Path("cache/walk_graph"),
                 Path("cache/origins.bin"),
@@ -135,10 +142,116 @@ class NetworkLoaderTests(TestCase):
             ["walkgraph: loading graph", "walkgraph: completed"],
         )
 
+    def test_run_surface_shell_build_invokes_cli_and_streams_stderr(self) -> None:
+        progress = mock.Mock()
+        process = _FakeProcess(["queued shard 1\n", "queued shard 2\n"])
+
+        with (
+            mock.patch.object(loader, "ensure_walkgraph_subcommand_available"),
+            mock.patch.object(loader.subprocess, "Popen", return_value=process) as popen_mock,
+        ):
+            loader.run_surface_shell_build(
+                Path("cache/nodes.bin"),
+                Path("cache/study_area.geojson"),
+                Path("cache/shell"),
+                walkgraph_bin="walkgraph-dev",
+                surface_shell_hash="shell-hash-123",
+                reach_hash="reach-hash-123",
+                node_count=10,
+                config_json_path=Path("cache/config.json"),
+                progress_cb=progress,
+            )
+
+        command = popen_mock.call_args.args[0]
+        self.assertEqual(command[:2], ["walkgraph-dev", "surface"])
+        self.assertIn("--nodes-bin", command)
+        self.assertIn("--study-area", command)
+        self.assertIn("--shell-dir", command)
+        self.assertIn("--surface-shell-hash", command)
+        self.assertIn("--reach-hash", command)
+        self.assertIn("--node-count", command)
+        self.assertIn("--config-json", command)
+        self.assertEqual(
+            _detail_messages(progress),
+            ["surface: queued shard 1", "surface: queued shard 2"],
+        )
+
     def test_run_walkgraph_build_wraps_missing_binary(self) -> None:
-        with mock.patch.object(loader.subprocess, "Popen", side_effect=FileNotFoundError("missing")):
-            with self.assertRaisesRegex(RuntimeError, "walkgraph is required"):
+        with (
+            mock.patch.object(loader, "ensure_walkgraph_subcommand_available"),
+            mock.patch.object(loader.subprocess, "Popen", side_effect=FileNotFoundError("missing")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "before subcommand 'build' could run"):
                 loader.run_walkgraph_build(Path("ireland.osm.pbf"), Path("cache/walk_graph"))
+
+    def test_run_walkgraph_build_fails_before_spawn_when_subcommand_is_missing(self) -> None:
+        with (
+            mock.patch.object(
+                loader,
+                "ensure_walkgraph_subcommand_available",
+                side_effect=walkgraph_runtime_error(
+                    "Configured walkgraph binary 'walkgraph-dev' does not support required subcommand 'build'."
+                ),
+            ),
+            mock.patch.object(loader.subprocess, "Popen") as popen_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "required subcommand 'build'"):
+                loader.run_walkgraph_build(
+                    Path("ireland.osm.pbf"),
+                    Path("cache/walk_graph"),
+                    walkgraph_bin="walkgraph-dev",
+                )
+
+        popen_mock.assert_not_called()
+
+    def test_run_walkgraph_reachability_fails_before_spawn_when_subcommand_is_missing(self) -> None:
+        with (
+            mock.patch.object(
+                loader,
+                "ensure_walkgraph_subcommand_available",
+                side_effect=walkgraph_runtime_error(
+                    "Configured walkgraph binary 'walkgraph-dev' does not support required subcommand 'reachability'."
+                ),
+            ),
+            mock.patch.object(loader.subprocess, "Popen") as popen_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "required subcommand 'reachability'"):
+                loader.run_walkgraph_reachability(
+                    Path("cache/walk_graph"),
+                    Path("cache/origins.bin"),
+                    Path("cache/amenity_weights.bin"),
+                    Path("cache/out.bin"),
+                    category_count=4,
+                    cutoff_m=500.0,
+                    walkgraph_bin="walkgraph-dev",
+                )
+
+        popen_mock.assert_not_called()
+
+    def test_run_surface_shell_build_fails_before_spawn_when_subcommand_is_missing(self) -> None:
+        with (
+            mock.patch.object(
+                loader,
+                "ensure_walkgraph_subcommand_available",
+                side_effect=walkgraph_runtime_error(
+                    "Configured walkgraph binary 'walkgraph-dev' does not support required subcommand 'surface'."
+                ),
+            ),
+            mock.patch.object(loader.subprocess, "Popen") as popen_mock,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "required subcommand 'surface'"):
+                loader.run_surface_shell_build(
+                    Path("cache/nodes.bin"),
+                    Path("cache/study_area.geojson"),
+                    Path("cache/shell"),
+                    walkgraph_bin="walkgraph-dev",
+                    surface_shell_hash="shell-hash-123",
+                    reach_hash="reach-hash-123",
+                    node_count=10,
+                    config_json_path=Path("cache/config.json"),
+                )
+
+        popen_mock.assert_not_called()
 
     def test_load_walk_graph_reads_sidecars(self) -> None:
         with TemporaryDirectory() as temp_dir:

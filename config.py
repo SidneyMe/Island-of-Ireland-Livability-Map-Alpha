@@ -6,10 +6,12 @@ import json
 import math
 import os
 import sys
+from datetime import date, datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 
 from pyproj import Transformer
 
@@ -37,9 +39,14 @@ NI_BOUNDARY_LAYER = None
 OSM_EXTRACT_NAME = "ireland-and-northern-ireland-latest.osm.pbf"
 OSM_EXTRACT_PATH = OSM_DIR / OSM_EXTRACT_NAME
 OSM_IMPORT_SCHEMA = "osm_raw"
+TRANSIT_RAW_SCHEMA = "transit_raw"
+TRANSIT_DERIVED_SCHEMA = "transit_derived"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
 OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
 IMPORTER_CONFIG_VERSION = "2026-04-08"
+GTFS_DIR = BASE_DIR / "gtfs"
+GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
+TRANSIT_REALITY_ALGO_VERSION = 5
 
 
 def _optional_positive_int_env(name: str) -> int | None:
@@ -58,6 +65,24 @@ def _optional_positive_int_env(name: str) -> int | None:
     return value
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    value = _optional_positive_int_env(name)
+    return int(default if value is None else value)
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return float(default)
+    try:
+        value = float(raw_value.strip())
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive number when set; got {raw_value!r}.") from exc
+    if not math.isfinite(value) or value <= 0.0:
+        raise RuntimeError(f"{name} must be a positive number when set; got {raw_value!r}.")
+    return float(value)
+
+
 def _default_walkgraph_bin() -> str:
     walkgraph_dir = BASE_DIR / "walkgraph" / "target"
     suffixes = (".exe", "") if os.name == "nt" else ("", ".exe")
@@ -72,6 +97,23 @@ def _default_walkgraph_bin() -> str:
 WALKGRAPH_BIN = os.getenv("WALKGRAPH_BIN", _default_walkgraph_bin())
 WALKGRAPH_FORMAT_VERSION = 3
 LIVABILITY_SURFACE_THREADS = _optional_positive_int_env("LIVABILITY_SURFACE_THREADS")
+GTFS_ANALYSIS_WINDOW_DAYS = _positive_int_env("GTFS_ANALYSIS_WINDOW_DAYS", 30)
+GTFS_SERVICE_DESERT_WINDOW_DAYS = _positive_int_env("GTFS_SERVICE_DESERT_WINDOW_DAYS", 7)
+GTFS_LOOKAHEAD_DAYS = _positive_int_env("GTFS_LOOKAHEAD_DAYS", 14)
+GTFS_AS_OF_DATE = (os.getenv("GTFS_AS_OF_DATE") or "").strip() or None
+GTFS_SCHOOL_KEYWORDS = (
+    "school",
+    "schools",
+    "scoil",
+    "college",
+    "campus",
+    "academy",
+    "student",
+)
+GTFS_SCHOOL_AM_START_HOUR = 6
+GTFS_SCHOOL_AM_END_HOUR = 10
+GTFS_SCHOOL_PM_START_HOUR = 13
+GTFS_SCHOOL_PM_END_HOUR = 17
 
 
 TARGET_CRS = "EPSG:2157"
@@ -97,6 +139,33 @@ M1_CORRIDOR_ANCHORS_WGS84 = [
 
 BuildProfile = Literal["full", "dev"]
 DEFAULT_BUILD_PROFILE: BuildProfile = "full"
+
+
+@dataclass(frozen=True)
+class TransitFeedConfig:
+    feed_id: str
+    label: str
+    zip_path: Path
+    url: str | None = None
+
+
+@dataclass(frozen=True)
+class TransitFeedState:
+    feed_id: str
+    label: str
+    zip_path: Path
+    source_url: str | None
+    feed_fingerprint: str
+    analysis_date: date
+
+
+@dataclass(frozen=True)
+class TransitRealityState:
+    analysis_date: date
+    transit_config_hash: str
+    feed_states: tuple[TransitFeedState, ...]
+    feed_fingerprints: dict[str, str]
+    reality_fingerprint: str
 
 
 @dataclass(frozen=True)
@@ -224,6 +293,10 @@ CATEGORY_COLORS = {
     "transport": "#762a83",
     "healthcare": "#d6604d",
     "parks": "#1a9850",
+    # Overture Maps overlay (visualization only, not scored)
+    "ov_shops": "#74add1",       # lighter blue — same hue family as shops
+    "ov_healthcare": "#f4a582",  # lighter salmon — same family as healthcare
+    "ov_parks": "#a6d96a",       # lighter green — same family as parks
 }
 
 
@@ -322,6 +395,125 @@ def hash_dict(payload: dict[str, Any]) -> str:
     ).hexdigest()[:12]
 
 
+def transit_feed_configs() -> tuple[TransitFeedConfig, ...]:
+    return (
+        TransitFeedConfig(
+            feed_id="nta",
+            label="National Transport Authority",
+            zip_path=Path(os.getenv("GTFS_NTA_ZIP_PATH", GTFS_DIR / "nta_gtfs.zip")),
+            url=(os.getenv("GTFS_NTA_URL") or "").strip() or None,
+        ),
+        TransitFeedConfig(
+            feed_id="translink",
+            label="Translink",
+            zip_path=Path(os.getenv("GTFS_TRANSLINK_ZIP_PATH", GTFS_DIR / "translink_gtfs.zip")),
+            url=(os.getenv("GTFS_TRANSLINK_URL") or "").strip() or None,
+        ),
+        TransitFeedConfig(
+            feed_id="locallink",
+            label="TFI Local Link",
+            zip_path=Path(os.getenv("GTFS_LOCALLINK_ZIP_PATH", GTFS_DIR / "locallink_gtfs.zip")),
+            url=(os.getenv("GTFS_LOCALLINK_URL") or "").strip()
+            or "https://www.transportforireland.ie/transitData/Data/GTFS_Local_Link.zip",
+        ),
+    )
+
+
+def resolve_gtfs_analysis_date() -> date:
+    if GTFS_AS_OF_DATE:
+        try:
+            return date.fromisoformat(GTFS_AS_OF_DATE)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"GTFS_AS_OF_DATE must use YYYY-MM-DD when set; got {GTFS_AS_OF_DATE!r}."
+            ) from exc
+    return datetime.now(ZoneInfo(GTFS_ANALYSIS_TIMEZONE)).date()
+
+
+def transit_config_hash() -> str:
+    return hash_dict(
+        {
+            "transit_reality_algo_version": TRANSIT_REALITY_ALGO_VERSION,
+            "transit_raw_schema": TRANSIT_RAW_SCHEMA,
+            "transit_derived_schema": TRANSIT_DERIVED_SCHEMA,
+            "gtfs_dir": str(GTFS_DIR),
+            "analysis_timezone": GTFS_ANALYSIS_TIMEZONE,
+            "analysis_window_days": GTFS_ANALYSIS_WINDOW_DAYS,
+            "service_desert_window_days": GTFS_SERVICE_DESERT_WINDOW_DAYS,
+            "lookahead_days": GTFS_LOOKAHEAD_DAYS,
+            "analysis_date_override": GTFS_AS_OF_DATE or "",
+            "feeds": [
+                {
+                    "feed_id": feed.feed_id,
+                    "zip_path": str(feed.zip_path),
+                    "url": feed.url or "",
+                }
+                for feed in transit_feed_configs()
+            ],
+            "school_keywords": list(GTFS_SCHOOL_KEYWORDS),
+            "school_am_start_hour": GTFS_SCHOOL_AM_START_HOUR,
+            "school_am_end_hour": GTFS_SCHOOL_AM_END_HOUR,
+            "school_pm_start_hour": GTFS_SCHOOL_PM_START_HOUR,
+            "school_pm_end_hour": GTFS_SCHOOL_PM_END_HOUR,
+        }
+    )
+
+
+def transit_feed_fingerprint(path: Path) -> str:
+    try:
+        meta = _file_meta(path)
+        if not path.exists():
+            raise FileNotFoundError(path)
+        return hash_dict(
+            {
+                "path": str(path),
+                "size": meta["size"],
+                "content_hash": _content_hash(path),
+            }
+        )
+    except OSError as exc:
+        raise RuntimeError(f"GTFS feed zip was not found at '{path}'.") from exc
+
+
+def build_transit_reality_state(
+    *,
+    analysis_date: date | None = None,
+    feed_configs: tuple[TransitFeedConfig, ...] | None = None,
+) -> TransitRealityState:
+    resolved_analysis_date = analysis_date or resolve_gtfs_analysis_date()
+    resolved_feed_configs = transit_feed_configs() if feed_configs is None else feed_configs
+    feed_states = tuple(
+        TransitFeedState(
+            feed_id=feed.feed_id,
+            label=feed.label,
+            zip_path=feed.zip_path,
+            source_url=feed.url,
+            feed_fingerprint=transit_feed_fingerprint(feed.zip_path),
+            analysis_date=resolved_analysis_date,
+        )
+        for feed in resolved_feed_configs
+    )
+    feed_fingerprints = {
+        feed_state.feed_id: feed_state.feed_fingerprint
+        for feed_state in feed_states
+    }
+    transit_hash = transit_config_hash()
+    reality_fingerprint = hash_dict(
+        {
+            "analysis_date": resolved_analysis_date.isoformat(),
+            "transit_config_hash": transit_hash,
+            "feed_fingerprints": feed_fingerprints,
+        }
+    )
+    return TransitRealityState(
+        analysis_date=resolved_analysis_date,
+        transit_config_hash=transit_hash,
+        feed_states=feed_states,
+        feed_fingerprints=feed_fingerprints,
+        reality_fingerprint=reality_fingerprint,
+    )
+
+
 def validate_local_osm_extract(path: Path = OSM_EXTRACT_PATH) -> Path:
     normalized_name = path.name.lower()
     if normalized_name.endswith(".osm.pdf"):
@@ -345,6 +537,7 @@ def validate_local_osm_extract(path: Path = OSM_EXTRACT_PATH) -> Path:
 class ConfigHashes:
     build_profile: BuildProfile
     geo_hash: str
+    transit_hash: str
     reach_hash: str
     surface_shell_hash: str
     score_hash: str
@@ -365,6 +558,8 @@ class SourceState:
 class BuildHashes:
     build_profile: BuildProfile
     geo_hash: str
+    transit_hash: str
+    transit_reality_fingerprint: str
     reach_hash: str
     surface_shell_hash: str
     score_hash: str
@@ -403,9 +598,11 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "schema_version": CACHE_SCHEMA_VERSION,
     }
     geo_hash = hash_dict(geo_params)
+    resolved_transit_hash = transit_config_hash()
 
     reach_params = {
         "geo_hash": geo_hash,
+        "transit_hash": resolved_transit_hash,
         "tags": TAGS,
         "walk_radius_m": WALK_RADIUS_M,
     }
@@ -435,6 +632,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     render_params = {
         "build_profile": normalized_profile,
         "score_hash": score_hash,
+        "transit_hash": resolved_transit_hash,
         "surface_zoom_breaks": sorted(profile_settings.surface_zoom_breaks),
         "surface_score_ramp": list(SURFACE_SCORE_RAMP),
         "profile_fine_surface_enabled": profile_settings.fine_surface_enabled,
@@ -449,6 +647,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     config_hash = hash_dict(
         {
             "build_profile": normalized_profile,
+            "transit_hash": resolved_transit_hash,
             "score_hash": score_hash,
             "render_hash": render_hash,
             "schema_version": CACHE_SCHEMA_VERSION,
@@ -458,6 +657,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     return ConfigHashes(
         build_profile=normalized_profile,
         geo_hash=geo_hash,
+        transit_hash=resolved_transit_hash,
         reach_hash=reach_hash,
         surface_shell_hash=surface_shell_hash,
         score_hash=score_hash,
@@ -511,6 +711,7 @@ def build_source_state(importer_version: str, path: Path = OSM_EXTRACT_PATH) -> 
 
 def build_hashes_for_import(
     import_fingerprint: str,
+    transit_reality_fingerprint: str = "transit-unavailable",
     profile: str | None = None,
 ) -> BuildHashes:
     normalized_profile = normalize_build_profile(profile)
@@ -524,6 +725,8 @@ def build_hashes_for_import(
     reach_hash = hash_dict(
         {
             "geo_hash": geo_hash,
+            "transit_hash": base_hashes.transit_hash,
+            "transit_reality_fingerprint": transit_reality_fingerprint,
             "tags": TAGS,
             "walk_radius_m": WALK_RADIUS_M,
         }
@@ -552,12 +755,15 @@ def build_hashes_for_import(
         {
             "build_profile": normalized_profile,
             "import_fingerprint": import_fingerprint,
+            "transit_reality_fingerprint": transit_reality_fingerprint,
             "config_hash": base_hashes.config_hash,
         }
     )
     return BuildHashes(
         build_profile=normalized_profile,
         geo_hash=geo_hash,
+        transit_hash=base_hashes.transit_hash,
+        transit_reality_fingerprint=transit_reality_fingerprint,
         reach_hash=reach_hash,
         surface_shell_hash=surface_shell_hash,
         score_hash=score_hash,

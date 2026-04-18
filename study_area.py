@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Callable
 
 import geopandas as gpd
+import shapely
 from shapely import force_2d
 from shapely.errors import GEOSException
 from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polygon, box
@@ -31,10 +33,63 @@ def _emit_progress(progress_cb, detail: str) -> None:
     progress_cb("detail", detail=detail, force_log=True)
 
 
+def _emit_substep(progress_cb, substep_name: str, seconds: float) -> None:
+    if progress_cb is None:
+        return
+    progress_cb(
+        "substep",
+        substep_name=substep_name,
+        seconds=max(float(seconds), 0.0),
+        force_log=True,
+    )
+
+
 def _as_2d(geometry):
     if geometry is None or geometry.is_empty:
         return geometry
     return force_2d(geometry)
+
+
+_POLYGON_GEOMETRY_TYPES = {"Polygon", "MultiPolygon"}
+
+
+def _read_boundary_file(path: Path, *, layer=None, geometry_only: bool) -> gpd.GeoDataFrame:
+    read_kwargs = {"layer": layer} if layer else {}
+    if not geometry_only:
+        return gpd.read_file(path, **read_kwargs)
+
+    try:
+        return gpd.read_file(path, columns=[], **read_kwargs)
+    except (TypeError, ValueError):
+        return gpd.read_file(path, **read_kwargs)
+
+
+def _coverage_union_fast_path(geometries) -> Any:
+    coverage_union_all = getattr(shapely, "coverage_union_all", None)
+    if coverage_union_all is None:
+        raise RuntimeError("coverage_union_all is unavailable")
+    return _as_2d(coverage_union_all(geometries))
+
+
+def _union_cleaned_geometries(geometries) -> Any:
+    geometry_list = list(geometries)
+    if not geometry_list:
+        raise ValueError("No geometries supplied for union.")
+
+    if all(geometry.geom_type in _POLYGON_GEOMETRY_TYPES for geometry in geometry_list):
+        try:
+            unioned = _coverage_union_fast_path(geometry_list)
+        except (GEOSException, RuntimeError, TypeError, ValueError):
+            unioned = None
+        if unioned is not None and not unioned.is_empty and unioned.is_valid:
+            return unioned
+
+    unioned = unary_union(geometry_list)
+    unioned = _as_2d(unioned)
+    if not unioned.is_valid:
+        unioned = unioned.buffer(0)
+        unioned = _as_2d(unioned)
+    return unioned
 
 
 def clean_union(geometries) -> Any:
@@ -50,12 +105,7 @@ def clean_union(geometries) -> Any:
             cleaned.append(geometry)
     if not cleaned:
         raise ValueError("No valid geometries found after cleaning.")
-    unioned = unary_union(cleaned)
-    unioned = _as_2d(unioned)
-    if not unioned.is_valid:
-        unioned = unioned.buffer(0)
-        unioned = _as_2d(unioned)
-    return unioned
+    return _union_cleaned_geometries(cleaned)
 
 
 def load_boundary_geometry(
@@ -64,10 +114,14 @@ def load_boundary_geometry(
     layer=None,
     source_crs=None,
     row_filter: Callable[[gpd.GeoDataFrame], Any] | None = None,
+    label: str | None = None,
     progress_cb=None,
 ):
+    boundary_label = label or path.stem
     _emit_progress(progress_cb, f"reading boundary file {path.name}")
-    gdf = gpd.read_file(path, layer=layer) if layer else gpd.read_file(path)
+    read_started_at = time.perf_counter()
+    gdf = _read_boundary_file(path, layer=layer, geometry_only=row_filter is None)
+    _emit_substep(progress_cb, f"{boundary_label}_read", time.perf_counter() - read_started_at)
     if gdf.empty:
         raise ValueError(f"No features loaded from {path}")
     if row_filter is not None:
@@ -80,9 +134,18 @@ def load_boundary_geometry(
             raise ValueError(f"{path} has no CRS. Supply source_crs explicitly.")
         gdf = gdf.set_crs(source_crs, allow_override=True)
     _emit_progress(progress_cb, f"projecting {path.name} to {TARGET_CRS}")
+    project_started_at = time.perf_counter()
     gdf = gdf.to_crs(TARGET_CRS)
+    _emit_substep(
+        progress_cb,
+        f"{boundary_label}_project",
+        time.perf_counter() - project_started_at,
+    )
     _emit_progress(progress_cb, f"unioning geometries from {path.name}")
-    return clean_union(gdf.geometry)
+    union_started_at = time.perf_counter()
+    unioned = clean_union(gdf.geometry)
+    _emit_substep(progress_cb, f"{boundary_label}_union", time.perf_counter() - union_started_at)
+    return unioned
 
 
 def _geometry_components(geometry):
@@ -295,27 +358,38 @@ def _report_coastal_cleanup_fallbacks(fallback_diagnostics: list[dict[str, Any]]
         )
 
 
-def clean_coastal_artifacts(
+def _clean_coastal_artifact_components(
     geometry,
     *,
-    artifact_width_m: float = COASTAL_ARTIFACT_WIDTH_M,
-    preserve_area_m2: float = COASTAL_COMPONENT_PRESERVE_AREA_M2,
+    artifact_width_m: float,
+    preserve_area_m2: float,
+    progress_cb=None,
 ):
-    """Remove ultra-narrow coastal spurs via morphological opening in metric space.
+    parts = [
+        _as_2d(part)
+        for part in _geometry_components(geometry)
+        if part is not None and not part.is_empty
+    ]
+    if not parts:
+        raise ValueError("clean_coastal_artifacts: all components were removed before cleanup.")
 
-    Each polygon component of *geometry* (already in a metric CRS) is eroded by
-    *artifact_width_m* then dilated back only to detect coastal appendages that
-    extend materially away from the surviving coastline. Those artifacts are then
-    pruned from the original component so surviving shoreline vertices stay sharp.
-    Components that would otherwise be erased entirely are kept if their original
-    area is at least *preserve_area_m2* (protects real islands from being discarded).
-    """
+    total_components = len(parts)
+    largest_component_index = max(range(total_components), key=lambda index: parts[index].area)
     cleaned_parts = []
     fallback_diagnostics: list[dict[str, Any]] = []
-    for component_index, part in enumerate(_geometry_components(geometry)):
-        part = _as_2d(part)
-        if part is None or part.is_empty:
-            continue
+    if total_components > 1:
+        _emit_progress(progress_cb, f"cleaning coastal artifacts across {total_components:,} components")
+
+    components_started_at = time.perf_counter()
+    for component_index, part in enumerate(parts):
+        if total_components > 1 and component_index == largest_component_index:
+            _emit_progress(
+                progress_cb,
+                (
+                    "cleaning coastal artifacts: "
+                    f"largest component {component_index + 1:,}/{total_components:,}"
+                ),
+            )
 
         cleanup_mode, cleaned, diagnostic = _cleanup_coastal_component(
             part,
@@ -327,23 +401,61 @@ def clean_coastal_artifacts(
 
         if cleanup_mode == "original":
             cleaned_parts.append(cleaned)
-            continue
-
-        if cleaned is None or cleaned.is_empty:
+        elif cleaned is None or cleaned.is_empty:
             if part.area >= float(preserve_area_m2):
                 cleaned_parts.append(part)
         else:
             cleaned_parts.append(cleaned)
 
+        if total_components > 1 and component_index == largest_component_index:
+            _emit_progress(
+                progress_cb,
+                (
+                    "cleaning coastal artifacts: "
+                    f"largest component complete ({component_index + 1:,}/{total_components:,})"
+                ),
+            )
+
+    _emit_substep(
+        progress_cb,
+        "coastal_cleanup_components",
+        time.perf_counter() - components_started_at,
+    )
+    return cleaned_parts, fallback_diagnostics
+
+
+def clean_coastal_artifacts(
+    geometry,
+    *,
+    artifact_width_m: float = COASTAL_ARTIFACT_WIDTH_M,
+    preserve_area_m2: float = COASTAL_COMPONENT_PRESERVE_AREA_M2,
+    progress_cb=None,
+):
+    """Remove ultra-narrow coastal spurs via morphological opening in metric space.
+
+    Each polygon component of *geometry* (already in a metric CRS) is eroded by
+    *artifact_width_m* then dilated back only to detect coastal appendages that
+    extend materially away from the surviving coastline. Those artifacts are then
+    pruned from the original component so surviving shoreline vertices stay sharp.
+    Components that would otherwise be erased entirely are kept if their original
+    area is at least *preserve_area_m2* (protects real islands from being discarded).
+    """
+    cleaned_parts, fallback_diagnostics = _clean_coastal_artifact_components(
+        geometry,
+        artifact_width_m=artifact_width_m,
+        preserve_area_m2=preserve_area_m2,
+        progress_cb=progress_cb,
+    )
+
     if not cleaned_parts:
         raise ValueError("clean_coastal_artifacts: all components were removed by cleanup.")
 
     _report_coastal_cleanup_fallbacks(fallback_diagnostics)
-
-    result = unary_union(cleaned_parts)
-    result = _as_2d(result)
-    if not result.is_valid:
-        result = _as_2d(result.buffer(0))
+    if len(cleaned_parts) > 1:
+        _emit_progress(progress_cb, "reassembling cleaned coastal components")
+    union_started_at = time.perf_counter()
+    result = _union_cleaned_geometries(cleaned_parts)
+    _emit_substep(progress_cb, "coastal_cleanup_union", time.perf_counter() - union_started_at)
     return result
 
 
@@ -354,19 +466,36 @@ def load_island_geometry_metric(*, progress_cb=None):
     roi_geom = load_boundary_geometry(
         ROI_BOUNDARY_PATH,
         layer=ROI_BOUNDARY_LAYER,
+        label="roi",
         progress_cb=progress_cb,
     )
     ni_geom = load_boundary_geometry(
         NI_BOUNDARY_PATH,
         layer=NI_BOUNDARY_LAYER,
+        label="ni",
         progress_cb=progress_cb,
     )
+    # Simplify each boundary individually before merging to reduce vertex count
+    # and avoid GEOS memory exhaustion on the union of two high-resolution
+    # ungeneralised boundary datasets.
+    _emit_progress(progress_cb, "simplifying ROI boundary before merge")
+    roi_simplify_started_at = time.perf_counter()
+    roi_geom = _as_2d(roi_geom.simplify(_BOUNDARY_SIMPLIFY_TOLERANCE_M, preserve_topology=True))
+    _emit_substep(progress_cb, "roi_simplify", time.perf_counter() - roi_simplify_started_at)
+    _emit_progress(progress_cb, "simplifying NI boundary before merge")
+    ni_simplify_started_at = time.perf_counter()
+    ni_geom = _as_2d(ni_geom.simplify(_BOUNDARY_SIMPLIFY_TOLERANCE_M, preserve_topology=True))
+    _emit_substep(progress_cb, "ni_simplify", time.perf_counter() - ni_simplify_started_at)
     _emit_progress(progress_cb, "merging ROI and NI boundaries")
+    merge_started_at = time.perf_counter()
     raw = clean_union([roi_geom, ni_geom])
+    _emit_substep(progress_cb, "island_merge", time.perf_counter() - merge_started_at)
     _emit_progress(progress_cb, "simplifying merged island boundary")
+    simplify_started_at = time.perf_counter()
     raw = _as_2d(raw.simplify(_BOUNDARY_SIMPLIFY_TOLERANCE_M, preserve_topology=True))
+    _emit_substep(progress_cb, "island_simplify", time.perf_counter() - simplify_started_at)
     _emit_progress(progress_cb, "cleaning coastal artifacts")
-    return clean_coastal_artifacts(raw)
+    return clean_coastal_artifacts(raw, progress_cb=progress_cb)
 
 
 def load_m1_corridor_metric(island_geom_metric):
@@ -399,7 +528,13 @@ def load_study_area_metric(*, progress_cb=None):
 def load_study_area_geometries(*, progress_cb=None):
     study_area_metric = _as_2d(load_study_area_metric(progress_cb=progress_cb))
     _emit_progress(progress_cb, "transforming study area to WGS84")
+    transform_started_at = time.perf_counter()
     study_area_wgs84 = _as_2d(transform(TO_WGS84, study_area_metric))
+    _emit_substep(
+        progress_cb,
+        "study_area_wgs84_transform",
+        time.perf_counter() - transform_started_at,
+    )
     return study_area_metric, study_area_wgs84
 
 

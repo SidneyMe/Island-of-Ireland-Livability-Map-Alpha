@@ -225,6 +225,7 @@ def phase_amenities_impl(
     mark_complete,
     can_finalize_reach_tier,
     load_source_amenity_rows,
+    transit_reality_fingerprint: str | None = None,
 ) -> tuple[dict[str, list[tuple[float, float]]], list[dict[str, Any]]]:
     tracker.start_phase(
         "amenities",
@@ -249,7 +250,12 @@ def phase_amenities_impl(
         return amenity_data, amenity_source_rows
 
     mark_building(cache_dir, "reach", reach_hash, "amenities")
-    amenity_rows = load_source_amenity_rows(engine, import_fingerprint, study_area_wgs84)
+    amenity_rows = load_source_amenity_rows(
+        engine,
+        import_fingerprint,
+        study_area_wgs84,
+        transit_reality_fingerprint=transit_reality_fingerprint,
+    )
     amenity_source_rows = []
     amenity_data = {category: [] for category in tags}
     counts_by_category = {category: 0 for category in tags}

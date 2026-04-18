@@ -33,6 +33,7 @@ from db_postgis import (
     load_runtime_manifest,
 )
 from precompute import surface as _surface
+from transit.export import EXPORTS_DIR, ZIP_FILENAME
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -75,6 +76,12 @@ class RuntimeState:
     surface_shell_dir: Path | None
     surface_score_dir: Path | None
     surface_tile_dir: Path | None
+    transport_reality_enabled: bool
+    service_deserts_enabled: bool
+    transport_reality_download_url: str | None
+    transit_analysis_date: str | None
+    transit_analysis_window_days: int | None
+    transit_service_desert_window_days: int | None
 
 
 class RuntimeService:
@@ -197,6 +204,28 @@ class RuntimeService:
             surface_shell_dir=surface_shell_dir,
             surface_score_dir=surface_score_dir,
             surface_tile_dir=surface_tile_dir,
+            transport_reality_enabled=bool(summary_json.get("transport_reality_enabled")),
+            service_deserts_enabled=bool(summary_json.get("service_deserts_enabled")),
+            transport_reality_download_url=(
+                str(summary_json["transport_reality_download_url"])
+                if summary_json.get("transport_reality_download_url")
+                else None
+            ),
+            transit_analysis_date=(
+                str(summary_json["transit_analysis_date"])
+                if summary_json.get("transit_analysis_date")
+                else None
+            ),
+            transit_analysis_window_days=(
+                int(summary_json["transit_analysis_window_days"])
+                if summary_json.get("transit_analysis_window_days") is not None
+                else None
+            ),
+            transit_service_desert_window_days=(
+                int(summary_json["transit_service_desert_window_days"])
+                if summary_json.get("transit_service_desert_window_days") is not None
+                else None
+            ),
         )
 
     def state(self) -> RuntimeState:
@@ -231,6 +260,12 @@ class RuntimeService:
             "max_zoom": SURFACE_MAX_ZOOM,
             "fine_surface_enabled": state.fine_surface_enabled,
             "pmtiles_url": self._pmtiles_url,
+            "transport_reality_enabled": state.transport_reality_enabled,
+            "service_deserts_enabled": state.service_deserts_enabled,
+            "transport_reality_download_url": state.transport_reality_download_url,
+            "transit_analysis_date": state.transit_analysis_date,
+            "transit_analysis_window_days": state.transit_analysis_window_days,
+            "transit_service_desert_window_days": state.transit_service_desert_window_days,
         }
 
     def surface_runtime(self) -> _surface.FineSurfaceRuntime:
@@ -331,6 +366,9 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
                 "text/html; charset=utf-8",
             )
             return
+        if parsed.path == "/exports/transport-reality.zip":
+            self._serve_export(EXPORTS_DIR / ZIP_FILENAME)
+            return
         if parsed.path == self.livability_server.pmtiles_url_path:
             self._serve_pmtiles()
             return
@@ -428,6 +466,21 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
+
+    def _serve_export(self, export_path: Path) -> None:
+        resolved = export_path.resolve()
+        if not resolved.exists() or not resolved.is_file():
+            raise FileNotFoundError(str(resolved))
+        content = resolved.read_bytes()
+        self._write_bytes(
+            HTTPStatus.OK,
+            content,
+            "application/zip",
+            extra_headers={
+                "Content-Disposition": f'attachment; filename="{resolved.name}"',
+                "Cache-Control": "public, max-age=3600",
+            },
+        )
 
     def _serve_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> None:
         payload = self.livability_server.service.get_surface_tile(

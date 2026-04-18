@@ -80,6 +80,36 @@ function amenityCircleColorExpression(colors) {
   return expr;
 }
 
+function transportRealityCircleColorExpression() {
+  return [
+    "match",
+    ["get", "reality_status"],
+    "active_confirmed", "#1a9850",
+    "inactive_confirmed", "#d73027",
+    "school_only_confirmed", "#fdae61",
+    "#666666"
+  ];
+}
+
+function transportRealityCircleStrokeColorExpression() {
+  return "#ffffff";
+}
+
+function transportRealityCircleStrokeWidthExpression() {
+  return 1;
+}
+
+function serviceDesertFillColorExpression() {
+  return [
+    "interpolate",
+    ["linear"],
+    ["coalesce", ["get", "baseline_reachable_stop_count"], 0],
+    1, "#fee08b",
+    3, "#f46d43",
+    6, "#a50026"
+  ];
+}
+
 function fineSurfaceSource(runtime, resolutionM) {
   const template = String(runtime.surface_tile_url_template || "");
   return {
@@ -88,6 +118,7 @@ function fineSurfaceSource(runtime, resolutionM) {
     tileSize: 256
   };
 }
+
 
 function buildStyle(runtime, options = {}) {
   const colors = runtime.category_colors || {};
@@ -163,6 +194,39 @@ function buildStyle(runtime, options = {}) {
     }
   });
 
+  layers.push({
+    id: "service-deserts-fill",
+    type: "fill",
+    source: "livability",
+    "source-layer": "service_deserts",
+    layout: { visibility: "none" },
+    paint: {
+      "fill-color": serviceDesertFillColorExpression(),
+      "fill-opacity": 0.24,
+      "fill-outline-color": "#a63603"
+    }
+  });
+
+  layers.push({
+    id: "transport-reality-circle",
+    type: "circle",
+    source: "livability",
+    "source-layer": "transport_reality",
+    minzoom: 9,
+    layout: { visibility: "none" },
+    paint: {
+      "circle-radius": [
+        "interpolate", ["linear"], ["zoom"],
+        9, 2.5,
+        19, 8
+      ],
+      "circle-color": transportRealityCircleColorExpression(),
+      "circle-opacity": 0.82,
+      "circle-stroke-color": transportRealityCircleStrokeColorExpression(),
+      "circle-stroke-width": transportRealityCircleStrokeWidthExpression()
+    }
+  });
+
   return {
     version: 8,
     glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
@@ -177,7 +241,7 @@ function buildStyle(runtime, options = {}) {
         type: "vector",
         url: pmtilesUrl
       },
-      ...fineSources
+...fineSources
     },
     layers: layers
   };
