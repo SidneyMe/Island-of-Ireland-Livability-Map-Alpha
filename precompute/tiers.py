@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -376,12 +377,36 @@ def print_cache_status(
 
     if cache_dir.exists():
         current_dirs = {geo_cache_dir.name, reach_cache_dir.name, score_cache_dir.name}
+        # Never touch the shared/persistent subdirs — they are keyed independently.
+        protected_dirs = {"geo_shared", "exports"}
+        prune_enabled = (
+            os.getenv("LIVABILITY_KEEP_STALE_CACHES", "0").strip().lower()
+            in {"0", "false", "no", "off", ""}
+        )
+        # Keep dirs prefixed with known tier types; only those are fair game to prune.
+        tier_prefixes = ("geo_", "reach_", "score_", "surface_shell_", "surface_scores_", "surface_tiles_")
         stale_dirs = [
-            item for item in cache_dir.iterdir() if item.is_dir() and item.name not in current_dirs
+            item
+            for item in cache_dir.iterdir()
+            if item.is_dir()
+            and item.name not in current_dirs
+            and item.name not in protected_dirs
+            and item.name.startswith(tier_prefixes)
         ]
         if stale_dirs:
+            action_label = "pruning" if prune_enabled else "safe to delete manually"
             print(
-                f"  NOTE: {len(stale_dirs)} stale cache dir(s) from previous configs - safe to delete manually:"
+                f"  NOTE: {len(stale_dirs)} stale cache dir(s) from previous configs - {action_label}:"
             )
             for stale_dir in sorted(stale_dirs):
                 print(f"    {cache_dir / stale_dir.name}")
+            if prune_enabled:
+                removed = 0
+                for stale_dir in stale_dirs:
+                    try:
+                        shutil.rmtree(stale_dir)
+                        removed += 1
+                    except OSError as exc:
+                        print(f"    [skip] could not remove {stale_dir}: {exc}")
+                if removed:
+                    print(f"  pruned {removed} stale cache dir(s)")

@@ -40,6 +40,7 @@ legacy/
 # Large local geospatial inputs
 osm/*.osm.pbf
 osm/extract_manifest.json
+osm/flat-nodes.bin
 gtfs/*.zip
 boundaries/*.geojson
 overture/*.geoparquet

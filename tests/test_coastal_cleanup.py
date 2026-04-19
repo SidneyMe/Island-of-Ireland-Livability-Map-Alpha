@@ -291,6 +291,7 @@ class CoastalArtifactCleanupTests(TestCase):
             with (
                 mock.patch("builtins.print") as print_mock,
                 mock.patch.object(study_area.gpd, "read_file", side_effect=[roi_gdf, ni_gdf]),
+                mock.patch.object(study_area, "_GEO_SHARED_CACHE_ENABLED", False),
             ):
                 tracker.start_phase("geometry", detail="loading study area geometry")
                 study_area_metric, study_area_wgs84 = study_area.load_study_area_geometries(

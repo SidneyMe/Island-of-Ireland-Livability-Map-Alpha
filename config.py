@@ -47,6 +47,69 @@ TRANSIT_DERIVED_SCHEMA = "transit_derived"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
 OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
 IMPORTER_CONFIG_VERSION = "2026-04-08"
+
+
+def _osm2pgsql_flat_nodes_path() -> str:
+    # Flat-nodes offloads node coordinates to a ~1GB binary file. It prevents
+    # bad_alloc when RAM is constrained but the disk I/O dominates wall time.
+    # Default OFF: assume ~3GB of RAM is available for the import (Ireland+NI
+    # nodes fit in ~1.4GB cache, plus osm2pgsql overhead).
+    # Set OSM2PGSQL_FLAT_NODES=osm/flat-nodes.bin to opt back in on tight RAM.
+    raw = os.getenv("OSM2PGSQL_FLAT_NODES")
+    if raw is None:
+        return ""
+    return raw.strip()
+
+
+OSM2PGSQL_FLAT_NODES_PATH = _osm2pgsql_flat_nodes_path()
+
+
+def _osm2pgsql_cache_mb() -> int:
+    raw = os.getenv("OSM2PGSQL_CACHE_MB")
+    if raw is None or not raw.strip():
+        # osm2pgsql recommends cache=0 whenever --flat-nodes is in use;
+        # otherwise we size the cache to fit the full Ireland+NI node set
+        # (~1.4GB) with headroom so the allocation is a single contiguous
+        # block rather than fragmenting as the run grows.
+        return 0 if OSM2PGSQL_FLAT_NODES_PATH else 2048
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"OSM2PGSQL_CACHE_MB must be a non-negative integer when set; got {raw!r}."
+        ) from exc
+    if value < 0:
+        raise RuntimeError(
+            f"OSM2PGSQL_CACHE_MB must be a non-negative integer when set; got {raw!r}."
+        )
+    return value
+
+
+OSM2PGSQL_CACHE_MB = _osm2pgsql_cache_mb()
+
+
+def _osm2pgsql_number_processes() -> int | None:
+    raw = os.getenv("OSM2PGSQL_NUMBER_PROCESSES")
+    if raw is None or not raw.strip():
+        # osm2pgsql parallelizes pending-Way/Relation processing when this is
+        # >1. Default to cpu_count capped at 8 to avoid oversubscribing
+        # postgres when the server is local.
+        cpu = os.cpu_count() or 1
+        return max(1, min(8, cpu))
+    try:
+        value = int(raw.strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"OSM2PGSQL_NUMBER_PROCESSES must be a positive integer when set; got {raw!r}."
+        ) from exc
+    if value <= 0:
+        raise RuntimeError(
+            f"OSM2PGSQL_NUMBER_PROCESSES must be a positive integer when set; got {raw!r}."
+        )
+    return value
+
+
+OSM2PGSQL_NUMBER_PROCESSES = _osm2pgsql_number_processes()
 GTFS_DIR = BASE_DIR / "gtfs"
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
 TRANSIT_REALITY_ALGO_VERSION = 5
@@ -283,14 +346,14 @@ COASTAL_CLEANUP_ALGORITHM_VERSION = 3
 # that the erode/dilate pipeline catches, so skipping it saves ~100s without
 # affecting the large islands that do benefit from cleanup (Achill ~1.5e8 mÂ²).
 COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2 = _non_negative_float_env(
-    "COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2", 0.0
+    "COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2", 1_000_000_000.0
 )
 
 # Worker count for the parallel PMTiles bake in precompute.bake_pmtiles.
-# 1 = sequential (original behaviour). Default = min(8, cpu_count()).
+# 1 = sequential (original behaviour). Default = min(12, cpu_count()).
 def _default_bake_pmtiles_workers() -> int:
     cpu = os.cpu_count() or 1
-    return max(1, min(8, cpu))
+    return max(1, min(12, cpu))
 
 
 BAKE_PMTILES_WORKERS = _positive_int_env(

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import os
+import pickle
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +16,7 @@ from shapely.geometry import GeometryCollection, LineString, MultiPolygon, Polyg
 from shapely.ops import transform, unary_union
 
 from config import (
+    CACHE_DIR,
     COASTAL_ARTIFACT_WIDTH_M,
     COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
     COASTAL_COMPONENT_PRESERVE_AREA_M2,
@@ -26,6 +31,58 @@ from config import (
     TO_TARGET,
     TO_WGS84,
 )
+
+
+_GEO_SHARED_CACHE_DIR = CACHE_DIR / "geo_shared"
+_GEO_SHARED_SCHEMA_VERSION = 1
+_GEO_SHARED_CACHE_ENABLED = (
+    os.getenv("LIVABILITY_GEO_SHARED_CACHE", "1").strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+
+
+def _file_fingerprint(path: Path) -> str:
+    try:
+        stat = path.stat()
+        return f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
+    except FileNotFoundError:
+        return f"{path.name}:missing"
+
+
+def _geo_shared_key(*parts: Any) -> str:
+    payload = "|".join(str(part) for part in parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _geo_shared_load(prefix: str, key: str):
+    if not _GEO_SHARED_CACHE_ENABLED:
+        return None
+    path = _GEO_SHARED_CACHE_DIR / f"{prefix}_{key}.pkl"
+    if not path.exists():
+        return None
+    try:
+        with path.open("rb") as handle:
+            return pickle.load(handle)
+    except (EOFError, pickle.UnpicklingError, OSError):
+        return None
+
+
+def _geo_shared_save(prefix: str, key: str, data: Any) -> None:
+    if not _GEO_SHARED_CACHE_ENABLED:
+        return
+    _GEO_SHARED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    final = _GEO_SHARED_CACHE_DIR / f"{prefix}_{key}.pkl"
+    tmp = final.with_suffix(".pkl.tmp")
+    try:
+        with tmp.open("wb") as handle:
+            pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, final)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _emit_progress(progress_cb, detail: str) -> None:
@@ -388,28 +445,48 @@ def _clean_coastal_artifact_components(
 
     total_components = len(parts)
     largest_component_index = max(range(total_components), key=lambda index: parts[index].area)
-    cleaned_parts = []
+    cleaned_parts: list[Any] = []
     fallback_diagnostics: list[dict[str, Any]] = []
     if total_components > 1:
         _emit_progress(progress_cb, f"cleaning coastal artifacts across {total_components:,} components")
 
     components_started_at = time.perf_counter()
-    for component_index, part in enumerate(parts):
-        if total_components > 1 and component_index == largest_component_index:
-            _emit_progress(
-                progress_cb,
-                (
-                    "cleaning coastal artifacts: "
-                    f"largest component {component_index + 1:,}/{total_components:,}"
-                ),
-            )
 
+    def _process(component_index: int):
+        part = parts[component_index]
         cleanup_mode, cleaned, diagnostic = _cleanup_coastal_component(
             part,
             artifact_width_m=artifact_width_m,
             component_index=component_index,
             skip_area_threshold_m2=skip_area_threshold_m2,
         )
+        return component_index, cleanup_mode, cleaned, diagnostic
+
+    if total_components > 1 and largest_component_index >= 0:
+        _emit_progress(
+            progress_cb,
+            (
+                "cleaning coastal artifacts: "
+                f"largest component {largest_component_index + 1:,}/{total_components:,}"
+            ),
+        )
+
+    # Shapely 2.x GEOS calls release the GIL; threads avoid pickling giant
+    # geometries that a ProcessPool would require.
+    worker_count = max(1, min(os.cpu_count() or 1, 8))
+    results: list[tuple[int, str, Any, Any]] = [None] * total_components  # type: ignore[list-item]
+    if total_components > 1 and worker_count > 1:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for component_index, cleanup_mode, cleaned, diagnostic in executor.map(
+                _process, range(total_components)
+            ):
+                results[component_index] = (component_index, cleanup_mode, cleaned, diagnostic)
+    else:
+        for component_index in range(total_components):
+            results[component_index] = _process(component_index)
+
+    for component_index, cleanup_mode, cleaned, diagnostic in results:
+        part = parts[component_index]
         if diagnostic is not None:
             fallback_diagnostics.append(diagnostic)
 
@@ -421,14 +498,14 @@ def _clean_coastal_artifact_components(
         else:
             cleaned_parts.append(cleaned)
 
-        if total_components > 1 and component_index == largest_component_index:
-            _emit_progress(
-                progress_cb,
-                (
-                    "cleaning coastal artifacts: "
-                    f"largest component complete ({component_index + 1:,}/{total_components:,})"
-                ),
-            )
+    if total_components > 1 and largest_component_index >= 0:
+        _emit_progress(
+            progress_cb,
+            (
+                "cleaning coastal artifacts: "
+                f"largest component complete ({largest_component_index + 1:,}/{total_components:,})"
+            ),
+        )
 
     _emit_substep(
         progress_cb,
@@ -481,38 +558,123 @@ def clean_coastal_artifacts(
 _BOUNDARY_SIMPLIFY_TOLERANCE_M = 5.0
 
 
+def _load_simplified_boundary_cached(
+    path: Path,
+    *,
+    layer,
+    label: str,
+    tolerance_m: float,
+    progress_cb=None,
+):
+    """Read + project + union + simplify a boundary, cached by file fingerprint.
+
+    Shared cache lives in CACHE_DIR/geo_shared/ and is keyed only by the boundary
+    file's size + mtime + TARGET_CRS + simplify tolerance. Config version bumps
+    (e.g. CACHE_SCHEMA_VERSION, COASTAL_CLEANUP_ALGORITHM_VERSION) do not
+    invalidate this cache — the 215s ROI simplify survives downstream churn.
+    """
+    fp = _file_fingerprint(path)
+    key = _geo_shared_key(
+        "simplified_boundary",
+        _GEO_SHARED_SCHEMA_VERSION,
+        fp,
+        TARGET_CRS,
+        f"{tolerance_m:.6f}",
+    )
+    cached = _geo_shared_load(f"{label}_simplified", key)
+    if cached is not None:
+        _emit_progress(progress_cb, f"reusing cached simplified {label} boundary")
+        _emit_substep(progress_cb, f"{label}_read", 0.0)
+        _emit_substep(progress_cb, f"{label}_project", 0.0)
+        _emit_substep(progress_cb, f"{label}_union", 0.0)
+        _emit_substep(progress_cb, f"{label}_simplify", 0.0)
+        return cached
+
+    geom = load_boundary_geometry(
+        path,
+        layer=layer,
+        label=label,
+        progress_cb=progress_cb,
+    )
+    _emit_progress(progress_cb, f"simplifying {label.upper()} boundary before merge")
+    simplify_started_at = time.perf_counter()
+    geom = _as_2d(geom.simplify(tolerance_m, preserve_topology=True))
+    _emit_substep(progress_cb, f"{label}_simplify", time.perf_counter() - simplify_started_at)
+
+    try:
+        _geo_shared_save(f"{label}_simplified", key, geom)
+    except OSError:
+        pass
+    return geom
+
+
+def _load_merged_island_cached(
+    roi_geom,
+    ni_geom,
+    *,
+    tolerance_m: float,
+    roi_fingerprint: str,
+    ni_fingerprint: str,
+    progress_cb=None,
+):
+    """Merge ROI + NI + post-merge simplify, cached by boundary fingerprints."""
+    key = _geo_shared_key(
+        "merged_island",
+        _GEO_SHARED_SCHEMA_VERSION,
+        roi_fingerprint,
+        ni_fingerprint,
+        TARGET_CRS,
+        f"{tolerance_m:.6f}",
+    )
+    cached = _geo_shared_load("island_merged", key)
+    if cached is not None:
+        _emit_progress(progress_cb, "reusing cached merged island boundary")
+        _emit_substep(progress_cb, "island_merge", 0.0)
+        _emit_substep(progress_cb, "island_simplify", 0.0)
+        return cached
+
+    _emit_progress(progress_cb, "merging ROI and NI boundaries")
+    merge_started_at = time.perf_counter()
+    merged = clean_union([roi_geom, ni_geom])
+    _emit_substep(progress_cb, "island_merge", time.perf_counter() - merge_started_at)
+
+    _emit_progress(progress_cb, "simplifying merged island boundary")
+    simplify_started_at = time.perf_counter()
+    merged = _as_2d(merged.simplify(tolerance_m, preserve_topology=True))
+    _emit_substep(progress_cb, "island_simplify", time.perf_counter() - simplify_started_at)
+
+    try:
+        _geo_shared_save("island_merged", key, merged)
+    except OSError:
+        pass
+    return merged
+
+
 def load_island_geometry_metric(*, progress_cb=None):
-    roi_geom = load_boundary_geometry(
+    roi_fp = _file_fingerprint(ROI_BOUNDARY_PATH)
+    ni_fp = _file_fingerprint(NI_BOUNDARY_PATH)
+    roi_geom = _load_simplified_boundary_cached(
         ROI_BOUNDARY_PATH,
         layer=ROI_BOUNDARY_LAYER,
         label="roi",
+        tolerance_m=_BOUNDARY_SIMPLIFY_TOLERANCE_M,
         progress_cb=progress_cb,
     )
-    ni_geom = load_boundary_geometry(
+    ni_geom = _load_simplified_boundary_cached(
         NI_BOUNDARY_PATH,
         layer=NI_BOUNDARY_LAYER,
         label="ni",
+        tolerance_m=_BOUNDARY_SIMPLIFY_TOLERANCE_M,
         progress_cb=progress_cb,
     )
-    # Simplify each boundary individually before merging to reduce vertex count
-    # and avoid GEOS memory exhaustion on the union of two high-resolution
-    # ungeneralised boundary datasets.
-    _emit_progress(progress_cb, "simplifying ROI boundary before merge")
-    roi_simplify_started_at = time.perf_counter()
-    roi_geom = _as_2d(roi_geom.simplify(_BOUNDARY_SIMPLIFY_TOLERANCE_M, preserve_topology=True))
-    _emit_substep(progress_cb, "roi_simplify", time.perf_counter() - roi_simplify_started_at)
-    _emit_progress(progress_cb, "simplifying NI boundary before merge")
-    ni_simplify_started_at = time.perf_counter()
-    ni_geom = _as_2d(ni_geom.simplify(_BOUNDARY_SIMPLIFY_TOLERANCE_M, preserve_topology=True))
-    _emit_substep(progress_cb, "ni_simplify", time.perf_counter() - ni_simplify_started_at)
-    _emit_progress(progress_cb, "merging ROI and NI boundaries")
-    merge_started_at = time.perf_counter()
-    raw = clean_union([roi_geom, ni_geom])
-    _emit_substep(progress_cb, "island_merge", time.perf_counter() - merge_started_at)
-    _emit_progress(progress_cb, "simplifying merged island boundary")
-    simplify_started_at = time.perf_counter()
-    raw = _as_2d(raw.simplify(_BOUNDARY_SIMPLIFY_TOLERANCE_M, preserve_topology=True))
-    _emit_substep(progress_cb, "island_simplify", time.perf_counter() - simplify_started_at)
+    raw = _load_merged_island_cached(
+        roi_geom,
+        ni_geom,
+        tolerance_m=_BOUNDARY_SIMPLIFY_TOLERANCE_M,
+        roi_fingerprint=roi_fp,
+        ni_fingerprint=ni_fp,
+        progress_cb=progress_cb,
+    )
     _emit_progress(progress_cb, "cleaning coastal artifacts")
     return clean_coastal_artifacts(raw, progress_cb=progress_cb)
 

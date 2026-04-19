@@ -10,6 +10,9 @@ from datetime import datetime, timezone
 from sqlalchemy.engine.url import make_url
 
 from config import (
+    OSM2PGSQL_CACHE_MB,
+    OSM2PGSQL_FLAT_NODES_PATH,
+    OSM2PGSQL_NUMBER_PROCESSES,
     OSM_IMPORTER_BIN,
     OSM_IMPORTER_CONFIG,
     OSM_IMPORT_SCHEMA,
@@ -89,6 +92,9 @@ def _run_osm2pgsql_import(source_state: SourceState, progress_cb=None) -> None:
         import_schema=OSM_IMPORT_SCHEMA,
         connection_arguments_fn=_connection_arguments,
         emit_detail_fn=_emit_detail,
+        cache_mb=OSM2PGSQL_CACHE_MB,
+        flat_nodes_path=OSM2PGSQL_FLAT_NODES_PATH,
+        number_processes=OSM2PGSQL_NUMBER_PROCESSES,
         subprocess_module=subprocess,
         stream_subprocess_lines_fn=_stream_subprocess_lines,
         os_module=os,

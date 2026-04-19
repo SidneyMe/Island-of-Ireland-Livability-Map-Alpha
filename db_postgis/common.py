@@ -7,7 +7,9 @@ from ._dependencies import Connection, Table, func, select
 
 
 ProgressCallback = Callable[..., None]
-BATCH_SIZE = 2000
+# Raised from 2000: with SQLAlchemy 2's insertmanyvalues path over psycopg3,
+# larger batches cut round-trips ~5x for the publish phase (124k rows).
+BATCH_SIZE = 10000
 
 
 def root_module():

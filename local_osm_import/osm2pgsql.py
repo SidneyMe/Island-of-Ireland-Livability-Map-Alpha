@@ -166,6 +166,9 @@ def run_osm2pgsql_import_impl(
     connection_arguments_fn,
     emit_detail_fn,
     progress_cb=None,
+    cache_mb: int = 0,
+    flat_nodes_path: str = "",
+    number_processes: int | None = None,
     subprocess_module=subprocess,
     stream_subprocess_lines_fn=stream_subprocess_lines_impl,
     os_module=os,
@@ -189,11 +192,29 @@ def run_osm2pgsql_import_impl(
         "--middle-schema",
         import_schema,
         "--create",
-        *db_args,
-        str(source_state.extract_path),
+        "--cache",
+        str(int(cache_mb)),
     ]
+    if flat_nodes_path:
+        flat_nodes_abs = os_module.path.abspath(flat_nodes_path)
+        flat_nodes_dir = os_module.path.dirname(flat_nodes_abs)
+        if flat_nodes_dir:
+            os_module.makedirs(flat_nodes_dir, exist_ok=True)
+        command.extend(["--flat-nodes", flat_nodes_abs])
+    if number_processes is not None:
+        command.extend(["--number-processes", str(int(number_processes))])
+    command.extend([*db_args, str(source_state.extract_path)])
     env = os_module.environ.copy()
     env.update(connection_env)
+    # Relax Postgres durability just for the bulk load. These options apply
+    # per-connection via libpq; they do NOT change the server config. We skip
+    # them if the caller already set PGOPTIONS so operators keep the final say.
+    if not env.get("PGOPTIONS"):
+        env["PGOPTIONS"] = (
+            "-c synchronous_commit=off "
+            "-c maintenance_work_mem=1GB "
+            "-c work_mem=64MB"
+        )
     env["LIVABILITY_IMPORT_FINGERPRINT"] = source_state.import_fingerprint
     env["LIVABILITY_IMPORT_CREATED_AT"] = datetime_cls.now(timezone_cls.utc).isoformat()
     env["LIVABILITY_IMPORT_SCHEMA"] = import_schema
