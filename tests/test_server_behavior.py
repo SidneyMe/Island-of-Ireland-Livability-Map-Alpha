@@ -328,6 +328,7 @@ class RenderAndCliTests(TestCase):
                 "transit_analysis_date": "2026-04-14",
                 "transit_analysis_window_days": 30,
                 "transit_service_desert_window_days": 7,
+                "overture_dataset": {"last_release": "2026-04-15.0"},
                 "fine_resolutions_m": [2500, 1000, 500, 250, 100, 50],
                 "surface_zoom_breaks": [
                     [18, 50],
@@ -367,6 +368,8 @@ class RenderAndCliTests(TestCase):
         self.assertTrue(payload["service_deserts_enabled"])
         self.assertEqual(payload["transport_reality_download_url"], "/exports/transport-reality.zip")
         self.assertEqual(payload["transit_analysis_date"], "2026-04-14")
+        self.assertEqual(payload["overture_dataset"], {"last_release": "2026-04-15.0"})
+        self.assertNotIn("ov_shops", payload["category_colors"])
 
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
         manifest = {

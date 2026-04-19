@@ -580,6 +580,8 @@ class DbReadTests(TestCase):
         connection.execute.return_value.yield_per.return_value.mappings.return_value = [
             {
                 "category": "parks",
+                "name": "Town Park",
+                "tags_json": {"name": "Town Park", "operator": "Council"},
                 "osm_type": "way",
                 "osm_id": 123,
                 "point_geom": "park-point",
@@ -587,6 +589,8 @@ class DbReadTests(TestCase):
             },
             {
                 "category": "parks",
+                "name": "Playground",
+                "tags_json": {"name": "Playground"},
                 "osm_type": "node",
                 "osm_id": 456,
                 "point_geom": "playground-point",
@@ -606,10 +610,79 @@ class DbReadTests(TestCase):
             )
 
         self.assertEqual(rows[0]["source_ref"], "way/123")
+        self.assertEqual(rows[0]["source"], "osm_local_pbf")
+        self.assertEqual(rows[0]["name"], "Town Park")
+        self.assertEqual(rows[0]["tags_json"], {"name": "Town Park", "operator": "Council"})
         self.assertEqual(rows[0]["geom"], "park-point")
         self.assertEqual(rows[0]["park_area_m2"], 125_000.0)
         self.assertEqual(rows[1]["source_ref"], "node/456")
+        self.assertEqual(rows[1]["source"], "osm_local_pbf")
+        self.assertEqual(rows[1]["name"], "Playground")
+        self.assertEqual(rows[1]["tags_json"], {"name": "Playground"})
         self.assertEqual(rows[1]["park_area_m2"], 0.0)
+
+    def test_load_source_amenity_rows_excludes_non_operational_pois_and_reports_count(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execution_options.return_value = connection
+        connection.execute.return_value.yield_per.return_value.mappings.return_value = [
+            {
+                "category": "shops",
+                "name": None,
+                "tags_json": {"shop": "vacant", "addr:street": "West Street"},
+                "osm_type": "node",
+                "osm_id": 101,
+                "point_geom": "vacant-point",
+                "park_area_m2": 0.0,
+            },
+            {
+                "category": "shops",
+                "name": "Penneys",
+                "tags_json": {"name": "Penneys", "shop": "clothes", "brand": "Primark"},
+                "osm_type": "node",
+                "osm_id": 102,
+                "point_geom": "penneys-point",
+                "park_area_m2": 0.0,
+            },
+            {
+                "category": "shops",
+                "name": "Old Shop",
+                "tags_json": {"name": "Old Shop", "disused:shop": "clothes"},
+                "osm_type": "node",
+                "osm_id": 103,
+                "point_geom": "old-shop-point",
+                "park_area_m2": 0.0,
+            },
+        ]
+        root = SimpleNamespace(
+            from_shape=mock.Mock(return_value="study-area"),
+            to_shape=lambda geom: geom,
+        )
+        stats_out: dict[str, object] = {}
+
+        with mock.patch.object(db_reads, "root_module", return_value=root):
+            rows = db_postgis.load_source_amenity_rows(
+                engine,
+                "import-fingerprint",
+                mock.sentinel.study_area_wgs84,
+                stats_out=stats_out,
+            )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "category": "shops",
+                    "source": "osm_local_pbf",
+                    "source_ref": "node/102",
+                    "name": "Penneys",
+                    "tags_json": {"name": "Penneys", "shop": "clothes", "brand": "Primark"},
+                    "geom": "penneys-point",
+                    "park_area_m2": 0.0,
+                }
+            ],
+        )
+        self.assertEqual(stats_out["excluded_non_operational_osm_rows"], 2)
 
     def test_load_transport_reality_rows_for_scoring_keeps_gtfs_direct_active_rows(self) -> None:
         engine = mock.MagicMock()
@@ -637,7 +710,10 @@ class DbReadTests(TestCase):
             [
                 {
                     "category": "transport",
+                    "source": "gtfs_direct",
                     "source_ref": "gtfs/nta/S1",
+                    "name": None,
+                    "conflict_class": "gtfs_direct",
                     "geom": "gtfs-point",
                     "park_area_m2": 0.0,
                 }

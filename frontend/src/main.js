@@ -313,10 +313,24 @@ function maybeBuildDebugGridControl() {
 }
 
 function amenityPopupHtml(properties) {
+  const title = properties.name || properties.category || "Amenity";
+  const details = [];
+  if (properties.name && properties.category) {
+    details.push("<p>" + escapeHtml(properties.category) + "</p>");
+  }
+  if (properties.source_ref) {
+    details.push("<p>" + escapeHtml(properties.source_ref) + "</p>");
+  }
+  if (properties.source) {
+    details.push("<p>Source: " + escapeHtml(properties.source) + "</p>");
+  }
+  if (properties.conflict_class && properties.conflict_class !== "osm_only") {
+    details.push("<p>Merge: " + escapeHtml(properties.conflict_class) + "</p>");
+  }
   return (
     '<div class="popup-content">' +
-      "<h3>" + escapeHtml(properties.category || "Amenity") + "</h3>" +
-      "<p>" + escapeHtml(properties.source_ref || "OSM feature") + "</p>" +
+      "<h3>" + escapeHtml(title) + "</h3>" +
+      details.join("") +
     "</div>"
   );
 }

@@ -10,6 +10,7 @@ import numpy as np
 from shapely.geometry import Point, Polygon, box
 
 import config
+import overture.merge as overture_merge
 import precompute
 import render_from_db
 import study_area
@@ -193,6 +194,678 @@ def _workflow_kwargs(**overrides):
     }
     defaults.update(overrides)
     return defaults
+
+
+class OvertureAmenityMergeTests(TestCase):
+    def _osm_row(
+        self,
+        *,
+        category: str = "shops",
+        lat: float = 53.35,
+        lon: float = -6.26,
+        source_ref: str = "node/1",
+        name: str | None = "Corner Shop",
+        tags_json: dict[str, object] | None = None,
+        park_area_m2: float = 0.0,
+    ) -> dict[str, object]:
+        return {
+            "category": category,
+            "source": "osm_local_pbf",
+            "source_ref": source_ref,
+            "name": name,
+            "tags_json": tags_json if tags_json is not None else {"name": name},
+            "geom": Point(lon, lat),
+            "park_area_m2": park_area_m2,
+        }
+
+    def _overture_row(
+        self,
+        *,
+        category: str = "shops",
+        lat: float = 53.35005,
+        lon: float = -6.26005,
+        source_ref: str = "ovt-1",
+        name: str | None = "Corner Shop",
+        brand: str | None = None,
+    ) -> dict[str, object]:
+        return {
+            "category": category,
+            "source": "overture_places",
+            "source_ref": source_ref,
+            "name": name,
+            "brand": brand,
+            "geom": Point(lon, lat),
+            "park_area_m2": 0.0,
+        }
+
+    def _candidate_pair(
+        self,
+        *,
+        osm_row_id: int,
+        overture_row_id: int,
+        same_category: bool,
+        aliases_agree: bool,
+        distance_m: float,
+    ) -> dict[str, object]:
+        return {
+            "osm_row_id": osm_row_id,
+            "overture_row_id": overture_row_id,
+            "same_category": same_category,
+            "aliases_agree": aliases_agree,
+            "distance_m": distance_m,
+        }
+
+    def test_same_category_nearby_rows_merge_into_source_agreement(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [self._osm_row()],
+            [self._overture_row()],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["category"], "shops")
+        self.assertEqual(merged[0]["source"], "osm_local_pbf")
+        self.assertEqual(merged[0]["source_ref"], "node/1")
+        self.assertEqual(merged[0]["conflict_class"], "source_agreement")
+
+    def test_overture_only_rows_survive_merge(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [],
+            [self._overture_row(source_ref="ovt-only", name="Late Addition")],
+        )
+
+        self.assertEqual(
+            merged,
+            [
+                {
+                    "category": "shops",
+                    "lat": 53.35005,
+                    "lon": -6.26005,
+                    "source": "overture_places",
+                    "source_ref": "ovt-only",
+                    "name": "Late Addition",
+                    "conflict_class": "overture_only",
+                    "park_area_m2": 0.0,
+                }
+            ],
+        )
+
+    def test_category_conflicts_keep_osm_category_and_flag_conflict(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [self._osm_row(category="healthcare", source_ref="node/9", name="Town Pharmacy")],
+            [self._overture_row(category="shops", source_ref="ovt-9", name="Town Pharmacy")],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["category"], "healthcare")
+        self.assertEqual(merged[0]["source"], "osm_local_pbf")
+        self.assertEqual(merged[0]["source_ref"], "node/9")
+        self.assertEqual(merged[0]["conflict_class"], "source_conflict")
+
+    def test_same_name_but_far_apart_rows_do_not_merge(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [self._osm_row(lat=53.35, lon=-6.26)],
+            [self._overture_row(lat=53.36, lon=-6.26)],
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(
+            sorted(row["conflict_class"] for row in merged),
+            ["osm_only", "overture_only"],
+        )
+
+    def test_osm_park_area_survives_merge_with_overture_point(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [self._osm_row(category="parks", source_ref="way/7", name="Big Park", park_area_m2=125_000.0)],
+            [self._overture_row(category="parks", source_ref="ovt-park", name="Big Park")],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["source_ref"], "way/7")
+        self.assertEqual(merged[0]["park_area_m2"], 125_000.0)
+        self.assertEqual(merged[0]["conflict_class"], "source_agreement")
+
+    def test_alias_only_match_within_name_radius_merges(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [
+                self._osm_row(
+                    source_ref="node/5",
+                    name=None,
+                    tags_json={"brand": "Corner Shop"},
+                )
+            ],
+            [
+                self._overture_row(
+                    source_ref="ovt-5",
+                    lat=53.3503,
+                    lon=-6.2603,
+                    name=None,
+                    brand="Corner Shop",
+                )
+            ],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["source_ref"], "node/5")
+        self.assertEqual(merged[0]["conflict_class"], "source_agreement")
+
+    def test_missing_osm_name_uses_overture_name_when_matched(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [self._osm_row(source_ref="node/6", name=None, tags_json={})],
+            [self._overture_row(source_ref="ovt-6", name="Rescue Name")],
+        )
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["name"], "Rescue Name")
+
+    def test_duplicate_osm_rows_with_same_alias_within_strict_radius_collapse_to_one(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [
+                self._osm_row(
+                    source_ref="node/1",
+                    name="ASICS",
+                    tags_json={"name": "ASICS", "brand": "ASICS", "shop": "shoes"},
+                ),
+                self._osm_row(
+                    source_ref="node/2",
+                    name="ASICS",
+                    lat=53.35005,
+                    lon=-6.25995,
+                    tags_json={"name": "ASICS", "brand": "ASICS", "shop": "shoes"},
+                ),
+            ],
+            [],
+        )
+
+        self.assertEqual(
+            merged,
+            [
+                {
+                    "category": "shops",
+                    "lat": 53.35,
+                    "lon": -6.26,
+                    "source": "osm_local_pbf",
+                    "source_ref": "node/1",
+                    "name": "ASICS",
+                    "conflict_class": "osm_only",
+                    "park_area_m2": 0.0,
+                }
+            ],
+        )
+
+    def test_same_name_rows_beyond_strict_osm_dedupe_radius_do_not_collapse(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [
+                self._osm_row(
+                    source_ref="node/1",
+                    name="ASICS",
+                    tags_json={"name": "ASICS", "brand": "ASICS", "shop": "shoes"},
+                ),
+                self._osm_row(
+                    source_ref="node/2",
+                    name="ASICS",
+                    lat=53.3502,
+                    lon=-6.26,
+                    tags_json={"name": "ASICS", "brand": "ASICS", "shop": "shoes"},
+                ),
+            ],
+            [],
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(
+            [row["source_ref"] for row in merged],
+            ["node/1", "node/2"],
+        )
+
+    def test_nearby_different_named_osm_rows_do_not_collapse(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [
+                self._osm_row(
+                    source_ref="node/1",
+                    name="ASICS",
+                    tags_json={"name": "ASICS", "brand": "ASICS", "shop": "shoes"},
+                ),
+                self._osm_row(
+                    source_ref="node/2",
+                    name="Nike",
+                    lat=53.35005,
+                    lon=-6.25995,
+                    tags_json={"name": "Nike", "brand": "Nike", "shop": "shoes"},
+                ),
+            ],
+            [],
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(
+            sorted(row["name"] for row in merged),
+            ["ASICS", "Nike"],
+        )
+
+    def test_unnamed_nearby_osm_rows_do_not_collapse_by_proximity_only(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [
+                self._osm_row(source_ref="node/1", name=None, tags_json={"shop": "clothes"}),
+                self._osm_row(
+                    source_ref="node/2",
+                    name=None,
+                    lat=53.35005,
+                    lon=-6.25995,
+                    tags_json={"shop": "clothes"},
+                ),
+            ],
+            [],
+        )
+
+        self.assertEqual(len(merged), 2)
+        self.assertEqual(
+            [row["source_ref"] for row in merged],
+            ["node/1", "node/2"],
+        )
+
+    def test_resolve_merge_categories_defaults_to_expected_baseline(self) -> None:
+        self.assertEqual(
+            overture_merge.resolve_merge_categories(),
+            tuple(sorted(overture_merge.EXPECTED_BASELINE_MERGE_CATEGORIES)),
+        )
+
+    def test_candidate_pair_collapse_uses_or_or_min(self) -> None:
+        collapsed = overture_merge._collapse_candidate_pairs(
+            [
+                self._candidate_pair(
+                    osm_row_id=1,
+                    overture_row_id=9,
+                    same_category=True,
+                    aliases_agree=False,
+                    distance_m=12.0,
+                ),
+                self._candidate_pair(
+                    osm_row_id=1,
+                    overture_row_id=9,
+                    same_category=True,
+                    aliases_agree=True,
+                    distance_m=22.0,
+                ),
+                self._candidate_pair(
+                    osm_row_id=1,
+                    overture_row_id=9,
+                    same_category=False,
+                    aliases_agree=False,
+                    distance_m=18.0,
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            collapsed,
+            [
+                {
+                    "osm_row_id": 1,
+                    "overture_row_id": 9,
+                    "same_category": True,
+                    "aliases_agree": True,
+                    "distance_m": 12.0,
+                }
+            ],
+        )
+
+    def test_same_category_candidates_are_tried_before_cross_category_candidates(self) -> None:
+        osm_rows = [self._osm_row(category="shops", source_ref="node/7", name="Dual Match")]
+        overture_rows = [
+            self._overture_row(category="healthcare", source_ref="ovt-cross", name="Dual Match"),
+            self._overture_row(category="shops", source_ref="ovt-same", name="Dual Match"),
+        ]
+        merged = overture_merge.merge_source_amenity_rows_from_candidate_pairs(
+            osm_rows,
+            overture_rows,
+            [
+                self._candidate_pair(
+                    osm_row_id=1,
+                    overture_row_id=1,
+                    same_category=False,
+                    aliases_agree=True,
+                    distance_m=2.0,
+                ),
+                self._candidate_pair(
+                    osm_row_id=1,
+                    overture_row_id=2,
+                    same_category=True,
+                    aliases_agree=True,
+                    distance_m=20.0,
+                ),
+            ],
+            scoring_categories=["shops", "healthcare", "parks"],
+        )
+
+        self.assertEqual(len(merged), 2)
+        osm_match = next(row for row in merged if row["source"] == "osm_local_pbf")
+        overture_only = next(row for row in merged if row["source"] == "overture_places")
+        self.assertEqual(osm_match["source_ref"], "node/7")
+        self.assertEqual(osm_match["conflict_class"], "source_agreement")
+        self.assertEqual(overture_only["source_ref"], "ovt-cross")
+
+    def test_three_osm_rows_competing_for_one_overture_row_claim_only_once(self) -> None:
+        osm_rows = [
+            self._osm_row(source_ref="node/1", name="Shared Place"),
+            self._osm_row(source_ref="node/2", name="Shared Place", lat=53.35012),
+            self._osm_row(source_ref="node/3", name="Shared Place", lat=53.35024),
+        ]
+        overture_rows = [self._overture_row(source_ref="ovt-shared", name="Shared Place")]
+
+        merged = overture_merge.merge_source_amenity_rows(osm_rows, overture_rows)
+
+        self.assertEqual(
+            [row["conflict_class"] for row in merged if row["source"] == "osm_local_pbf"],
+            ["source_agreement", "osm_only", "osm_only"],
+        )
+        self.assertEqual(
+            len([row for row in merged if row["source"] == "overture_places"]),
+            0,
+        )
+
+    def test_named_osm_row_claims_overture_before_weaker_nearby_osm_row(self) -> None:
+        merged = overture_merge.merge_source_amenity_rows(
+            [
+                self._osm_row(
+                    source_ref="node/weak",
+                    name=None,
+                    tags_json={"shop": "clothes"},
+                    lat=53.35002,
+                    lon=-6.26002,
+                ),
+                self._osm_row(
+                    source_ref="node/strong",
+                    name="Penneys",
+                    tags_json={"name": "Penneys", "brand": "Primark", "shop": "clothes"},
+                    lat=53.35,
+                    lon=-6.26,
+                ),
+            ],
+            [
+                self._overture_row(
+                    source_ref="ovt-penneys",
+                    name="Penneys",
+                    brand="Primark",
+                    lat=53.35003,
+                    lon=-6.26003,
+                )
+            ],
+        )
+
+        self.assertEqual(len(merged), 2)
+        strong_row = next(row for row in merged if row["source_ref"] == "node/strong")
+        weak_row = next(row for row in merged if row["source_ref"] == "node/weak")
+        self.assertEqual(strong_row["conflict_class"], "source_agreement")
+        self.assertEqual(weak_row["conflict_class"], "osm_only")
+
+    def test_one_osm_row_picks_best_overture_candidate_deterministically(self) -> None:
+        osm_rows = [self._osm_row(source_ref="node/10", name="Match Me")]
+        overture_rows = [
+            self._overture_row(source_ref="ovt-b", name="Match Me", lat=53.3502, lon=-6.2602),
+            self._overture_row(source_ref="ovt-a", name="Match Me", lat=53.3501, lon=-6.2601),
+            self._overture_row(source_ref="ovt-c", name="Match Me", lat=53.3503, lon=-6.2603),
+        ]
+
+        merged = overture_merge.merge_source_amenity_rows(osm_rows, overture_rows)
+
+        self.assertEqual(len(merged), 3)
+        self.assertEqual(merged[0]["source_ref"], "node/10")
+        self.assertEqual(merged[0]["conflict_class"], "source_agreement")
+        self.assertEqual(
+            sorted(row["source_ref"] for row in merged[1:]),
+            ["ovt-b", "ovt-c"],
+        )
+
+    def test_merge_is_deterministic_when_inputs_are_shuffled(self) -> None:
+        osm_rows = [
+            self._osm_row(source_ref="node/1", name="A"),
+            self._osm_row(source_ref="node/2", name="B"),
+            self._osm_row(category="healthcare", source_ref="node/3", name="Clinic"),
+        ]
+        overture_rows = [
+            self._overture_row(source_ref="ovt-1", name="A"),
+            self._overture_row(source_ref="ovt-2", name="B"),
+            self._overture_row(category="healthcare", source_ref="ovt-3", name="Clinic"),
+        ]
+
+        merged = overture_merge.merge_source_amenity_rows(osm_rows, overture_rows)
+        shuffled_merged = overture_merge.merge_source_amenity_rows(
+            list(reversed(osm_rows)),
+            [overture_rows[1], overture_rows[2], overture_rows[0]],
+        )
+
+        self.assertEqual(merged, shuffled_merged)
+
+
+class AmenityPhaseIntegrationTests(TestCase):
+    def test_phase_amenities_uses_merged_rows_for_counts_and_cache(self) -> None:
+        tracker = _tracker_mock()
+        source_rows = [
+            {
+                "category": "shops",
+                "source": "osm_local_pbf",
+                "source_ref": "node/1",
+                "name": "Corner Shop",
+                "tags_json": {"name": "Corner Shop"},
+                "geom": Point(-6.26, 53.35),
+                "park_area_m2": 0.0,
+            },
+            {
+                "category": "transport",
+                "source": "gtfs_direct",
+                "source_ref": "gtfs/nta/S1",
+                "name": None,
+                "conflict_class": "gtfs_direct",
+                "geom": Point(-6.25, 53.35),
+                "park_area_m2": 0.0,
+            },
+        ]
+        merged_rows = [
+            {
+                "category": "shops",
+                "lat": 53.35,
+                "lon": -6.26,
+                "source": "osm_local_pbf",
+                "source_ref": "node/1",
+                "name": "Corner Shop",
+                "conflict_class": "source_agreement",
+                "park_area_m2": 0.0,
+            },
+            {
+                "category": "parks",
+                "lat": 53.351,
+                "lon": -6.251,
+                "source": "overture_places",
+                "source_ref": "ovt-park-1",
+                "name": "Pocket Park",
+                "conflict_class": "overture_only",
+                "park_area_m2": 0.0,
+            },
+        ]
+
+        cache: dict[str, object] = {}
+        amenity_data, amenity_source_rows = precompute._phases.phase_amenities_impl(
+            mock.sentinel.engine,
+            box(-6.4, 53.2, -6.1, 53.5),
+            tracker,
+            tags=list(precompute.TAGS),
+            cache_dir=Path("reach-cache"),
+            reach_hash="reach-hash-123",
+            import_fingerprint="import-fingerprint-123",
+            cache_load=lambda key, cache_dir: cache.get(key),
+            cache_save=lambda key, data, cache_dir: cache.__setitem__(key, data),
+            mark_building=mock.Mock(),
+            mark_complete=mock.Mock(),
+            can_finalize_reach_tier=lambda amenity_data: True,
+            load_source_amenity_rows=mock.Mock(return_value=source_rows),
+            load_overture_amenity_rows=mock.Mock(return_value=[{"category": "parks"}]),
+            merge_source_amenity_rows=mock.Mock(return_value=merged_rows),
+            transit_reality_fingerprint="reality-123",
+        )
+
+        self.assertEqual(amenity_data["shops"], [(53.35, -6.26)])
+        self.assertEqual(amenity_data["parks"], [(53.351, -6.251)])
+        self.assertEqual(amenity_data["transport"], [(53.35, -6.25)])
+        self.assertEqual(
+            amenity_source_rows,
+            [
+                {
+                    "category": "parks",
+                    "lat": 53.351,
+                    "lon": -6.251,
+                    "source": "overture_places",
+                    "source_ref": "ovt-park-1",
+                    "name": "Pocket Park",
+                    "conflict_class": "overture_only",
+                    "park_area_m2": 0.0,
+                },
+                {
+                    "category": "shops",
+                    "lat": 53.35,
+                    "lon": -6.26,
+                    "source": "osm_local_pbf",
+                    "source_ref": "node/1",
+                    "name": "Corner Shop",
+                    "conflict_class": "source_agreement",
+                    "park_area_m2": 0.0,
+                },
+                {
+                    "category": "transport",
+                    "lat": 53.35,
+                    "lon": -6.25,
+                    "source": "gtfs_direct",
+                    "source_ref": "gtfs/nta/S1",
+                    "name": None,
+                    "conflict_class": "gtfs_direct",
+                    "park_area_m2": 0.0,
+                },
+            ],
+        )
+        self.assertEqual(cache["amenities"], amenity_source_rows)
+
+    def test_phase_amenities_prefers_db_backed_merge_helper_when_available(self) -> None:
+        tracker = _tracker_mock()
+        source_rows = [
+            {
+                "category": "shops",
+                "source": "osm_local_pbf",
+                "source_ref": "node/1",
+                "name": "Corner Shop",
+                "tags_json": {"name": "Corner Shop"},
+                "geom": Point(-6.26, 53.35),
+                "park_area_m2": 0.0,
+            }
+        ]
+        merged_rows = [
+            {
+                "category": "shops",
+                "lat": 53.35,
+                "lon": -6.26,
+                "source": "osm_local_pbf",
+                "source_ref": "node/1",
+                "name": "Corner Shop",
+                "conflict_class": "source_agreement",
+                "park_area_m2": 0.0,
+            }
+        ]
+        merge_stats = {
+            "candidate_pair_count": 1,
+            "same_category_candidate_count": 1,
+            "cross_category_candidate_count": 0,
+            "excluded_non_operational_osm_rows": 0,
+            "osm_duplicate_rows_removed": 0,
+            "osm_duplicates_by_category": {},
+            "candidate_pairs_by_osm_category": {"shops": 1},
+            "stage_ms": {
+                "filter_osm_rows": 0.0,
+                "generate_osm_self_candidates": 1.0,
+                "collapse_osm_duplicates": 1.0,
+                "generate_overture_candidates": 1.0,
+                "greedy_assignment": 1.0,
+            },
+        }
+
+        db_merge_mock = mock.Mock(return_value=(merged_rows, merge_stats))
+        python_merge_mock = mock.Mock(side_effect=AssertionError("DB helper should be preferred"))
+
+        amenity_data, amenity_source_rows = precompute._phases.phase_amenities_impl(
+            mock.sentinel.engine,
+            box(-6.4, 53.2, -6.1, 53.5),
+            tracker,
+            tags=list(precompute.TAGS),
+            cache_dir=Path("reach-cache"),
+            reach_hash="reach-hash-123",
+            import_fingerprint="import-fingerprint-123",
+            cache_load=lambda key, cache_dir: None,
+            cache_save=lambda key, data, cache_dir: None,
+            mark_building=mock.Mock(),
+            mark_complete=mock.Mock(),
+            can_finalize_reach_tier=lambda amenity_data: True,
+            load_source_amenity_rows=mock.Mock(return_value=source_rows),
+            load_overture_amenity_rows=mock.Mock(return_value=[]),
+            merge_source_amenity_rows=python_merge_mock,
+            load_merged_source_amenity_rows=db_merge_mock,
+            transit_reality_fingerprint="reality-123",
+        )
+
+        self.assertEqual(amenity_data["shops"], [(53.35, -6.26)])
+        self.assertEqual(amenity_source_rows[0]["conflict_class"], "source_agreement")
+        db_merge_mock.assert_called_once()
+
+    def test_iter_amenity_rows_preserves_public_metadata_fields(self) -> None:
+        hashes = SimpleNamespace(
+            build_key="build-key-123",
+            config_hash="config-hash-123",
+            import_fingerprint="import-fingerprint-123",
+        )
+
+        rows = list(
+            precompute._publish.iter_amenity_rows_impl(
+                [
+                    {
+                        "category": "shops",
+                        "lat": 53.35,
+                        "lon": -6.26,
+                        "source": "overture_places",
+                        "source_ref": "ovt-1",
+                        "name": "Late Addition",
+                        "conflict_class": "overture_only",
+                    }
+                ],
+                datetime(2026, 4, 19, tzinfo=timezone.utc),
+                hashes=hashes,
+            )
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source"], "overture_places")
+        self.assertEqual(rows[0]["name"], "Late Addition")
+        self.assertEqual(rows[0]["conflict_class"], "overture_only")
+
+    def test_summary_json_includes_overture_dataset_traceability(self) -> None:
+        summary = precompute._publish.summary_json_impl(
+            box(-10.0, 50.0, -5.0, 55.0),
+            {20_000: [_grid_cell("coarse-cell")]},
+            _empty_amenity_data(),
+            hashes=SimpleNamespace(
+                build_key="build-key-dev",
+                config_hash="config-hash-dev",
+                import_fingerprint="import-fingerprint-dev",
+            ),
+            build_profile="dev",
+            source_state=SimpleNamespace(extract_path=Path("extract.osm.pbf")),
+            osm_extract_path=Path("extract.osm.pbf"),
+            grid_sizes_m=[20_000, 10_000, 5_000],
+            fine_resolutions_m=[],
+            output_html="index.html",
+            zoom_breaks=[(10, 5_000), (8, 10_000), (0, 20_000)],
+            overture_dataset={"last_release": "2026-04-15.0", "file_size": 12345},
+        )
+
+        self.assertEqual(
+            summary["overture_dataset"],
+            {"last_release": "2026-04-15.0", "file_size": 12345},
+        )
 
 
 class PrecomputeReachabilityTests(TestCase):

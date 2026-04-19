@@ -14,6 +14,38 @@ from .tables import (
     transit_service_desert_cells,
 )
 
+_NON_OPERATIONAL_CATEGORY_VALUES = frozenset(
+    {"vacant", "disused", "abandoned", "construction", "proposed"}
+)
+_NON_OPERATIONAL_TAG_PREFIXES = (
+    "disused:",
+    "abandoned:",
+    "construction:",
+    "proposed:",
+    "was:",
+    "removed:",
+)
+_CATEGORY_STATE_TAG_KEYS = frozenset(
+    {"amenity", "shop", "healthcare", "leisure", "landuse", "natural", "tourism"}
+)
+
+
+def _is_non_operational_amenity(tags_json: dict[str, Any]) -> bool:
+    for key, value in tags_json.items():
+        normalized_key = str(key).strip().lower()
+        if normalized_key in _CATEGORY_STATE_TAG_KEYS:
+            normalized_value = str(value).strip().lower()
+            if normalized_value in _NON_OPERATIONAL_CATEGORY_VALUES:
+                return True
+        if any(
+            normalized_key.startswith(prefix)
+            for prefix in _NON_OPERATIONAL_TAG_PREFIXES
+        ):
+            normalized_value = str(value).strip().lower()
+            if normalized_value:
+                return True
+    return False
+
 
 def load_osm_transport_features(
     engine: Engine,
@@ -74,7 +106,10 @@ def load_transport_reality_rows_for_scoring(
     return [
         {
             "category": "transport",
+            "source": "gtfs_direct",
             "source_ref": row["source_ref"],
+            "name": None,
+            "conflict_class": "gtfs_direct",
             "geom": root.to_shape(row["geom"]),
             "park_area_m2": 0.0,
         }
@@ -152,6 +187,7 @@ def load_source_amenity_rows(
     study_area_wgs84,
     *,
     transit_reality_fingerprint: str | None = None,
+    stats_out: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     root = root_module()
     study_area = root.from_shape(study_area_wgs84, srid=4326)
@@ -165,6 +201,8 @@ def load_source_amenity_rows(
     query = (
         select(
             features.c.category,
+            features.c.name,
+            features.c.tags_json,
             features.c.osm_type,
             features.c.osm_id,
             func.ST_PointOnSurface(features.c.geom).label("point_geom"),
@@ -176,17 +214,27 @@ def load_source_amenity_rows(
         .order_by(features.c.category, features.c.osm_type, features.c.osm_id)
     )
     amenity_rows = []
+    excluded_non_operational_rows = 0
     with engine.connect() as connection:
         result = connection.execution_options(stream_results=True).execute(query)
         for row in result.yield_per(500).mappings():
+            tags_json = dict(row.get("tags_json") or {})
+            if _is_non_operational_amenity(tags_json):
+                excluded_non_operational_rows += 1
+                continue
             amenity_rows.append(
                 {
                     "category": row["category"],
+                    "source": "osm_local_pbf",
                     "source_ref": f"{row['osm_type']}/{row['osm_id']}",
+                    "name": row["name"],
+                    "tags_json": tags_json,
                     "geom": root.to_shape(row["point_geom"]),
                     "park_area_m2": float(row.get("park_area_m2") or 0.0),
                 }
             )
+    if stats_out is not None:
+        stats_out["excluded_non_operational_osm_rows"] = int(excluded_non_operational_rows)
     if transit_reality_fingerprint is not None:
         amenity_rows.extend(
             load_transport_reality_rows_for_scoring(
@@ -280,7 +328,14 @@ def load_walk_rows_for_resolutions(
 def load_amenity_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
     with engine.connect() as connection:
         rows = connection.execute(
-            select(amenities.c.category, amenities.c.geom, amenities.c.source, amenities.c.source_ref)
+            select(
+                amenities.c.category,
+                amenities.c.geom,
+                amenities.c.source,
+                amenities.c.source_ref,
+                amenities.c.name,
+                amenities.c.conflict_class,
+            )
             .where(amenities.c.build_key == build_key)
             .order_by(amenities.c.category, amenities.c.source_ref)
         ).mappings().all()
@@ -292,6 +347,8 @@ def load_amenity_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
             "geom": root.to_shape(row["geom"]),
             "source": row["source"],
             "source_ref": row["source_ref"],
+            "name": row["name"],
+            "conflict_class": row["conflict_class"],
         }
         for row in rows
     ]

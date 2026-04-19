@@ -66,6 +66,25 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(desert_layer["fields"]["baseline_reachable_stop_count"], "Number")
         self.assertEqual(desert_layer["fields"]["reachable_public_departures_7d"], "Number")
 
+    def test_amenity_layer_metadata_declares_name_and_conflict_class(self) -> None:
+        metadata = bake_pmtiles._pmtiles_metadata(
+            min_zoom=5,
+            max_zoom=14,
+            grid_max_zoom=11,
+            amenity_min_zoom=9,
+            transport_reality_min_zoom=9,
+        )
+
+        amenity_layer = next(
+            layer for layer in metadata["vector_layers"] if layer["id"] == "amenities"
+        )
+
+        self.assertEqual(amenity_layer["fields"]["category"], "String")
+        self.assertEqual(amenity_layer["fields"]["name"], "String")
+        self.assertEqual(amenity_layer["fields"]["source"], "String")
+        self.assertEqual(amenity_layer["fields"]["source_ref"], "String")
+        self.assertEqual(amenity_layer["fields"]["conflict_class"], "String")
+
     def test_transport_reality_tile_sql_exports_gtfs_direct_fields(self) -> None:
         sql = str(bake_pmtiles._TRANSPORT_REALITY_TILE_SQL)
 
@@ -73,6 +92,15 @@ class PmtilesBakeContractTests(TestCase):
         self.assertIn("SUM(t.school_only_departures_30d)", sql)
         self.assertIn("WHEN SUM(t.public_departures_30d) > 0 THEN 'active_confirmed'", sql)
         self.assertIn("GROUP BY", sql)
+
+    def test_amenity_tile_sql_exports_name_and_conflict_class(self) -> None:
+        sql = str(bake_pmtiles._AMENITY_TILE_SQL)
+
+        self.assertIn("a.category", sql)
+        self.assertIn("a.name", sql)
+        self.assertIn("a.source", sql)
+        self.assertIn("a.source_ref", sql)
+        self.assertIn("a.conflict_class", sql)
 
     def test_bake_pmtiles_bbox_scans_only_coarse_zooms_and_uses_amenity_tiles_above_that(self) -> None:
         class _FakeWriter:

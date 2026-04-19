@@ -82,6 +82,7 @@ class RuntimeState:
     transit_analysis_date: str | None
     transit_analysis_window_days: int | None
     transit_service_desert_window_days: int | None
+    overture_dataset: dict[str, Any] | None
 
 
 class RuntimeService:
@@ -226,6 +227,11 @@ class RuntimeService:
                 if summary_json.get("transit_service_desert_window_days") is not None
                 else None
             ),
+            overture_dataset=(
+                dict(summary_json.get("overture_dataset") or {})
+                if summary_json.get("overture_dataset")
+                else None
+            ),
         )
 
     def state(self) -> RuntimeState:
@@ -266,6 +272,7 @@ class RuntimeService:
             "transit_analysis_date": state.transit_analysis_date,
             "transit_analysis_window_days": state.transit_analysis_window_days,
             "transit_service_desert_window_days": state.transit_service_desert_window_days,
+            "overture_dataset": state.overture_dataset,
         }
 
     def surface_runtime(self) -> _surface.FineSurfaceRuntime:

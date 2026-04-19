@@ -49,6 +49,8 @@ amenities = Table(
     Column("geom", Geometry("POINT", srid=4326), nullable=False),
     Column("source", Text, nullable=False),
     Column("source_ref", Text, nullable=True),
+    Column("name", Text, nullable=True),
+    Column("conflict_class", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 

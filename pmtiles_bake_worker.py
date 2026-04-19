@@ -82,8 +82,10 @@ _AMENITY_TILE_SQL = text(
     mvtgeom AS (
         SELECT
             a.category,
+            a.name,
             a.source,
             a.source_ref,
+            a.conflict_class,
             ST_AsMVTGeom(
                 ST_Transform(a.geom, 3857),
                 tile.env_3857,

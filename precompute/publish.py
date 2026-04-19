@@ -177,8 +177,10 @@ def iter_amenity_rows_impl(
                 "import_fingerprint": hashes.import_fingerprint,
                 "category": row["category"],
                 "geom": Point(row["lon"], row["lat"]),
-                "source": "osm_local_pbf",
+                "source": str(row.get("source") or "osm_local_pbf"),
                 "source_ref": row["source_ref"],
+                "name": row.get("name"),
+                "conflict_class": str(row.get("conflict_class") or "osm_only"),
                 "created_at": created_at,
             }
             stats.row_assembly_seconds += max(time.perf_counter() - row_started_at, 0.0)
@@ -229,6 +231,7 @@ def summary_json_impl(
     transit_service_desert_window_days: int | None = None,
     transport_reality_download_url: str | None = None,
     service_deserts_enabled: bool = False,
+    overture_dataset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     centre = study_area_wgs84.centroid
     payload = {
@@ -261,4 +264,6 @@ def summary_json_impl(
                 "transport_reality_download_url": transport_reality_download_url,
             }
         )
+    if overture_dataset:
+        payload["overture_dataset"] = overture_dataset
     return payload

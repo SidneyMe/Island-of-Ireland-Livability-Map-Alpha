@@ -108,6 +108,33 @@ class ConfigHashTests(TestCase):
         self.assertEqual(full_build.build_profile, "full")
         self.assertEqual(dev_build.build_profile, "dev")
 
+    def test_overture_dataset_signature_changes_invalidate_reach_hash(self) -> None:
+        with mock.patch.object(config, "overture_dataset_signature", return_value="sig-a"), mock.patch.object(
+            config,
+            "overture_dataset_info",
+            return_value={"last_release": "2026-04-15.0"},
+        ):
+            previous_hashes = config.build_config_hashes()
+        with mock.patch.object(config, "overture_dataset_signature", return_value="sig-b"), mock.patch.object(
+            config,
+            "overture_dataset_info",
+            return_value={"last_release": "2026-04-15.0"},
+        ):
+            current_hashes = config.build_config_hashes()
+
+        self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+        self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
+
+    def test_amenity_merge_algorithm_version_changes_reach_hash(self) -> None:
+        with mock.patch.object(config, "AMENITY_MERGE_ALGO_VERSION", 1):
+            previous_hashes = config.build_config_hashes()
+        with mock.patch.object(config, "AMENITY_MERGE_ALGO_VERSION", 2):
+            current_hashes = config.build_config_hashes()
+
+        self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+
 
 class SurfaceResolutionTests(TestCase):
     def test_surface_resolution_ladder_matches_architecture(self) -> None:

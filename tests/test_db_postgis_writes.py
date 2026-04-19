@@ -5,6 +5,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, mock
 
+from shapely.geometry import Point
+
+from db_postgis import amenity_merge as db_amenity_merge
 from db_postgis import writes as db_writes
 
 
@@ -77,3 +80,98 @@ class DbPostgisTransitArtifactWriteTests(TestCase):
                 for call in copy_mock.call_args_list
             )
         )
+
+
+class DbPostgisAmenityMergeTests(TestCase):
+    def test_load_merged_source_amenity_rows_stages_temp_tables_and_indexes(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.begin.return_value.__enter__.return_value
+
+        stats_payload = {
+            "merge_categories_resolved": ["healthcare", "parks", "shops"],
+            "osm_rows": 1,
+            "overture_rows": 1,
+            "osm_alias_rows": 1,
+            "overture_alias_rows": 1,
+            "osm_self_candidate_count": 0,
+            "osm_duplicate_cluster_count": 0,
+            "osm_duplicate_rows_removed": 0,
+            "osm_duplicates_by_category": {},
+            "candidate_pair_count": 1,
+            "same_category_candidate_count": 1,
+            "cross_category_candidate_count": 0,
+            "candidate_pairs_by_path": {
+                "same_category_near": 1,
+                "same_category_alias": 0,
+                "cross_category_near": 0,
+                "cross_category_alias": 0,
+            },
+            "candidate_pairs_by_osm_category": {"shops": 1},
+            "stage_ms": {
+                "filter_osm_rows": 0.0,
+                "generate_osm_self_candidates": 0.0,
+                "collapse_osm_duplicates": 0.0,
+                "generate_overture_candidates": 0.0,
+                "greedy_assignment": 0.0,
+            },
+        }
+
+        with (
+            mock.patch.object(db_amenity_merge, "_collect_candidate_stats", return_value=stats_payload),
+            mock.patch.object(
+                db_amenity_merge,
+                "_load_osm_self_candidate_rows",
+                return_value=[],
+            ),
+            mock.patch.object(
+                db_amenity_merge,
+                "_load_collapsed_candidate_rows",
+                return_value=[
+                    {
+                        "osm_row_id": 1,
+                        "overture_row_id": 1,
+                        "same_category": True,
+                        "aliases_agree": True,
+                        "distance_m": 5.0,
+                    }
+                ],
+            ),
+        ):
+            merged_rows, merge_stats = db_amenity_merge.load_merged_source_amenity_rows(
+                engine,
+                [
+                    {
+                        "category": "shops",
+                        "source": "osm_local_pbf",
+                        "source_ref": "node/1",
+                        "name": "Corner Shop",
+                        "tags_json": {"name": "Corner Shop"},
+                        "geom": Point(-6.26, 53.35),
+                        "park_area_m2": 0.0,
+                    }
+                ],
+                [
+                    {
+                        "category": "shops",
+                        "source": "overture_places",
+                        "source_ref": "ovt-1",
+                        "name": "Corner Shop",
+                        "brand": None,
+                        "geom": Point(-6.26005, 53.35005),
+                        "park_area_m2": 0.0,
+                    }
+                ],
+                scoring_categories=["shops", "healthcare", "parks"],
+            )
+
+        statements = [str(call.args[0]) for call in connection.execute.call_args_list]
+        joined_statements = "\n".join(statements)
+        self.assertIn("CREATE TEMP TABLE", joined_statements)
+        self.assertIn("ON COMMIT DROP", joined_statements)
+        self.assertIn("ST_Transform(ST_SetSRID(ST_MakePoint(:lon, :lat), 4326), 2157)", joined_statements)
+        self.assertIn("CREATE INDEX ON", joined_statements)
+        self.assertIn("left_osm_row_id", joined_statements)
+        self.assertIn("osm_self_dedupe_radius_m", joined_statements)
+        self.assertIn("same_category_near", joined_statements)
+        self.assertEqual(merged_rows[0]["conflict_class"], "source_agreement")
+        self.assertEqual(merge_stats["candidate_pair_count"], 1)

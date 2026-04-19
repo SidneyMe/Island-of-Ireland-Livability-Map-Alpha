@@ -36,6 +36,7 @@ from db_postgis import (
     ensure_database_ready,
     has_complete_build,
     import_payload_ready,
+    load_merged_source_amenity_rows,
     load_source_amenity_rows,
     load_service_desert_rows,
     load_transport_reality_points,
@@ -67,6 +68,7 @@ from . import tiers as _tiers
 from . import workflow as _workflow
 from .bake_pmtiles import bake_pmtiles as _bake_pmtiles
 import overture.loader as _overture
+import overture.merge as _overture_merge
 
 
 @dataclass
@@ -86,7 +88,6 @@ class _BuildState:
     transit_reality_state: Any = None
     study_area_metric: Any = None
     study_area_wgs84: Any = None
-    overture_source_rows: list[dict] = field(default_factory=list)
 
     @classmethod
     def bootstrap(cls) -> _BuildState:
@@ -453,14 +454,12 @@ def phase_amenities(
         mark_complete=_mark_complete,
         can_finalize_reach_tier=_can_finalize_reach_tier,
         load_source_amenity_rows=load_source_amenity_rows,
+        load_overture_amenity_rows=_overture.load_overture_amenity_rows,
+        merge_source_amenity_rows=_overture_merge.merge_source_amenity_rows,
+        load_merged_source_amenity_rows=load_merged_source_amenity_rows,
         transit_reality_fingerprint=_STATE.hashes.transit_reality_fingerprint,
     )
     # Load Overture places for visualization — never fed to walkgraph scoring
-    if _overture.is_available():
-        _STATE.overture_source_rows = _overture.load_overture_amenity_rows(study_area_wgs84)
-        print(f"  [overture] loaded {len(_STATE.overture_source_rows):,} Overture places rows")
-    else:
-        _STATE.overture_source_rows = []
     return result
 
 
@@ -585,24 +584,11 @@ def _amenity_rows(
     *,
     progress_cb=None,
 ):
-    osm_stream = _publish.iter_amenity_rows_impl(
+    return _publish.iter_amenity_rows_impl(
         amenity_source_rows,
         created_at,
         hashes=_STATE.hashes,
         progress_cb=progress_cb,
-    )
-    overture_rows = _STATE.overture_source_rows
-    if not overture_rows:
-        return osm_stream
-
-    def _combined():
-        yield from osm_stream
-        yield from _overture.iter_overture_db_rows(overture_rows, created_at, hashes=_STATE.hashes)
-
-    return _publish.PreparedRowStream(
-        osm_stream.row_count + len(overture_rows),
-        _combined,
-        osm_stream.stats,
     )
 
 
@@ -780,12 +766,6 @@ def _summary_json(
     walk_grids: dict[int, list[dict[str, Any]]],
     amenity_data: dict[str, list[tuple[float, float]]],
 ) -> dict[str, Any]:
-    if _STATE.overture_source_rows:
-        amenity_data = dict(amenity_data)  # don't mutate the original
-        for row in _STATE.overture_source_rows:
-            amenity_data.setdefault(row["category"], []).append(
-                (row["lat"], row["lon"])
-            )
     return _publish.summary_json_impl(
         study_area_wgs84,
         walk_grids,
@@ -803,6 +783,7 @@ def _summary_json(
         transit_service_desert_window_days=GTFS_SERVICE_DESERT_WINDOW_DAYS,
         transport_reality_download_url="/exports/transport-reality.zip",
         service_deserts_enabled=True,
+        overture_dataset=_overture.dataset_info(),
     )
 
 

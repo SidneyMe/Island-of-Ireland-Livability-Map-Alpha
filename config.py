@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import importlib.metadata
@@ -13,6 +13,8 @@ from typing import Any, Literal, cast
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
+from overture.loader import dataset_info as overture_dataset_info
+from overture.loader import dataset_signature as overture_dataset_signature
 from pyproj import Transformer
 
 try:
@@ -47,6 +49,7 @@ IMPORTER_CONFIG_VERSION = "2026-04-08"
 GTFS_DIR = BASE_DIR / "gtfs"
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
 TRANSIT_REALITY_ALGO_VERSION = 5
+AMENITY_MERGE_ALGO_VERSION = 3
 
 
 def _optional_positive_int_env(name: str) -> int | None:
@@ -273,11 +276,11 @@ ENABLE_FINE_RASTER_SURFACE = (
 COASTAL_ARTIFACT_WIDTH_M = 75
 COASTAL_COMPONENT_PRESERVE_AREA_M2 = 100_000
 COASTAL_CLEANUP_ALGORITHM_VERSION = 3
-# Opt-in: components whose area exceeds this threshold (m²) skip the
+# Opt-in: components whose area exceeds this threshold (mÂ²) skip the
 # morphological opening step in clean_coastal_artifacts. Default 0 = disabled.
-# A mainland (Ireland ~7e10 m², NI ~1.4e10 m²) has no narrow coastal spurs
+# A mainland (Ireland ~7e10 mÂ², NI ~1.4e10 mÂ²) has no narrow coastal spurs
 # that the erode/dilate pipeline catches, so skipping it saves ~100s without
-# affecting the large islands that do benefit from cleanup (Achill ~1.5e8 m²).
+# affecting the large islands that do benefit from cleanup (Achill ~1.5e8 mÂ²).
 COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2 = _non_negative_float_env(
     "COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2", 0.0
 )
@@ -325,12 +328,7 @@ CATEGORY_COLORS = {
     "transport": "#762a83",
     "healthcare": "#d6604d",
     "parks": "#1a9850",
-    # Overture Maps overlay (visualization only, not scored)
-    "ov_shops": "#74add1",       # lighter blue — same hue family as shops
-    "ov_healthcare": "#f4a582",  # lighter salmon — same family as healthcare
-    "ov_parks": "#a6d96a",       # lighter green — same family as parks
 }
-
 
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
@@ -606,6 +604,8 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     profile_settings = build_profile_settings(normalized_profile)
     roi_meta = _file_meta(ROI_BOUNDARY_PATH)
     ni_meta = _file_meta(NI_BOUNDARY_PATH)
+    overture_info = overture_dataset_info()
+    overture_signature = overture_dataset_signature()
 
     geo_params = {
         "roi_path": str(ROI_BOUNDARY_PATH),
@@ -638,6 +638,9 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "transit_hash": resolved_transit_hash,
         "tags": TAGS,
         "walk_radius_m": WALK_RADIUS_M,
+        "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
+        "overture_dataset_signature": overture_signature,
+        "overture_release": overture_info.get("last_release"),
     }
     reach_hash = hash_dict(reach_params)
 
@@ -749,6 +752,8 @@ def build_hashes_for_import(
 ) -> BuildHashes:
     normalized_profile = normalize_build_profile(profile)
     base_hashes = build_config_hashes(normalized_profile)
+    overture_info = overture_dataset_info()
+    overture_signature = overture_dataset_signature()
     geo_hash = hash_dict(
         {
             "base_geo_hash": base_hashes.geo_hash,
@@ -762,6 +767,9 @@ def build_hashes_for_import(
             "transit_reality_fingerprint": transit_reality_fingerprint,
             "tags": TAGS,
             "walk_radius_m": WALK_RADIUS_M,
+            "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
+            "overture_dataset_signature": overture_signature,
+            "overture_release": overture_info.get("last_release"),
         }
     )
     surface_shell_hash = hash_dict(
@@ -876,3 +884,4 @@ def database_url() -> str:
         "postgresql+psycopg://"
         f"{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{quote_plus(database)}"
     )
+

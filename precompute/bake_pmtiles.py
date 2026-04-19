@@ -103,8 +103,10 @@ def _pmtiles_metadata(
                 "maxzoom": max_zoom,
                 "fields": {
                     "category": "String",
+                    "name": "String",
                     "source": "String",
                     "source_ref": "String",
+                    "conflict_class": "String",
                 },
             },
             {

@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS amenities (
     geom GEOMETRY(Point, 4326) NOT NULL,
     source TEXT NOT NULL,
     source_ref TEXT NULL,
+    name TEXT NULL,
+    conflict_class TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL
 );
 

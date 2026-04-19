@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,18 @@ from typing import Any
 
 _PARK_CATEGORY = "parks"
 _PARK_AREA_UNIT_M2 = 50_000.0
+
+
+def _top_count_summary(counts: dict[str, Any], *, limit: int = 3) -> str:
+    normalized_items = [
+        (str(key), int(value or 0))
+        for key, value in counts.items()
+    ]
+    normalized_items.sort(key=lambda item: (-item[1], item[0]))
+    top_items = normalized_items[:limit]
+    if not top_items:
+        return "none"
+    return ", ".join(f"{key}={value:,}" for key, value in top_items)
 
 
 def _grid_size_signature(grid_sizes_m: list[int]) -> str:
@@ -225,6 +238,9 @@ def phase_amenities_impl(
     mark_complete,
     can_finalize_reach_tier,
     load_source_amenity_rows,
+    load_overture_amenity_rows,
+    merge_source_amenity_rows,
+    load_merged_source_amenity_rows=None,
     transit_reality_fingerprint: str | None = None,
 ) -> tuple[dict[str, list[tuple[float, float]]], list[dict[str, Any]]]:
     tracker.start_phase(
@@ -250,18 +266,94 @@ def phase_amenities_impl(
         return amenity_data, amenity_source_rows
 
     mark_building(cache_dir, "reach", reach_hash, "amenities")
+    tracker.set_phase_detail("amenities", "loading OSM amenity rows")
+    source_load_stats: dict[str, Any] = {}
     amenity_rows = load_source_amenity_rows(
         engine,
         import_fingerprint,
         study_area_wgs84,
         transit_reality_fingerprint=transit_reality_fingerprint,
+        stats_out=source_load_stats,
+    )
+    transport_rows = [row for row in amenity_rows if row.get("category") == "transport"]
+    osm_merge_rows = [row for row in amenity_rows if row.get("category") != "transport"]
+    tracker.set_phase_detail("amenities", "loading Overture amenity rows")
+    overture_rows = load_overture_amenity_rows(study_area_wgs84)
+    tracker.set_phase_detail("amenities", f"merging {len(osm_merge_rows):,} OSM + {len(overture_rows):,} Overture rows")
+    merge_stats: dict[str, Any] | None = None
+    if load_merged_source_amenity_rows is not None:
+        merged_rows, merge_stats = load_merged_source_amenity_rows(
+            engine,
+            osm_merge_rows,
+            overture_rows,
+            scoring_categories=tags,
+        )
+    else:
+        merged_rows = merge_source_amenity_rows(
+            osm_merge_rows,
+            overture_rows,
+            scoring_categories=tags,
+        )
+
+    if merge_stats:
+        if source_load_stats:
+            merge_stats.setdefault(
+                "excluded_non_operational_osm_rows",
+                int(source_load_stats.get("excluded_non_operational_osm_rows", 0)),
+            )
+        for stage_name, stage_ms in dict(merge_stats.get("stage_ms") or {}).items():
+            try:
+                tracker.record_substep(
+                    "amenities",
+                    str(stage_name),
+                    float(stage_ms) / 1000.0,
+                    force_log=True,
+                )
+            except (TypeError, ValueError):
+                continue
+        merge_warning = merge_stats.get("merge_categories_warning")
+        if merge_warning:
+            print(f"[amenity_merge] warning: {merge_warning}", flush=True)
+        tracker.set_phase_detail(
+            "amenities",
+            (
+                f"filtered {int(merge_stats.get('excluded_non_operational_osm_rows', 0)):,} non-operational | "
+                f"self-dedupe removed {int(merge_stats.get('osm_duplicate_rows_removed', 0)):,} "
+                f"({ _top_count_summary(dict(merge_stats.get('osm_duplicates_by_category') or {})) }) | "
+                f"candidates {int(merge_stats.get('candidate_pair_count', 0)):,} "
+                f"(same={int(merge_stats.get('same_category_candidate_count', 0)):,}, "
+                f"cross={int(merge_stats.get('cross_category_candidate_count', 0)):,}) | "
+                f"top OSM categories: "
+                f"{_top_count_summary(dict(merge_stats.get('candidate_pairs_by_osm_category') or {}))}"
+            ),
+            force_log=True,
+        )
+        print(
+            "[amenity_merge_stats] "
+            + json.dumps(merge_stats, sort_keys=True, default=str),
+            flush=True,
+        )
+
+    amenity_rows = sorted(
+        [*merged_rows, *transport_rows],
+        key=lambda row: (
+            str(row.get("category") or ""),
+            str(row.get("source") or ""),
+            str(row.get("source_ref") or ""),
+            float(getattr(row.get("geom"), "y", row.get("lat", 0.0)) or 0.0),
+            float(getattr(row.get("geom"), "x", row.get("lon", 0.0)) or 0.0),
+        ),
     )
     amenity_source_rows = []
     amenity_data = {category: [] for category in tags}
     counts_by_category = {category: 0 for category in tags}
     for row in amenity_rows:
-        lat = float(row["geom"].y)
-        lon = float(row["geom"].x)
+        if row.get("geom") is not None:
+            lat = float(row["geom"].y)
+            lon = float(row["geom"].x)
+        else:
+            lat = float(row["lat"])
+            lon = float(row["lon"])
         amenity_data.setdefault(row["category"], []).append((lat, lon))
         counts_by_category[row["category"]] = counts_by_category.get(row["category"], 0) + 1
         amenity_source_rows.append(
@@ -269,7 +361,10 @@ def phase_amenities_impl(
                 "category": row["category"],
                 "lat": lat,
                 "lon": lon,
+                "source": str(row.get("source") or "osm_local_pbf"),
                 "source_ref": row["source_ref"],
+                "name": row.get("name"),
+                "conflict_class": str(row.get("conflict_class") or "osm_only"),
                 "park_area_m2": _park_area_m2_from_row(row),
             }
         )

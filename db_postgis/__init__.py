@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from ._dependencies import from_shape, to_shape
+from .amenity_merge import load_merged_source_amenity_rows
 from .common import BATCH_SIZE, ProgressCallback, _table_key
 from .engine import build_engine
 from .manifests import (
@@ -134,6 +135,7 @@ __all__ = [
     "load_build_manifest",
     "load_complete_manifest",
     "load_import_manifest",
+    "load_merged_source_amenity_rows",
     "load_osm_transport_features",
     "load_point_scores_for_build",
     "load_runtime_manifest",
