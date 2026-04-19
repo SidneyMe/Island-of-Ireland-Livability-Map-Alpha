@@ -4,6 +4,41 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-04-19 — OSM + Overture amenity deduplication
+
+### Added
+
+#### Deduplication pipeline
+
+- `overture/merge.py`: spatial deduplication engine matching OSM and Overture amenities; two-pass strategy — proximity match within 35 m (auto), name-normalised alias match within 75 m; cross-category matching supported for ambiguous Overture categories
+- `db_postgis/amenity_merge.py`: DB-side orchestration; writes resolved canonical amenity rows, suppresses Overture POIs that duplicate an OSM entry; OSM self-deduplication pass removes duplicate OSM nodes within 10 m
+- Migration `000006`: extends the amenities table with merge-provenance columns (source, overture_id, merge_path)
+- `overture/loader.py`: `dataset_info()` / `dataset_signature()` — stable hash of the GeoParquet file + state file, used to invalidate cached merge results when the Overture dataset is replaced
+
+#### Config
+
+- `AMENITY_MERGE_ALGO_VERSION = 3` — bumping this constant forces a full merge rebuild without requiring a dataset change
+- Overture dataset signature and release tag are now folded into `reach_hash` and `build_hashes_for_import`, so any dataset update automatically invalidates the precompute cache
+
+#### Category mapping
+
+- Overture `ov_*` overlay categories (`ov_shops`, `ov_healthcare`, `ov_parks`) collapsed into the canonical scoring categories (`shops`, `healthcare`, `parks`); Overture POIs that survive deduplication now contribute directly to scoring rather than as a separate visualization layer
+- Corresponding `ov_*` entries removed from `CATEGORY_COLORS` in `config.py`
+
+#### Tests
+
+- `tests/test_precompute_behavior.py`: 673-line suite covering merge category resolution, OSM self-dedupe, proximity and alias matching, cross-category suppression, and pipeline idempotency
+- `tests/test_osm_import_handling.py`: additional cases for amenity provenance tracking through the import path
+- `tests/test_config.py`: hash invalidation tests for `AMENITY_MERGE_ALGO_VERSION` and `overture_dataset_signature`
+- `tests/test_db_postgis_writes.py`: 98 new cases for the DB-side merge orchestration layer
+
+### Changed
+
+- Overture POIs previously rendered as a separate visualization overlay are now merged into the main amenity dataset and participate in livability scoring
+- `precompute/phases.py`: amenity merge phase wired into the precompute pipeline after OSM import and before surface computation
+
+---
+
 ## 2026-04-18 — Phase 1 Complete: GTFS ingestion and transit reality pipeline
 
 ### Added
