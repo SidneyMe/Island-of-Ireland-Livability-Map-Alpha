@@ -46,7 +46,7 @@ SURFACE_TILE_SCHEMA_VERSION = 1
 _CATEGORY_ORDER = tuple(CAPS)
 _CATEGORY_TO_INDEX = {category: index for index, category in enumerate(_CATEGORY_ORDER)}
 _DENSITY_NORMALIZED_CATEGORIES = {"shops", "transport", "healthcare"}
-_PARK_CATEGORY = "parks"
+_WEIGHTED_UNIT_CATEGORIES = {"shops", "healthcare", "parks"}
 _MIN_DENSITY_AREA_RATIO = 0.25
 
 
@@ -345,7 +345,7 @@ def _normalized_area_ratio_array(effective_area_ratio: np.ndarray) -> np.ndarray
 
 def component_scores_for_nodes(
     counts_matrix: np.ndarray,
-    park_area_units: np.ndarray,
+    weighted_units_matrix: np.ndarray,
     effective_area_ratio: np.ndarray,
 ) -> np.ndarray:
     ratios = _normalized_area_ratio_array(effective_area_ratio).astype(np.float32, copy=False)
@@ -354,8 +354,10 @@ def component_scores_for_nodes(
 
     for category_index, category in enumerate(_CATEGORY_ORDER):
         cap_value = float(CAPS[category])
-        if category == _PARK_CATEGORY:
-            effective_count = park_area_units[:row_count] / ratios
+        if category in _WEIGHTED_UNIT_CATEGORIES:
+            effective_count = weighted_units_matrix[:row_count, category_index].astype(np.float32)
+            if category == "parks" or category in _DENSITY_NORMALIZED_CATEGORIES:
+                effective_count = effective_count / ratios
         elif category in _DENSITY_NORMALIZED_CATEGORIES:
             effective_count = counts_matrix[:row_count, category_index].astype(np.float32) / ratios
         else:
@@ -367,11 +369,11 @@ def component_scores_for_nodes(
 def build_node_score_arrays(
     walk_graph,
     walk_counts_by_node: dict[int, dict[str, int]],
-    walk_park_area_units_by_node: dict[int, float],
+    walk_weighted_units_by_node: dict[int, dict[str, int]],
 ) -> dict[str, Any]:
     node_count = int(walk_graph.vcount())
     counts_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.uint32)
-    park_area_units = np.zeros(node_count, dtype=np.float32)
+    weighted_units_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.float32)
 
     for node_idx, category_counts in walk_counts_by_node.items():
         normalized_node_idx = int(node_idx)
@@ -382,22 +384,28 @@ def build_node_score_arrays(
                 continue
             counts_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(int(count), 0)
 
-    for node_idx, units in walk_park_area_units_by_node.items():
+    for node_idx, category_units in walk_weighted_units_by_node.items():
         normalized_node_idx = int(node_idx)
         if normalized_node_idx < 0 or normalized_node_idx >= node_count:
             continue
-        park_area_units[normalized_node_idx] = max(float(units), 0.0)
+        for category, units in dict(category_units).items():
+            if category not in _CATEGORY_TO_INDEX:
+                continue
+            weighted_units_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(
+                float(units),
+                0.0,
+            )
 
     reference_scores = component_scores_for_nodes(
         counts_matrix,
-        park_area_units,
+        weighted_units_matrix,
         np.ones(node_count, dtype=np.float32),
     )
     reference_total = reference_scores.sum(axis=1, dtype=np.float32)
     return {
         "categories": list(_CATEGORY_ORDER),
         "counts_matrix": counts_matrix,
-        "park_area_units": park_area_units,
+        "weighted_units_matrix": weighted_units_matrix,
         "reference_scores": reference_scores.astype(np.float32, copy=False),
         "reference_total": reference_total.astype(np.float32, copy=False),
     }
@@ -409,7 +417,7 @@ def save_node_score_arrays(score_dir: Path, payload: dict[str, Any]) -> None:
         surface_score_node_scores_path(score_dir),
         categories=np.asarray(payload["categories"], dtype="<U32"),
         counts_matrix=np.asarray(payload["counts_matrix"], dtype=np.uint32),
-        park_area_units=np.asarray(payload["park_area_units"], dtype=np.float32),
+        weighted_units_matrix=np.asarray(payload["weighted_units_matrix"], dtype=np.float32),
         reference_scores=np.asarray(payload["reference_scores"], dtype=np.float32),
         reference_total=np.asarray(payload["reference_total"], dtype=np.float32),
     )
@@ -420,7 +428,7 @@ def load_node_score_arrays(score_dir: Path) -> dict[str, Any]:
         return {
             "categories": [str(value) for value in data["categories"].tolist()],
             "counts_matrix": np.asarray(data["counts_matrix"], dtype=np.uint32),
-            "park_area_units": np.asarray(data["park_area_units"], dtype=np.float32),
+            "weighted_units_matrix": np.asarray(data["weighted_units_matrix"], dtype=np.float32),
             "reference_scores": np.asarray(data["reference_scores"], dtype=np.float32),
             "reference_total": np.asarray(data["reference_total"], dtype=np.float32),
         }
@@ -580,10 +588,10 @@ def _canonical_total_scores_for_shard(
 
     node_ids = origin_node_idx.ravel()[valid_flat]
     counts_matrix = node_scores["counts_matrix"][node_ids]
-    park_area_units = node_scores["park_area_units"][node_ids]
+    weighted_units_matrix = node_scores["weighted_units_matrix"][node_ids]
     component_scores = component_scores_for_nodes(
         counts_matrix,
-        park_area_units,
+        weighted_units_matrix,
         weights.ravel()[valid_flat].astype(np.float32),
     )
     total_scores.ravel()[valid_flat] = component_scores.sum(axis=1, dtype=np.float32)
@@ -730,7 +738,7 @@ def ensure_surface_score_cache(
     score_hash: str,
     walk_graph,
     walk_counts_by_node: dict[int, dict[str, int]],
-    walk_park_area_units_by_node: dict[int, float],
+    walk_weighted_units_by_node: dict[int, dict[str, int]],
     tracker=None,
 ) -> dict[str, Any]:
     shell_manifest = load_surface_manifest(shell_dir)
@@ -765,7 +773,7 @@ def ensure_surface_score_cache(
     node_scores = build_node_score_arrays(
         walk_graph,
         walk_counts_by_node,
-        walk_park_area_units_by_node,
+        walk_weighted_units_by_node,
     )
     save_node_score_arrays(score_dir, node_scores)
     if tracker is not None:
@@ -1117,11 +1125,17 @@ class FineSurfaceRuntime:
             for index, category in enumerate(node_scores["categories"])
             if int(counts_row[index]) > 0
         }
-        park_area_units = float(node_scores["park_area_units"][node_idx])
+        weighted_units_row = node_scores["weighted_units_matrix"][node_idx]
+        weighted_units = {
+            str(category): float(weighted_units_row[index])
+            for index, category in enumerate(node_scores["categories"])
+            if float(weighted_units_row[index]) > 0.0
+        }
+        park_area_units = float(weighted_units.get("parks", 0.0))
         component_scores, total_score = score_cell(
             counts,
             effective_area_ratio=effective_area_ratio,
-            park_area_units=park_area_units,
+            weighted_units=weighted_units,
         )
         payload.update(
             {

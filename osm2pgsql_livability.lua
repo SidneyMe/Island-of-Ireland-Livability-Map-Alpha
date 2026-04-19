@@ -24,7 +24,6 @@ local park_values = {
     park = true,
     playground = true,
     nature_reserve = true,
-    garden = true,
 }
 
 local transport_rail_values = {

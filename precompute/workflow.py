@@ -320,6 +320,7 @@ def run_precompute_impl(
         study_area_wgs84,
         walk_grids,
         amenity_data,
+        amenity_source_rows,
     )
     tracker.record_substep(
         "publish",

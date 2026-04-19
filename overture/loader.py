@@ -37,7 +37,6 @@ OVERTURE_CATEGORY_MAP: dict[str, str] = {
     "park": "parks",
     "nature_reserve": "parks",
     "playground": "parks",
-    "garden": "parks",
     "recreation_ground": "parks",
     "national_park": "parks",
 }
@@ -81,6 +80,12 @@ def dataset_signature() -> str:
     payload = dataset_info()
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()[:12]
+
+
+def category_map_signature() -> str:
+    return hashlib.sha256(
+        json.dumps(OVERTURE_CATEGORY_MAP, sort_keys=True).encode("utf-8")
     ).hexdigest()[:12]
 
 
@@ -238,11 +243,13 @@ def load_overture_amenity_rows(study_area_wgs84: Any) -> list[dict[str, Any]]:
                 "category": mapped,
                 "source": "overture_places",
                 "source_ref": str(fid or ""),
+                "raw_primary_category": str(primary_cat or "").lower() or None,
                 "name": _extract_first_text(name_value),
                 "brand": _extract_first_text(brand_value),
                 "confidence": _extract_confidence(confidence_value),
                 "geom": Point(float(point.x), float(point.y)),
                 "park_area_m2": 0.0,
+                "footprint_area_m2": 0.0,
             }
         )
 

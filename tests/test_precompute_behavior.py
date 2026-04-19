@@ -207,6 +207,7 @@ class OvertureAmenityMergeTests(TestCase):
         name: str | None = "Corner Shop",
         tags_json: dict[str, object] | None = None,
         park_area_m2: float = 0.0,
+        footprint_area_m2: float = 0.0,
     ) -> dict[str, object]:
         return {
             "category": category,
@@ -216,6 +217,7 @@ class OvertureAmenityMergeTests(TestCase):
             "tags_json": tags_json if tags_json is not None else {"name": name},
             "geom": Point(lon, lat),
             "park_area_m2": park_area_m2,
+            "footprint_area_m2": footprint_area_m2,
         }
 
     def _overture_row(
@@ -227,6 +229,7 @@ class OvertureAmenityMergeTests(TestCase):
         source_ref: str = "ovt-1",
         name: str | None = "Corner Shop",
         brand: str | None = None,
+        raw_primary_category: str | None = None,
     ) -> dict[str, object]:
         return {
             "category": category,
@@ -234,8 +237,10 @@ class OvertureAmenityMergeTests(TestCase):
             "source_ref": source_ref,
             "name": name,
             "brand": brand,
+            "raw_primary_category": raw_primary_category,
             "geom": Point(lon, lat),
             "park_area_m2": 0.0,
+            "footprint_area_m2": 0.0,
         }
 
     def _candidate_pair(
@@ -649,6 +654,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                 "tags_json": {"name": "Corner Shop"},
                 "geom": Point(-6.26, 53.35),
                 "park_area_m2": 0.0,
+                "footprint_area_m2": 0.0,
             },
             {
                 "category": "transport",
@@ -718,6 +724,9 @@ class AmenityPhaseIntegrationTests(TestCase):
                     "name": "Pocket Park",
                     "conflict_class": "overture_only",
                     "park_area_m2": 0.0,
+                    "footprint_area_m2": 0.0,
+                    "tier": "neighbourhood",
+                    "score_units": 2,
                 },
                 {
                     "category": "shops",
@@ -728,6 +737,9 @@ class AmenityPhaseIntegrationTests(TestCase):
                     "name": "Corner Shop",
                     "conflict_class": "source_agreement",
                     "park_area_m2": 0.0,
+                    "footprint_area_m2": 0.0,
+                    "tier": "regular",
+                    "score_units": 2,
                 },
                 {
                     "category": "transport",
@@ -738,6 +750,9 @@ class AmenityPhaseIntegrationTests(TestCase):
                     "name": None,
                     "conflict_class": "gtfs_direct",
                     "park_area_m2": 0.0,
+                    "footprint_area_m2": 0.0,
+                    "tier": "stop",
+                    "score_units": 1,
                 },
             ],
         )
@@ -754,6 +769,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                 "tags_json": {"name": "Corner Shop"},
                 "geom": Point(-6.26, 53.35),
                 "park_area_m2": 0.0,
+                "footprint_area_m2": 0.0,
             }
         ]
         merged_rows = [
@@ -829,6 +845,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                         "source": "overture_places",
                         "source_ref": "ovt-1",
                         "name": "Late Addition",
+                        "tier": "regular",
                         "conflict_class": "overture_only",
                     }
                 ],
@@ -840,6 +857,7 @@ class AmenityPhaseIntegrationTests(TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["source"], "overture_places")
         self.assertEqual(rows[0]["name"], "Late Addition")
+        self.assertEqual(rows[0]["tier"], "regular")
         self.assertEqual(rows[0]["conflict_class"], "overture_only")
 
     def test_summary_json_includes_overture_dataset_traceability(self) -> None:
@@ -847,6 +865,12 @@ class AmenityPhaseIntegrationTests(TestCase):
             box(-10.0, 50.0, -5.0, 55.0),
             {20_000: [_grid_cell("coarse-cell")]},
             _empty_amenity_data(),
+            [
+                {"category": "shops", "tier": "corner"},
+                {"category": "shops", "tier": "regular"},
+                {"category": "transport", "tier": "stop"},
+                {"category": "parks", "tier": "district"},
+            ],
             hashes=SimpleNamespace(
                 build_key="build-key-dev",
                 config_hash="config-hash-dev",
@@ -865,6 +889,15 @@ class AmenityPhaseIntegrationTests(TestCase):
         self.assertEqual(
             summary["overture_dataset"],
             {"last_release": "2026-04-15.0", "file_size": 12345},
+        )
+        self.assertEqual(
+            summary["amenity_tier_counts"],
+            {
+                "shops": {"corner": 1, "regular": 1},
+                "transport": {"stop": 1},
+                "healthcare": {},
+                "parks": {"district": 1},
+            },
         )
 
 
@@ -951,16 +984,17 @@ class PrecomputeReachabilityTests(TestCase):
 
         precompute.score_cells(
             [cell],
-            {1: {"shops": 2}},
+            {1: {"shops": 1}},
             [1],
+            {1: {"shops": 2}},
         )
 
-        self.assertEqual(cell["counts"], {"shops": 2})
-        self.assertEqual(cell["scores"]["shops"], 10.0)
+        self.assertEqual(cell["counts"], {"shops": 1})
+        self.assertAlmostEqual(cell["scores"]["shops"], (2.0 / 6.0) * 25.0)
         self.assertEqual(cell["scores"]["parks"], 0.0)
-        self.assertEqual(cell["total"], 10.0)
+        self.assertAlmostEqual(cell["total"], (2.0 / 6.0) * 25.0)
 
-    def test_score_cells_use_reachable_park_area_for_inland_park_scoring(self) -> None:
+    def test_score_cells_use_weighted_park_units_for_inland_park_scoring(self) -> None:
         cell = _grid_cell(
             "inland-park",
             effective_area_m2=1.0,
@@ -971,12 +1005,12 @@ class PrecomputeReachabilityTests(TestCase):
             [cell],
             {1: {"parks": 1}},
             [1],
-            {1: 2.0},
+            {1: {"parks": 4}},
         )
 
         self.assertEqual(cell["counts"], {"parks": 1})
-        self.assertEqual(cell["scores"]["parks"], 25.0)
-        self.assertEqual(cell["total"], 25.0)
+        self.assertEqual(cell["scores"]["parks"], 20.0)
+        self.assertEqual(cell["total"], 20.0)
 
     def test_score_cells_normalize_non_park_categories_by_effective_area(self) -> None:
         inland_cell = _grid_cell(
@@ -992,12 +1026,13 @@ class PrecomputeReachabilityTests(TestCase):
 
         precompute.score_cells(
             [inland_cell, coastal_cell],
-            {1: {"shops": 2}},
+            {1: {"shops": 1}},
             [1, 1],
+            {1: {"shops": 2}},
         )
 
         self.assertEqual(inland_cell["counts"], coastal_cell["counts"])
-        self.assertEqual(inland_cell["counts"], {"shops": 2})
+        self.assertEqual(inland_cell["counts"], {"shops": 1})
         self.assertGreater(coastal_cell["scores"]["shops"], inland_cell["scores"]["shops"])
         self.assertGreater(coastal_cell["total"], inland_cell["total"])
 
@@ -1010,14 +1045,15 @@ class PrecomputeReachabilityTests(TestCase):
 
         precompute.score_cells(
             [coastal_cell],
-            {1: {"healthcare": 1}},
+            {1: {"healthcare": 2}},
             [1],
+            {1: {"healthcare": 5}},
         )
 
-        self.assertEqual(coastal_cell["counts"], {"healthcare": 1})
+        self.assertEqual(coastal_cell["counts"], {"healthcare": 2})
         self.assertEqual(coastal_cell["scores"]["healthcare"], 25.0)
 
-    def test_score_cells_normalize_park_area_by_effective_area(self) -> None:
+    def test_score_cells_normalize_weighted_park_units_by_effective_area(self) -> None:
         inland_cell = _grid_cell(
             "inland-park",
             effective_area_ratio=1.0,
@@ -1031,14 +1067,14 @@ class PrecomputeReachabilityTests(TestCase):
             [inland_cell, coastal_cell],
             {7: {"parks": 1}},
             [7, 7],
-            {7: 1.0},
+            {7: {"parks": 2}},
         )
 
         self.assertEqual(inland_cell["counts"], coastal_cell["counts"])
         self.assertEqual(inland_cell["counts"], {"parks": 1})
         self.assertLess(inland_cell["scores"]["parks"], coastal_cell["scores"]["parks"])
 
-    def test_score_cells_clamp_park_area_normalization_floor_for_tiny_land_slivers(self) -> None:
+    def test_score_cells_clamp_weighted_park_unit_normalization_floor_for_tiny_land_slivers(self) -> None:
         coastal_cell = _grid_cell(
             "tiny-coastal-park",
             effective_area_ratio=0.01,
@@ -1048,7 +1084,7 @@ class PrecomputeReachabilityTests(TestCase):
             [coastal_cell],
             {3: {"parks": 1}},
             [3],
-            {3: 0.5},
+            {3: {"parks": 2}},
         )
 
         self.assertEqual(coastal_cell["counts"], {"parks": 1})
@@ -1088,7 +1124,7 @@ class PrecomputeReachabilityTests(TestCase):
             [inland_cell, coastal_cell],
             {9: {"parks": 1}},
             [9, 9],
-            {9: 1.0},
+            {9: {"parks": 2}},
         )
 
         self.assertEqual(inland_cell["counts"], coastal_cell["counts"])
@@ -1099,23 +1135,32 @@ class PrecomputeReachabilityTests(TestCase):
         walk_graph = mock.Mock()
         walk_graph.vcount.return_value = 3
         walk_nodes_by_category = {
-            "shops": [0],
-            "transport": [],
+            "shops": [],
+            "transport": [0],
             "healthcare": [],
             "parks": [],
         }
+        amenity_source_rows = [
+            {
+                "category": "transport",
+                "lat": 53.0,
+                "lon": -6.0,
+                "source_ref": "gtfs/1",
+                "score_units": 1,
+            }
+        ]
 
         with TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir)
             precompute.cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
             precompute.cache_save_large(
                 "walk_counts_by_origin_node",
-                {0: {"shops": 1}},
+                {0: {"transport": 1}},
                 cache_dir,
             )
             precompute.cache_save_large(
-                "walk_park_area_units_by_origin_node",
-                {0: 0.0},
+                "walk_weighted_units_by_origin_node",
+                {0: {}},
                 cache_dir,
             )
 
@@ -1131,24 +1176,24 @@ class PrecomputeReachabilityTests(TestCase):
                 mock.patch.object(
                     precompute,
                     "precompute_walk_counts_by_origin_node",
-                    return_value={1: {"shops": 1}},
+                    return_value={1: {"transport": 1}},
                 ) as walk_counts_mock,
                 mock.patch.object(
                     precompute,
                     "precompute_walk_weighted_totals_by_origin_node",
-                    side_effect=AssertionError("park lookup should use zero fill when no weighted parks exist"),
+                    side_effect=AssertionError("weighted lookup should use zero fill when no weighted rows exist"),
                 ),
             ):
-                _, walk_counts_by_node, walk_park_area_units_by_node = precompute.phase_reachability(
+                _, walk_counts_by_node, walk_weighted_units_by_node = precompute.phase_reachability(
                     walk_graph,
                     amenity_data={},
-                    amenity_source_rows=[],
+                    amenity_source_rows=amenity_source_rows,
                     tracker=tracker,
                     walk_origin_node_ids=[0, 1],
                 )
                 cached_walk_counts = precompute.cache_load_large("walk_counts_by_origin_node", cache_dir)
-                cached_park_area_units = precompute.cache_load_large(
-                    "walk_park_area_units_by_origin_node",
+                cached_weighted_units = precompute.cache_load_large(
+                    "walk_weighted_units_by_origin_node",
                     cache_dir,
                 )
 
@@ -1156,27 +1201,27 @@ class PrecomputeReachabilityTests(TestCase):
 
         walk_counts_mock.assert_called_once()
         self.assertEqual(walk_counts_mock.call_args.args[2], (1,))
-        self.assertEqual(walk_counts_by_node, {0: {"shops": 1}, 1: {"shops": 1}})
-        self.assertEqual(walk_park_area_units_by_node, {0: 0.0, 1: 0.0})
+        self.assertEqual(walk_counts_by_node, {0: {"transport": 1}, 1: {"transport": 1}})
+        self.assertEqual(walk_weighted_units_by_node, {0: {}, 1: {}})
         self.assertEqual(cached_walk_counts, walk_counts_by_node)
-        self.assertEqual(cached_park_area_units, walk_park_area_units_by_node)
+        self.assertEqual(cached_weighted_units, walk_weighted_units_by_node)
 
-    def test_phase_reachability_builds_and_caches_park_area_units_lookup(self) -> None:
+    def test_phase_reachability_builds_and_caches_weighted_unit_lookup(self) -> None:
         walk_graph = mock.Mock()
         walk_graph.vcount.return_value = 2
         walk_nodes_by_category = {
-            "shops": [],
+            "shops": [2],
             "transport": [],
             "healthcare": [],
-            "parks": [2],
+            "parks": [],
         }
         amenity_source_rows = [
             {
-                "category": "parks",
+                "category": "shops",
                 "lat": 53.0,
                 "lon": -6.0,
-                "source_ref": "way/1",
-                "park_area_m2": 100_000.0,
+                "source_ref": "node/1",
+                "score_units": 3,
             }
         ]
 
@@ -1191,32 +1236,32 @@ class PrecomputeReachabilityTests(TestCase):
                 mock.patch.object(
                     precompute,
                     "precompute_walk_counts_by_origin_node",
-                    return_value={0: {"parks": 1}},
+                    return_value={0: {"shops": 1}},
                 ),
                 mock.patch.object(
                     precompute,
                     "precompute_walk_weighted_totals_by_origin_node",
-                    return_value={0: {"parks": 100_000}},
-                ) as park_totals_mock,
+                    return_value={0: {"shops": 3}},
+                ) as weighted_totals_mock,
             ):
-                _, walk_counts_by_node, walk_park_area_units_by_node = precompute.phase_reachability(
+                _, walk_counts_by_node, walk_weighted_units_by_node = precompute.phase_reachability(
                     walk_graph,
                     amenity_data={},
                     amenity_source_rows=amenity_source_rows,
                     tracker=tracker,
                     walk_origin_node_ids=[0],
                 )
-                cached_park_area_units = precompute.cache_load_large(
-                    "walk_park_area_units_by_origin_node",
+                cached_weighted_units = precompute.cache_load_large(
+                    "walk_weighted_units_by_origin_node",
                     cache_dir,
                 )
 
             _clear_state_cache(cache_dir)
 
-        park_totals_mock.assert_called_once()
-        self.assertEqual(walk_counts_by_node, {0: {"parks": 1}})
-        self.assertEqual(walk_park_area_units_by_node, {0: 2.0})
-        self.assertEqual(cached_park_area_units, {0: 2.0})
+        weighted_totals_mock.assert_called_once()
+        self.assertEqual(walk_counts_by_node, {0: {"shops": 1}})
+        self.assertEqual(walk_weighted_units_by_node, {0: {"shops": 3}})
+        self.assertEqual(cached_weighted_units, {0: {"shops": 3}})
 
     def test_precompute_walk_counts_by_origin_node_uses_rust_bridge_for_walkgraph_index(self) -> None:
         graph = WalkGraphIndex(
@@ -1262,7 +1307,7 @@ class PrecomputeReachabilityTests(TestCase):
             cache_dir = Path(temp_dir)
             precompute.cache_save("walk_nodes_by_cat", _empty_amenity_data(), cache_dir)
             precompute.cache_save_large("walk_counts_by_origin_node", {0: {}}, cache_dir)
-            precompute.cache_save_large("walk_park_area_units_by_origin_node", {0: 0.0}, cache_dir)
+            precompute.cache_save_large("walk_weighted_units_by_origin_node", {0: {}}, cache_dir)
 
             with mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir):
                 can_finalize = precompute._can_finalize_reach_tier(_empty_amenity_data())
@@ -1653,8 +1698,8 @@ class GridArtifactTests(TestCase):
                     20: {"parks": 1},
                 },
                 {
-                    10: 0.0,
-                    20: 1.0,
+                    10: {},
+                    20: {"parks": 1},
                 },
             )
         )
@@ -1787,7 +1832,7 @@ class GridArtifactTests(TestCase):
         walk_graph = mock.Mock()
         walk_graph.vcount.return_value = 42
         cache_store: dict[str, object] = {}
-        phase_reachability_mock = mock.Mock(return_value=({}, {10: {"shops": 1}}, {10: 0.0}))
+        phase_reachability_mock = mock.Mock(return_value=({}, {10: {"shops": 1}}, {10: {}}))
         ensure_surface_shell_cache_mock = mock.Mock(
             side_effect=AssertionError("dev mode should not build fine surface shells")
         )
@@ -2305,6 +2350,15 @@ class StudyAreaAndPublishTests(TestCase):
         self.assertEqual(summary["coarse_vector_resolutions_m"], [20_000, 10_000, 5_000])
         self.assertEqual(summary["fine_resolutions_m"], [])
         self.assertEqual(summary["surface_zoom_breaks"], [(10, 5_000), (8, 10_000), (0, 20_000)])
+        self.assertEqual(
+            summary["amenity_tier_counts"],
+            {
+                "shops": {},
+                "transport": {},
+                "healthcare": {},
+                "parks": {},
+            },
+        )
 
     def test_render_from_db_delegates_to_local_server(self) -> None:
         with mock.patch.object(

@@ -130,7 +130,7 @@ class FineSurfaceRuntimeTests(TestCase):
                 {
                     "categories": ["shops", "transport", "healthcare", "parks"],
                     "counts_matrix": np.zeros((1, 4), dtype=np.uint32),
-                    "park_area_units": np.zeros(1, dtype=np.float32),
+                    "weighted_units_matrix": np.zeros((1, 4), dtype=np.float32),
                     "reference_scores": np.zeros((1, 4), dtype=np.float32),
                     "reference_total": np.zeros(1, dtype=np.float32),
                 },
@@ -174,7 +174,7 @@ class FineSurfaceRuntimeTests(TestCase):
                 {
                     "categories": ["shops", "transport", "healthcare", "parks"],
                     "counts_matrix": np.zeros((4, 4), dtype=np.uint32),
-                    "park_area_units": np.zeros(4, dtype=np.float32),
+                    "weighted_units_matrix": np.zeros((4, 4), dtype=np.float32),
                     "reference_scores": np.zeros((4, 4), dtype=np.float32),
                     "reference_total": np.zeros(4, dtype=np.float32),
                 },
@@ -233,16 +233,16 @@ class FineSurfaceRuntimeTests(TestCase):
             score_path.parent.mkdir(parents=True, exist_ok=True)
             np.savez_compressed(
                 score_path,
-                total_score_50=np.array([[10.0]], dtype=np.float32),
+                total_score_50=np.array([[25.0]], dtype=np.float32),
             )
             surface.save_node_score_arrays(
                 score_dir,
                 {
                     "categories": ["shops", "transport", "healthcare", "parks"],
-                    "counts_matrix": np.array([[2, 0, 0, 0]], dtype=np.uint32),
-                    "park_area_units": np.array([0.0], dtype=np.float32),
-                    "reference_scores": np.array([[10.0, 0.0, 0.0, 0.0]], dtype=np.float32),
-                    "reference_total": np.array([10.0], dtype=np.float32),
+                    "counts_matrix": np.array([[1, 0, 0, 0]], dtype=np.uint32),
+                    "weighted_units_matrix": np.array([[6.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+                    "reference_scores": np.array([[25.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+                    "reference_total": np.array([25.0], dtype=np.float32),
                 },
             )
             _write_shell_manifest(
@@ -277,9 +277,9 @@ class FineSurfaceRuntimeTests(TestCase):
         self.assertTrue(payload["valid_land"])
         self.assertEqual(payload["resolution_m"], 50)
         self.assertEqual(payload["visible_resolution_m"], 250)
-        self.assertEqual(payload["counts"], {"shops": 2})
-        self.assertEqual(payload["component_scores"]["shops"], 10.0)
-        self.assertEqual(payload["total_score"], 10.0)
+        self.assertEqual(payload["counts"], {"shops": 1})
+        self.assertEqual(payload["component_scores"]["shops"], 25.0)
+        self.assertEqual(payload["total_score"], 25.0)
 
     @unittest.skipUnless(Path(config.WALKGRAPH_BIN).is_file(), "walkgraph binary is required for the integration fixture")
     def test_walkgraph_surface_subcommand_builds_expected_shell_payload(self) -> None:

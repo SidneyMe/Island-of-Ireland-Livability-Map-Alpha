@@ -82,6 +82,7 @@ _AMENITY_TILE_SQL = text(
     mvtgeom AS (
         SELECT
             a.category,
+            a.tier,
             a.name,
             a.source,
             a.source_ref,

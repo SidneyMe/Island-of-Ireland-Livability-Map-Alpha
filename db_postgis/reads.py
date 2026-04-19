@@ -198,6 +198,13 @@ def load_source_amenity_rows(
         ),
         else_=0.0,
     ).label("park_area_m2")
+    footprint_area_m2 = case(
+        (
+            func.ST_Dimension(features.c.geom) == 2,
+            func.COALESCE(func.ST_Area(func.ST_Transform(features.c.geom, 2157)), 0.0),
+        ),
+        else_=0.0,
+    ).label("footprint_area_m2")
     query = (
         select(
             features.c.category,
@@ -207,6 +214,7 @@ def load_source_amenity_rows(
             features.c.osm_id,
             func.ST_PointOnSurface(features.c.geom).label("point_geom"),
             park_area_m2,
+            footprint_area_m2,
         )
         .where(features.c.import_fingerprint == import_fingerprint)
         .where(features.c.category != "transport")
@@ -231,6 +239,7 @@ def load_source_amenity_rows(
                     "tags_json": tags_json,
                     "geom": root.to_shape(row["point_geom"]),
                     "park_area_m2": float(row.get("park_area_m2") or 0.0),
+                    "footprint_area_m2": float(row.get("footprint_area_m2") or 0.0),
                 }
             )
     if stats_out is not None:
@@ -330,6 +339,7 @@ def load_amenity_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
         rows = connection.execute(
             select(
                 amenities.c.category,
+                amenities.c.tier,
                 amenities.c.geom,
                 amenities.c.source,
                 amenities.c.source_ref,
@@ -344,6 +354,7 @@ def load_amenity_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
     return [
         {
             "category": row["category"],
+            "tier": row["tier"],
             "geom": root.to_shape(row["geom"]),
             "source": row["source"],
             "source_ref": row["source_ref"],

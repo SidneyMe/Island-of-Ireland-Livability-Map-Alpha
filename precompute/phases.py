@@ -5,9 +5,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-
-_PARK_CATEGORY = "parks"
-_PARK_AREA_UNIT_M2 = 50_000.0
+from .amenity_tiers import annotate_amenity_row, uses_weighted_units
 
 
 def _top_count_summary(counts: dict[str, Any], *, limit: int = 3) -> str:
@@ -42,15 +40,6 @@ def _merge_counts_lookup(
     return {node: merged_counts[node] for node in sorted(merged_counts)}
 
 
-def _merge_numeric_lookup(
-    existing_values: dict[int, float],
-    new_values: dict[int, float],
-) -> dict[int, float]:
-    merged_values = {int(node): float(value) for node, value in existing_values.items()}
-    merged_values.update({int(node): float(value) for node, value in new_values.items()})
-    return {node: merged_values[node] for node in sorted(merged_values)}
-
-
 def _park_area_m2_from_row(row: dict[str, Any]) -> float:
     try:
         area_m2 = float(row.get("park_area_m2", 0.0))
@@ -61,33 +50,41 @@ def _park_area_m2_from_row(row: dict[str, Any]) -> float:
     return area_m2
 
 
-def _park_node_weight_rows(
+def _footprint_area_m2_from_row(row: dict[str, Any]) -> float:
+    try:
+        area_m2 = float(row.get("footprint_area_m2", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    if area_m2 < 0.0:
+        return 0.0
+    return area_m2
+
+
+def _weighted_node_rows(
     amenity_source_rows: list[dict[str, Any]],
-    park_nodes: list[int],
+    nodes_by_category: dict[str, list[int]],
 ) -> dict[str, list[tuple[int, int]]]:
-    park_rows = [row for row in amenity_source_rows if row.get("category") == _PARK_CATEGORY]
-    if len(park_rows) != len(park_nodes):
-        raise ValueError(
-            "Cached park amenity rows and snapped park nodes are out of sync: "
-            f"{len(park_rows)} park rows vs {len(park_nodes)} snapped park nodes."
-        )
-
-    weight_rows: list[tuple[int, int]] = []
-    for row, node in zip(park_rows, park_nodes):
-        integer_area_m2 = int(round(_park_area_m2_from_row(row)))
-        if integer_area_m2 <= 0:
+    weighted_rows: dict[str, list[tuple[int, int]]] = {}
+    for category, category_nodes in nodes_by_category.items():
+        if not uses_weighted_units(str(category)):
             continue
-        weight_rows.append((int(node), integer_area_m2))
-    return {_PARK_CATEGORY: weight_rows}
-
-
-def _park_area_units_lookup(
-    park_area_m2_by_node: dict[int, dict[str, int]],
-) -> dict[int, float]:
-    return {
-        int(node): float(category_totals.get(_PARK_CATEGORY, 0)) / _PARK_AREA_UNIT_M2
-        for node, category_totals in park_area_m2_by_node.items()
-    }
+        category_rows = [
+            row for row in amenity_source_rows if str(row.get("category") or "") == str(category)
+        ]
+        if len(category_rows) != len(category_nodes):
+            raise ValueError(
+                "Cached amenity rows and snapped amenity nodes are out of sync for "
+                f"category={category!r}: {len(category_rows)} rows vs {len(category_nodes)} nodes."
+            )
+        weight_rows: list[tuple[int, int]] = []
+        for row, node in zip(category_rows, category_nodes):
+            score_units = max(int(row.get("score_units") or 0), 0)
+            if score_units <= 0:
+                continue
+            weight_rows.append((int(node), score_units))
+        if weight_rows:
+            weighted_rows[str(category)] = weight_rows
+    return weighted_rows
 
 
 def _record_substep(
@@ -279,6 +276,10 @@ def phase_amenities_impl(
     osm_merge_rows = [row for row in amenity_rows if row.get("category") != "transport"]
     tracker.set_phase_detail("amenities", "loading Overture amenity rows")
     overture_rows = load_overture_amenity_rows(study_area_wgs84)
+    source_row_lookup = {
+        (str(row.get("source") or ""), str(row.get("source_ref") or "")): row
+        for row in [*osm_merge_rows, *transport_rows, *overture_rows]
+    }
     tracker.set_phase_detail("amenities", f"merging {len(osm_merge_rows):,} OSM + {len(overture_rows):,} Overture rows")
     merge_stats: dict[str, Any] | None = None
     if load_merged_source_amenity_rows is not None:
@@ -354,6 +355,9 @@ def phase_amenities_impl(
         else:
             lat = float(row["lat"])
             lon = float(row["lon"])
+        source_key = (str(row.get("source") or ""), str(row.get("source_ref") or ""))
+        source_row = source_row_lookup.get(source_key, row)
+        annotated_row = annotate_amenity_row(source_row)
         amenity_data.setdefault(row["category"], []).append((lat, lon))
         counts_by_category[row["category"]] = counts_by_category.get(row["category"], 0) + 1
         amenity_source_rows.append(
@@ -366,6 +370,9 @@ def phase_amenities_impl(
                 "name": row.get("name"),
                 "conflict_class": str(row.get("conflict_class") or "osm_only"),
                 "park_area_m2": _park_area_m2_from_row(row),
+                "footprint_area_m2": _footprint_area_m2_from_row(source_row),
+                "tier": annotated_row.get("tier"),
+                "score_units": int(annotated_row.get("score_units") or 0),
             }
         )
     for category in tags:
@@ -499,19 +506,19 @@ def phase_reachability_impl(
     walk_counts_by_node = cache_load_large("walk_counts_by_origin_node", cache_dir)
     if walk_counts_by_node is None:
         walk_counts_by_node = {}
-    walk_park_area_units_by_node = cache_load_large("walk_park_area_units_by_origin_node", cache_dir)
-    if walk_park_area_units_by_node is None:
-        walk_park_area_units_by_node = {}
+    walk_weighted_units_by_node = cache_load_large("walk_weighted_units_by_origin_node", cache_dir)
+    if walk_weighted_units_by_node is None:
+        walk_weighted_units_by_node = {}
 
     missing_count_nodes = tuple(
         node for node in requested_walk_origin_nodes if node not in walk_counts_by_node
     )
-    missing_park_area_nodes = tuple(
-        node for node in requested_walk_origin_nodes if node not in walk_park_area_units_by_node
+    missing_weighted_nodes = tuple(
+        node for node in requested_walk_origin_nodes if node not in walk_weighted_units_by_node
     )
     missing_origin_nodes = tuple(
         node for node in requested_walk_origin_nodes if node not in walk_counts_by_node
-        or node not in walk_park_area_units_by_node
+        or node not in walk_weighted_units_by_node
     )
 
     if missing_origin_nodes:
@@ -539,7 +546,7 @@ def phase_reachability_impl(
 
     if missing_origin_nodes:
         counts_cache_save_seconds = 0.0
-        park_cache_save_seconds = 0.0
+        weighted_cache_save_seconds = 0.0
 
         if missing_count_nodes:
             routing_started_at = time.perf_counter()
@@ -580,72 +587,71 @@ def phase_reachability_impl(
                 force_log=True,
             )
 
-        if missing_park_area_nodes:
-            park_weight_rows = _park_node_weight_rows(
+        if missing_weighted_nodes:
+            weighted_rows = _weighted_node_rows(
                 amenity_source_rows,
-                walk_nodes_by_category.get(_PARK_CATEGORY, []),
+                walk_nodes_by_category,
             )
-            if park_weight_rows.get(_PARK_CATEGORY):
-                park_routing_started_at = time.perf_counter()
+            if weighted_rows:
+                weighted_routing_started_at = time.perf_counter()
 
-                def _checkpoint_save_park(chunk_totals: dict[int, dict[str, int]]) -> None:
-                    nonlocal walk_park_area_units_by_node, park_cache_save_seconds
-                    chunk_units = _park_area_units_lookup(chunk_totals)
-                    walk_park_area_units_by_node = _merge_numeric_lookup(
-                        walk_park_area_units_by_node,
-                        chunk_units,
+                def _checkpoint_save_weighted(chunk_totals: dict[int, dict[str, int]]) -> None:
+                    nonlocal walk_weighted_units_by_node, weighted_cache_save_seconds
+                    walk_weighted_units_by_node = _merge_counts_lookup(
+                        walk_weighted_units_by_node,
+                        chunk_totals,
                     )
                     save_started_at = time.perf_counter()
                     cache_save_large(
-                        "walk_park_area_units_by_origin_node",
-                        walk_park_area_units_by_node,
+                        "walk_weighted_units_by_origin_node",
+                        walk_weighted_units_by_node,
                         cache_dir,
                     )
-                    park_cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
+                    weighted_cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
 
-                park_progress_cb = None
+                weighted_progress_cb = None
                 if not missing_count_nodes:
-                    park_progress_cb = tracker.phase_callback("reachability")
+                    weighted_progress_cb = tracker.phase_callback("reachability")
 
-                park_totals_by_node = precompute_walk_weighted_totals_by_origin_node(
+                weighted_totals_by_node = precompute_walk_weighted_totals_by_origin_node(
                     walk_graph,
-                    park_weight_rows,
+                    weighted_rows,
                     missing_origin_nodes,
                     cutoff=walk_radius_m,
                     weight="length_m",
-                    progress_cb=park_progress_cb,
+                    progress_cb=weighted_progress_cb,
                     detail="walk origins",
-                    save_chunk_cb=_checkpoint_save_park,
+                    save_chunk_cb=_checkpoint_save_weighted,
                 )
                 _record_substep(
                     tracker,
                     "reachability",
-                    "walk_park_area_routing",
-                    park_routing_started_at,
+                    "walk_weighted_units_routing",
+                    weighted_routing_started_at,
                     force_log=True,
                 )
-                walk_park_area_units_by_node = _merge_numeric_lookup(
-                    walk_park_area_units_by_node,
-                    _park_area_units_lookup(park_totals_by_node),
+                walk_weighted_units_by_node = _merge_counts_lookup(
+                    walk_weighted_units_by_node,
+                    weighted_totals_by_node,
                 )
             else:
-                walk_park_area_units_by_node = _merge_numeric_lookup(
-                    walk_park_area_units_by_node,
-                    {node: 0.0 for node in missing_origin_nodes},
+                walk_weighted_units_by_node = _merge_counts_lookup(
+                    walk_weighted_units_by_node,
+                    {node: {} for node in missing_origin_nodes},
                 )
 
-            if park_cache_save_seconds <= 0.0:
+            if weighted_cache_save_seconds <= 0.0:
                 save_started_at = time.perf_counter()
                 cache_save_large(
-                    "walk_park_area_units_by_origin_node",
-                    walk_park_area_units_by_node,
+                    "walk_weighted_units_by_origin_node",
+                    walk_weighted_units_by_node,
                     cache_dir,
                 )
-                park_cache_save_seconds = max(time.perf_counter() - save_started_at, 0.0)
+                weighted_cache_save_seconds = max(time.perf_counter() - save_started_at, 0.0)
             tracker.record_substep(
                 "reachability",
-                "walk_park_area_cache_save",
-                park_cache_save_seconds,
+                "walk_weighted_units_cache_save",
+                weighted_cache_save_seconds,
                 force_log=True,
             )
 
@@ -657,7 +663,7 @@ def phase_reachability_impl(
         detail=f"{len(requested_walk_origin_nodes):,} walk origins",
     )
 
-    return walk_nodes_by_category, walk_counts_by_node, walk_park_area_units_by_node
+    return walk_nodes_by_category, walk_counts_by_node, walk_weighted_units_by_node
 
 
 def phase_grids_impl(
@@ -840,7 +846,7 @@ def phase_grids_impl(
         normalize_origin_node_ids(list(walk_origin_nodes) + list(surface_origin_nodes))
     )
 
-    _, walk_counts_by_node, walk_park_area_units_by_node = phase_reachability(
+    _, walk_counts_by_node, walk_weighted_units_by_node = phase_reachability(
         walk_graph,
         amenity_data,
         amenity_source_rows,
@@ -856,7 +862,7 @@ def phase_grids_impl(
             score_hash=score_hash,
             walk_graph=walk_graph,
             walk_counts_by_node=walk_counts_by_node,
-            walk_park_area_units_by_node=walk_park_area_units_by_node,
+            walk_weighted_units_by_node=walk_weighted_units_by_node,
             tracker=tracker,
         )
 
@@ -888,7 +894,7 @@ def phase_grids_impl(
             walk_cells,
             walk_counts_by_node,
             walk_cell_nodes_by_size[size],
-            walk_park_area_units_by_node,
+            walk_weighted_units_by_node,
         )
         walk_scores = [cell["total"] for cell in walk_cells]
         print(f"{_score_summary(walk_scores)} {elapsed(started_at)}")

@@ -126,6 +126,35 @@ class ConfigHashTests(TestCase):
         self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
         self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
 
+    def test_overture_category_map_signature_changes_invalidate_reach_hash(self) -> None:
+        with (
+            mock.patch.object(config, "overture_category_map_signature", return_value="map-a"),
+            mock.patch.object(config, "overture_dataset_signature", return_value="sig-fixed"),
+            mock.patch.object(
+                config,
+                "overture_dataset_info",
+                return_value={"last_release": "2026-04-15.0"},
+            ),
+        ):
+            previous_hashes = config.build_config_hashes()
+            previous_build_hashes = config.build_hashes_for_import("import-fingerprint-123")
+        with (
+            mock.patch.object(config, "overture_category_map_signature", return_value="map-b"),
+            mock.patch.object(config, "overture_dataset_signature", return_value="sig-fixed"),
+            mock.patch.object(
+                config,
+                "overture_dataset_info",
+                return_value={"last_release": "2026-04-15.0"},
+            ),
+        ):
+            current_hashes = config.build_config_hashes()
+            current_build_hashes = config.build_hashes_for_import("import-fingerprint-123")
+
+        self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+        self.assertNotEqual(previous_build_hashes.reach_hash, current_build_hashes.reach_hash)
+        self.assertNotEqual(previous_build_hashes.score_hash, current_build_hashes.score_hash)
+
     def test_amenity_merge_algorithm_version_changes_reach_hash(self) -> None:
         with mock.patch.object(config, "AMENITY_MERGE_ALGO_VERSION", 1):
             previous_hashes = config.build_config_hashes()
@@ -134,6 +163,19 @@ class ConfigHashTests(TestCase):
 
         self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
         self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+
+    def test_shop_tier_threshold_changes_invalidate_score_hash(self) -> None:
+        with mock.patch.object(config, "SHOP_MALL_MIN_FOOTPRINT_M2", 8_000.0):
+            previous_hashes = config.build_config_hashes()
+        with mock.patch.object(config, "SHOP_MALL_MIN_FOOTPRINT_M2", 9_000.0):
+            current_hashes = config.build_config_hashes()
+
+        self.assertEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+
+    def test_garden_is_not_configured_as_park_source(self) -> None:
+        self.assertNotIn("garden", config.TAGS["parks"]["leisure"])
+        self.assertNotIn("garden", config.OVERTURE_PARK_NEIGHBOURHOOD_VALUES)
 
 
 class SurfaceResolutionTests(TestCase):

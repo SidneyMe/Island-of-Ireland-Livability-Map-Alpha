@@ -46,6 +46,7 @@ amenities = Table(
     Column("config_hash", Text, nullable=False),
     Column("import_fingerprint", Text, nullable=False),
     Column("category", Text, nullable=False),
+    Column("tier", Text, nullable=True),
     Column("geom", Geometry("POINT", srid=4326), nullable=False),
     Column("source", Text, nullable=False),
     Column("source_ref", Text, nullable=True),

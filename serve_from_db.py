@@ -72,6 +72,7 @@ class RuntimeState:
     fine_resolutions: list[int]
     surface_zoom_breaks: list[tuple[int, int]]
     amenity_counts: dict[str, int]
+    amenity_tier_counts: dict[str, dict[str, int]]
     fine_surface_enabled: bool
     surface_shell_dir: Path | None
     surface_score_dir: Path | None
@@ -153,6 +154,18 @@ class RuntimeService:
             category: int((summary_json.get("amenity_counts", {}) or {}).get(category, 0))
             for category in sorted(CATEGORY_COLORS)
         }
+        raw_tier_counts = summary_json.get("amenity_tier_counts", {}) or {}
+        amenity_tier_counts = {
+            category: {
+                str(tier): int(value)
+                for tier, value in (
+                    (raw_tier_counts.get(category, {}) or {})
+                    if isinstance(raw_tier_counts.get(category, {}) or {}, dict)
+                    else {}
+                ).items()
+            }
+            for category in sorted(CATEGORY_COLORS)
+        }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -201,6 +214,7 @@ class RuntimeService:
             fine_resolutions=fine_resolutions,
             surface_zoom_breaks=surface_zoom_breaks,
             amenity_counts=amenity_counts,
+            amenity_tier_counts=amenity_tier_counts,
             fine_surface_enabled=fine_surface_enabled,
             surface_shell_dir=surface_shell_dir,
             surface_score_dir=surface_score_dir,
@@ -261,6 +275,7 @@ class RuntimeService:
                 for min_zoom, resolution_m in state.surface_zoom_breaks
             ],
             "amenity_counts": state.amenity_counts,
+            "amenity_tier_counts": state.amenity_tier_counts,
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,
             "max_zoom": SURFACE_MAX_ZOOM,

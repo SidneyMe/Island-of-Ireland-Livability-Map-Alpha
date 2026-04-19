@@ -3,6 +3,12 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { Protocol } from "pmtiles";
 import "./main.css";
 import {
+  buildAmenityLayerFilter,
+  defaultAmenityTierSelections,
+  formatAmenityLabel,
+  tierOptionsForCategory
+} from "./amenity_filters.js";
+import {
   buildStyle as buildRuntimeStyle,
   fineSurfaceEnabled as runtimeFineSurfaceEnabled,
   resolutionForZoom as runtimeResolutionForZoom
@@ -62,6 +68,7 @@ const state = {
   popup: null,
   panelHidden: false,
   enabledAmenityCategories: new Set(),
+  enabledAmenityTiers: new Map(),
   gridVisible: true,
   debugGridVisible: false,
   transportRealityVisible: false,
@@ -113,6 +120,34 @@ function updateAmenityNote() {
     : "Off until enabled";
 }
 
+function selectedAmenityTiers(category) {
+  return Array.from(state.enabledAmenityTiers.get(category) || []);
+}
+
+function hasVisibleAmenitySelection() {
+  return Array.from(state.enabledAmenityCategories).some(function (category) {
+    const tierOptions = tierOptionsForCategory(state.runtime, category);
+    return !tierOptions.length || selectedAmenityTiers(category).length > 0;
+  });
+}
+
+function ensureAmenityTierSelection(category) {
+  const tierOptions = tierOptionsForCategory(state.runtime, category);
+  if (!tierOptions.length) return;
+  const existing = state.enabledAmenityTiers.get(category);
+  if (existing && existing.size > 0) return;
+  state.enabledAmenityTiers.set(category, new Set(tierOptions));
+}
+
+function amenityTierSummary(category) {
+  const tierOptions = tierOptionsForCategory(state.runtime, category);
+  if (!tierOptions.length) return "";
+  const selectedCount = selectedAmenityTiers(category).length;
+  if (!selectedCount) return "No sub-tiers selected";
+  if (selectedCount === tierOptions.length) return "All sub-tiers";
+  return selectedCount + " of " + tierOptions.length + " selected";
+}
+
 function updatePanelVisibility() {
   document.body.classList.toggle("panel-hidden", state.panelHidden);
   elements.panelToggle.textContent = state.panelHidden ? "Show panel" : "Hide panel";
@@ -158,10 +193,16 @@ function applyDebugGridVisibility() {
 
 function applyAmenityFilter() {
   if (!state.map) return;
-  const enabled = Array.from(state.enabledAmenityCategories);
-  const visibility = enabled.length ? "visible" : "none";
+  const visibility = hasVisibleAmenitySelection() ? "visible" : "none";
   state.map.setLayoutProperty("amenities-circle", "visibility", visibility);
-  state.map.setFilter("amenities-circle", ["in", ["get", "category"], ["literal", enabled]]);
+  state.map.setFilter(
+    "amenities-circle",
+    buildAmenityLayerFilter(
+      state.runtime,
+      state.enabledAmenityCategories,
+      state.enabledAmenityTiers
+    )
+  );
 }
 
 function applyTransportRealityVisibility() {
@@ -189,6 +230,14 @@ function buildAmenityControls() {
   Object.keys(colors)
     .sort()
     .forEach(function (category) {
+      const tierOptions = tierOptionsForCategory(state.runtime, category);
+      if (tierOptions.length && !state.enabledAmenityTiers.has(category)) {
+        state.enabledAmenityTiers.set(category, new Set(tierOptions));
+      }
+
+      const card = document.createElement("div");
+      card.className = "amenity-control-card";
+
       const label = document.createElement("label");
       label.className = "toggle-row";
       label.htmlFor = "amenity-" + category;
@@ -197,22 +246,46 @@ function buildAmenityControls() {
       textWrap.className = "toggle-label";
 
       const title = document.createElement("strong");
-      title.textContent = category.charAt(0).toUpperCase() + category.slice(1);
+      title.textContent = formatAmenityLabel(category);
       title.style.color = colors[category];
 
       const subtitle = document.createElement("span");
       subtitle.textContent = String(counts[category] || 0) + " mapped";
 
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.id = "amenity-" + category;
-      input.checked = false;
-      input.addEventListener("change", function () {
-        if (input.checked) {
+      const categoryInput = document.createElement("input");
+      categoryInput.type = "checkbox";
+      categoryInput.id = "amenity-" + category;
+      categoryInput.checked = false;
+
+      const tierInputs = [];
+      let tierDetails = null;
+      let tierMeta = null;
+
+      function syncTierInputs() {
+        const selected = state.enabledAmenityTiers.get(category) || new Set();
+        tierInputs.forEach(function (tierInput) {
+          tierInput.checked = selected.has(tierInput.dataset.tier || "");
+          tierInput.disabled = !categoryInput.checked;
+        });
+        if (tierMeta) {
+          tierMeta.textContent = amenityTierSummary(category);
+        }
+        if (tierDetails) {
+          tierDetails.classList.toggle("is-disabled", !categoryInput.checked);
+          if (!categoryInput.checked) {
+            tierDetails.open = false;
+          }
+        }
+      }
+
+      categoryInput.addEventListener("change", function () {
+        if (categoryInput.checked) {
           state.enabledAmenityCategories.add(category);
+          ensureAmenityTierSelection(category);
         } else {
           state.enabledAmenityCategories.delete(category);
         }
+        syncTierInputs();
         updateAmenityNote();
         applyAmenityFilter();
       });
@@ -220,8 +293,76 @@ function buildAmenityControls() {
       textWrap.appendChild(title);
       textWrap.appendChild(subtitle);
       label.appendChild(textWrap);
-      label.appendChild(input);
-      elements.amenityControls.appendChild(label);
+      label.appendChild(categoryInput);
+      card.appendChild(label);
+
+      if (tierOptions.length) {
+        const tierCounts = (state.runtime.amenity_tier_counts || {})[category] || {};
+        tierDetails = document.createElement("details");
+        tierDetails.className = "amenity-tier-details";
+
+        const tierSummary = document.createElement("summary");
+        tierSummary.className = "amenity-tier-summary";
+
+        const tierSummaryLabel = document.createElement("span");
+        tierSummaryLabel.textContent = "Sub-tiers";
+
+        tierMeta = document.createElement("span");
+        tierMeta.className = "amenity-tier-meta";
+        tierMeta.textContent = amenityTierSummary(category);
+
+        tierSummary.appendChild(tierSummaryLabel);
+        tierSummary.appendChild(tierMeta);
+        tierDetails.appendChild(tierSummary);
+
+        const tierList = document.createElement("div");
+        tierList.className = "amenity-tier-list";
+
+        tierOptions.forEach(function (tier) {
+          const tierRow = document.createElement("label");
+          tierRow.className = "amenity-tier-row";
+          tierRow.htmlFor = "amenity-" + category + "-" + tier;
+
+          const tierTextWrap = document.createElement("span");
+          tierTextWrap.className = "toggle-label";
+
+          const tierTitle = document.createElement("strong");
+          tierTitle.textContent = formatAmenityLabel(tier);
+
+          const tierSubtitle = document.createElement("span");
+          tierSubtitle.textContent = String(tierCounts[tier] || 0) + " mapped";
+
+          const tierInput = document.createElement("input");
+          tierInput.type = "checkbox";
+          tierInput.id = "amenity-" + category + "-" + tier;
+          tierInput.dataset.tier = tier;
+          tierInput.checked = selectedAmenityTiers(category).includes(tier);
+          tierInput.addEventListener("change", function () {
+            const selected = new Set(state.enabledAmenityTiers.get(category) || []);
+            if (tierInput.checked) {
+              selected.add(tier);
+            } else {
+              selected.delete(tier);
+            }
+            state.enabledAmenityTiers.set(category, selected);
+            syncTierInputs();
+            applyAmenityFilter();
+          });
+
+          tierInputs.push(tierInput);
+          tierTextWrap.appendChild(tierTitle);
+          tierTextWrap.appendChild(tierSubtitle);
+          tierRow.appendChild(tierTextWrap);
+          tierRow.appendChild(tierInput);
+          tierList.appendChild(tierRow);
+        });
+
+        tierDetails.appendChild(tierList);
+        card.appendChild(tierDetails);
+        syncTierInputs();
+      }
+
+      elements.amenityControls.appendChild(card);
     });
   updateAmenityNote();
 }
@@ -313,10 +454,17 @@ function maybeBuildDebugGridControl() {
 }
 
 function amenityPopupHtml(properties) {
-  const title = properties.name || properties.category || "Amenity";
+  const title = properties.name || formatAmenityLabel(properties.category || "Amenity");
   const details = [];
-  if (properties.name && properties.category) {
-    details.push("<p>" + escapeHtml(properties.category) + "</p>");
+  const categoryLabel = formatAmenityLabel(properties.category || "");
+  const tierLabel = formatAmenityLabel(properties.tier || "");
+  if (properties.name && categoryLabel) {
+    const categoryText = tierLabel
+      ? categoryLabel + " • " + tierLabel
+      : categoryLabel;
+    details.push("<p>" + escapeHtml(categoryText) + "</p>");
+  } else if (tierLabel) {
+    details.push("<p>" + escapeHtml(tierLabel) + "</p>");
   }
   if (properties.source_ref) {
     details.push("<p>" + escapeHtml(properties.source_ref) + "</p>");
@@ -570,6 +718,12 @@ function initializeMap() {
 function initializeApp(runtime) {
   state.runtime = runtime;
   state.gridVisible = true;
+  state.enabledAmenityCategories = new Set();
+  state.enabledAmenityTiers = new Map(
+    Object.entries(defaultAmenityTierSelections(runtime)).map(function (entry) {
+      return [entry[0], new Set(entry[1])];
+    })
+  );
   buildAmenityControls();
   buildTransitControls();
   maybeBuildDebugGridControl();

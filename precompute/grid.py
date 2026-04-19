@@ -283,7 +283,7 @@ def _clone_grid_shells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 _DENSITY_NORMALIZED_CATEGORIES = ("shops", "transport", "healthcare")
 _MIN_DENSITY_AREA_RATIO = 0.25
-_PARK_SCORE_CATEGORY = "parks"
+_WEIGHTED_UNIT_CATEGORIES = frozenset({"shops", "healthcare", "parks"})
 
 
 def _normalized_area_ratio(effective_area_ratio: Any) -> float:
@@ -302,17 +302,21 @@ def score_cell(
     *,
     effective_area_ratio: float = 1.0,
     density_normalized_categories: tuple[str, ...] = _DENSITY_NORMALIZED_CATEGORIES,
-    park_area_units: float | None = None,
+    weighted_units: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], float]:
     normalized_ratio = _normalized_area_ratio(effective_area_ratio)
     per_category: dict[str, float] = {}
     for category, cap in CAPS.items():
         raw_count = counts.get(category, 0)
         effective_count = float(raw_count)
-        if category == _PARK_SCORE_CATEGORY and park_area_units is not None:
-            effective_count = float(park_area_units) / normalized_ratio
+        if weighted_units is not None and category in _WEIGHTED_UNIT_CATEGORIES:
+            effective_count = float(weighted_units.get(category, 0.0))
+        if category == "parks":
+            effective_count = effective_count / normalized_ratio
         elif category in density_normalized_categories:
             effective_count = raw_count / normalized_ratio
+            if weighted_units is not None and category in _WEIGHTED_UNIT_CATEGORIES:
+                effective_count = float(weighted_units.get(category, 0.0)) / normalized_ratio
         per_category[category] = min(effective_count / cap, 1.0) * 25.0
     return per_category, sum(per_category.values())
 
@@ -321,7 +325,7 @@ def score_cells(
     cells: list[dict[str, Any]],
     counts_by_node: dict[Any, dict[str, int]],
     cell_nodes: list[Any],
-    park_area_units_by_node: dict[Any, float] | None = None,
+    weighted_units_by_node: dict[Any, dict[str, int]] | None = None,
 ) -> None:
     if not cells:
         return
@@ -331,10 +335,13 @@ def score_cells(
         scores, total = score_cell(
             counts,
             effective_area_ratio=float(cell.get("effective_area_ratio", 1.0)),
-            park_area_units=(
+            weighted_units=(
                 None
-                if park_area_units_by_node is None
-                else float(park_area_units_by_node.get(node, 0.0))
+                if weighted_units_by_node is None
+                else {
+                    str(category): float(value)
+                    for category, value in dict(weighted_units_by_node.get(node, {})).items()
+                }
             ),
         )
         cell["counts"] = counts

@@ -586,6 +586,7 @@ class DbReadTests(TestCase):
                 "osm_id": 123,
                 "point_geom": "park-point",
                 "park_area_m2": 125_000.0,
+                "footprint_area_m2": 125_000.0,
             },
             {
                 "category": "parks",
@@ -595,6 +596,7 @@ class DbReadTests(TestCase):
                 "osm_id": 456,
                 "point_geom": "playground-point",
                 "park_area_m2": 0.0,
+                "footprint_area_m2": 0.0,
             },
         ]
         root = SimpleNamespace(
@@ -615,11 +617,13 @@ class DbReadTests(TestCase):
         self.assertEqual(rows[0]["tags_json"], {"name": "Town Park", "operator": "Council"})
         self.assertEqual(rows[0]["geom"], "park-point")
         self.assertEqual(rows[0]["park_area_m2"], 125_000.0)
+        self.assertEqual(rows[0]["footprint_area_m2"], 125_000.0)
         self.assertEqual(rows[1]["source_ref"], "node/456")
         self.assertEqual(rows[1]["source"], "osm_local_pbf")
         self.assertEqual(rows[1]["name"], "Playground")
         self.assertEqual(rows[1]["tags_json"], {"name": "Playground"})
         self.assertEqual(rows[1]["park_area_m2"], 0.0)
+        self.assertEqual(rows[1]["footprint_area_m2"], 0.0)
 
     def test_load_source_amenity_rows_excludes_non_operational_pois_and_reports_count(self) -> None:
         engine = mock.MagicMock()
@@ -634,6 +638,7 @@ class DbReadTests(TestCase):
                 "osm_id": 101,
                 "point_geom": "vacant-point",
                 "park_area_m2": 0.0,
+                "footprint_area_m2": 0.0,
             },
             {
                 "category": "shops",
@@ -643,6 +648,7 @@ class DbReadTests(TestCase):
                 "osm_id": 102,
                 "point_geom": "penneys-point",
                 "park_area_m2": 0.0,
+                "footprint_area_m2": 0.0,
             },
             {
                 "category": "shops",
@@ -652,6 +658,7 @@ class DbReadTests(TestCase):
                 "osm_id": 103,
                 "point_geom": "old-shop-point",
                 "park_area_m2": 0.0,
+                "footprint_area_m2": 0.0,
             },
         ]
         root = SimpleNamespace(
@@ -679,6 +686,7 @@ class DbReadTests(TestCase):
                     "tags_json": {"name": "Penneys", "shop": "clothes", "brand": "Primark"},
                     "geom": "penneys-point",
                     "park_area_m2": 0.0,
+                    "footprint_area_m2": 0.0,
                 }
             ],
         )
@@ -820,6 +828,11 @@ class TextCleanupTests(TestCase):
         text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")
         self.assertNotIn("network_ways", text)
         self.assertNotIn("object.tags.highway then", text)
+
+    def test_lua_does_not_treat_garden_as_park(self) -> None:
+        text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")
+        self.assertIn("local park_values = {", text)
+        self.assertNotIn("garden = true", text)
 
     def test_schema_no_drive_or_network_tables(self) -> None:
         text = Path("schema.sql").read_text(encoding="utf-8")

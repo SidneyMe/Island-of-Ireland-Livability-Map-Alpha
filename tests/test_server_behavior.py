@@ -42,6 +42,12 @@ class _FakeService:
             "surface_tile_url_template": "/tiles/surface/{resolution_m}/{z}/{x}/{y}.png",
             "inspect_url": "/api/inspect",
             "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+            "amenity_tier_counts": {
+                "shops": {"corner": 3, "regular": 9},
+                "transport": {},
+                "healthcare": {"local": 1},
+                "parks": {"district": 3},
+            },
             "category_colors": config.CATEGORY_COLORS,
             "default_zoom": 6,
             "max_zoom": 19,
@@ -322,6 +328,12 @@ class RenderAndCliTests(TestCase):
                 "build_profile": "full",
                 "map_center": {"lat": 53.4, "lon": -7.7},
                 "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {"corner": 3, "regular": 9},
+                    "transport": {},
+                    "healthcare": {"local": 1},
+                    "parks": {"district": 3},
+                },
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "transport_reality_download_url": "/exports/transport-reality.zip",
@@ -369,6 +381,7 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["transport_reality_download_url"], "/exports/transport-reality.zip")
         self.assertEqual(payload["transit_analysis_date"], "2026-04-14")
         self.assertEqual(payload["overture_dataset"], {"last_release": "2026-04-15.0"})
+        self.assertEqual(payload["amenity_tier_counts"]["shops"]["corner"], 3)
         self.assertNotIn("ov_shops", payload["category_colors"])
 
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
@@ -380,6 +393,12 @@ class RenderAndCliTests(TestCase):
             "summary_json": {
                 "map_center": {"lat": 53.4, "lon": -7.7},
                 "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {},
+                    "transport": {},
+                    "healthcare": {},
+                    "parks": {},
+                },
                 "transport_reality_enabled": False,
                 "service_deserts_enabled": False,
             },
@@ -414,6 +433,12 @@ class RenderAndCliTests(TestCase):
                 "build_profile": "dev",
                 "map_center": {"lat": 53.4, "lon": -7.7},
                 "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {"corner": 3, "regular": 9},
+                    "transport": {},
+                    "healthcare": {"local": 1},
+                    "parks": {"district": 3},
+                },
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "fine_resolutions_m": [],

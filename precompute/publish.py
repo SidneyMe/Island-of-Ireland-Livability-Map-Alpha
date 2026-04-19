@@ -64,6 +64,22 @@ def amenity_row_count(amenity_source_rows: list[dict[str, Any]]) -> int:
     return len(amenity_source_rows)
 
 
+def _amenity_tier_counts(
+    amenity_source_rows: list[dict[str, Any]] | None,
+    *,
+    categories: Iterable[str],
+) -> dict[str, dict[str, int]]:
+    counts = {str(category): {} for category in categories}
+    for row in amenity_source_rows or []:
+        category = str(row.get("category") or "")
+        tier = row.get("tier")
+        if not category or not isinstance(tier, str) or not tier:
+            continue
+        bucket = counts.setdefault(category, {})
+        bucket[tier] = int(bucket.get(tier, 0)) + 1
+    return counts
+
+
 def iter_walk_rows_impl(
     walk_grids: dict[int, list[dict[str, Any]]],
     created_at: datetime,
@@ -176,6 +192,7 @@ def iter_amenity_rows_impl(
                 "config_hash": hashes.config_hash,
                 "import_fingerprint": hashes.import_fingerprint,
                 "category": row["category"],
+                "tier": row.get("tier"),
                 "geom": Point(row["lon"], row["lat"]),
                 "source": str(row.get("source") or "osm_local_pbf"),
                 "source_ref": row["source_ref"],
@@ -217,6 +234,7 @@ def summary_json_impl(
     study_area_wgs84,
     walk_grids: dict[int, list[dict[str, Any]]],
     amenity_data: dict[str, list[tuple[float, float]]],
+    amenity_source_rows: list[dict[str, Any]] | None = None,
     *,
     hashes,
     build_profile: str,
@@ -246,6 +264,10 @@ def summary_json_impl(
         "map_center": {"lat": centre.y, "lon": centre.x},
         "walk_cell_counts": {str(size): len(cells) for size, cells in walk_grids.items()},
         "amenity_counts": {category: len(points) for category, points in amenity_data.items()},
+        "amenity_tier_counts": _amenity_tier_counts(
+            amenity_source_rows,
+            categories=amenity_data.keys(),
+        ),
         "output_html": output_html,
         "zoom_breaks": zoom_breaks,
         "surface_zoom_breaks": zoom_breaks,

@@ -765,11 +765,13 @@ def _summary_json(
     study_area_wgs84,
     walk_grids: dict[int, list[dict[str, Any]]],
     amenity_data: dict[str, list[tuple[float, float]]],
+    amenity_source_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return _publish.summary_json_impl(
         study_area_wgs84,
         walk_grids,
         amenity_data,
+        amenity_source_rows,
         hashes=_STATE.hashes,
         build_profile=_STATE.profile,
         source_state=_STATE.source_state,

@@ -13,6 +13,7 @@ from typing import Any, Literal, cast
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
+from overture.loader import category_map_signature as overture_category_map_signature
 from overture.loader import dataset_info as overture_dataset_info
 from overture.loader import dataset_signature as overture_dataset_signature
 from pyproj import Transformer
@@ -49,7 +50,7 @@ IMPORTER_CONFIG_VERSION = "2026-04-08"
 GTFS_DIR = BASE_DIR / "gtfs"
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
 TRANSIT_REALITY_ALGO_VERSION = 5
-AMENITY_MERGE_ALGO_VERSION = 3
+AMENITY_MERGE_ALGO_VERSION = 4
 
 
 def _optional_positive_int_env(name: str) -> int | None:
@@ -301,7 +302,46 @@ WALK_RADIUS_M = 500
 WALKGRAPH_BBOX_PADDING_M = WALK_RADIUS_M
 
 
-CAPS = {"shops": 5, "transport": 5, "healthcare": 3, "parks": 2}
+CAPS = {"shops": 6, "transport": 5, "healthcare": 5, "parks": 5}
+SHOP_TIER_UNITS = {"corner": 1, "regular": 2, "supermarket": 3, "mall": 5}
+HEALTHCARE_TIER_UNITS = {
+    "local": 1,
+    "clinic": 2,
+    "hospital": 3,
+    "emergency_hospital": 4,
+}
+PARK_TIER_UNITS = {
+    "pocket": 1,
+    "neighbourhood": 2,
+    "district": 3,
+    "regional": 4,
+}
+SHOP_CORNER_VALUES = frozenset({"convenience", "kiosk"})
+SHOP_CORNER_CHAINS = frozenset({"spar", "centra", "londis", "gala", "mace"})
+OVERTURE_SHOP_CORNER_VALUES = frozenset({"convenience_store"})
+SHOP_SUPERMARKET_VALUES = frozenset({"supermarket", "wholesale"})
+SHOP_SUPERMARKET_CHAINS = frozenset(
+    {"tesco", "supervalu", "dunnes", "lidl", "aldi"}
+)
+SHOP_MALL_VALUES = frozenset({"mall"})
+SHOP_SMALL_SUPERMARKET_MAX_FOOTPRINT_M2 = 1500.0
+SHOP_MALL_MIN_FOOTPRINT_M2 = 8000.0
+HEALTHCARE_LOCAL_VALUES = frozenset({"pharmacy", "doctors", "dentist"})
+HEALTHCARE_CLINIC_VALUES = frozenset({"clinic", "health_centre"})
+HEALTHCARE_HOSPITAL_VALUES = frozenset({"hospital"})
+HEALTHCARE_EMERGENCY_VALUES = frozenset({"yes", "department"})
+PARK_POCKET_MAX_AREA_M2 = 5_000.0
+PARK_NEIGHBOURHOOD_MAX_AREA_M2 = 50_000.0
+PARK_DISTRICT_MAX_AREA_M2 = 250_000.0
+OVERTURE_HEALTHCARE_LOCAL_VALUES = frozenset({"pharmacy", "doctor", "dentist"})
+OVERTURE_HEALTHCARE_CLINIC_VALUES = frozenset(
+    {"medical_clinic", "health_center", "urgent_care_center"}
+)
+OVERTURE_PARK_POCKET_VALUES = frozenset({"playground"})
+OVERTURE_PARK_NEIGHBOURHOOD_VALUES = frozenset(
+    {"park", "recreation_ground"}
+)
+OVERTURE_PARK_REGIONAL_VALUES = frozenset({"nature_reserve", "national_park"})
 OUTPUT_HTML = "ireland_livability.html"
 ENABLE_STREET_SEARCH = False
 DEFAULT_SERVER_HOST = "127.0.0.1"
@@ -318,7 +358,7 @@ TAGS = {
         "amenity": ["pharmacy", "hospital", "clinic", "doctors", "dentist", "health_centre"],
     },
     "parks": {
-        "leisure": ["park", "playground", "nature_reserve", "garden"],
+        "leisure": ["park", "playground", "nature_reserve"],
     },
 }
 
@@ -332,9 +372,9 @@ CATEGORY_COLORS = {
 
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
-PMTILES_SCHEMA_VERSION = 2
+PMTILES_SCHEMA_VERSION = 3
 GRID_GEOMETRY_SCHEMA_VERSION = 4
-CACHE_SCHEMA_VERSION = 9
+CACHE_SCHEMA_VERSION = 10
 FORCE_RECOMPUTE = False
 USE_COMPRESSED_CACHE = True
 MANIFEST_NAME = "manifest.json"
@@ -605,6 +645,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     roi_meta = _file_meta(ROI_BOUNDARY_PATH)
     ni_meta = _file_meta(NI_BOUNDARY_PATH)
     overture_info = overture_dataset_info()
+    overture_category_signature = overture_category_map_signature()
     overture_signature = overture_dataset_signature()
 
     geo_params = {
@@ -639,6 +680,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "tags": TAGS,
         "walk_radius_m": WALK_RADIUS_M,
         "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
+        "overture_category_map_signature": overture_category_signature,
         "overture_dataset_signature": overture_signature,
         "overture_release": overture_info.get("last_release"),
     }
@@ -657,6 +699,29 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     score_params = {
         "reach_hash": reach_hash,
         "caps": CAPS,
+        "shop_tier_units": SHOP_TIER_UNITS,
+        "healthcare_tier_units": HEALTHCARE_TIER_UNITS,
+        "park_tier_units": PARK_TIER_UNITS,
+        "shop_corner_values": sorted(SHOP_CORNER_VALUES),
+        "shop_corner_chains": sorted(SHOP_CORNER_CHAINS),
+        "overture_shop_corner_values": sorted(OVERTURE_SHOP_CORNER_VALUES),
+        "shop_supermarket_values": sorted(SHOP_SUPERMARKET_VALUES),
+        "shop_supermarket_chains": sorted(SHOP_SUPERMARKET_CHAINS),
+        "shop_mall_values": sorted(SHOP_MALL_VALUES),
+        "shop_small_supermarket_max_footprint_m2": SHOP_SMALL_SUPERMARKET_MAX_FOOTPRINT_M2,
+        "shop_mall_min_footprint_m2": SHOP_MALL_MIN_FOOTPRINT_M2,
+        "healthcare_local_values": sorted(HEALTHCARE_LOCAL_VALUES),
+        "healthcare_clinic_values": sorted(HEALTHCARE_CLINIC_VALUES),
+        "healthcare_hospital_values": sorted(HEALTHCARE_HOSPITAL_VALUES),
+        "healthcare_emergency_values": sorted(HEALTHCARE_EMERGENCY_VALUES),
+        "park_pocket_max_area_m2": PARK_POCKET_MAX_AREA_M2,
+        "park_neighbourhood_max_area_m2": PARK_NEIGHBOURHOOD_MAX_AREA_M2,
+        "park_district_max_area_m2": PARK_DISTRICT_MAX_AREA_M2,
+        "overture_healthcare_local_values": sorted(OVERTURE_HEALTHCARE_LOCAL_VALUES),
+        "overture_healthcare_clinic_values": sorted(OVERTURE_HEALTHCARE_CLINIC_VALUES),
+        "overture_park_pocket_values": sorted(OVERTURE_PARK_POCKET_VALUES),
+        "overture_park_neighbourhood_values": sorted(OVERTURE_PARK_NEIGHBOURHOOD_VALUES),
+        "overture_park_regional_values": sorted(OVERTURE_PARK_REGIONAL_VALUES),
         "coarse_vector_resolutions_m": sorted(COARSE_VECTOR_RESOLUTIONS_M),
         "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
         "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
@@ -753,6 +818,7 @@ def build_hashes_for_import(
     normalized_profile = normalize_build_profile(profile)
     base_hashes = build_config_hashes(normalized_profile)
     overture_info = overture_dataset_info()
+    overture_category_signature = overture_category_map_signature()
     overture_signature = overture_dataset_signature()
     geo_hash = hash_dict(
         {
@@ -768,6 +834,7 @@ def build_hashes_for_import(
             "tags": TAGS,
             "walk_radius_m": WALK_RADIUS_M,
             "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
+            "overture_category_map_signature": overture_category_signature,
             "overture_dataset_signature": overture_signature,
             "overture_release": overture_info.get("last_release"),
         }
@@ -785,6 +852,29 @@ def build_hashes_for_import(
         {
             "reach_hash": reach_hash,
             "caps": CAPS,
+            "shop_tier_units": SHOP_TIER_UNITS,
+            "healthcare_tier_units": HEALTHCARE_TIER_UNITS,
+            "park_tier_units": PARK_TIER_UNITS,
+            "shop_corner_values": sorted(SHOP_CORNER_VALUES),
+            "shop_corner_chains": sorted(SHOP_CORNER_CHAINS),
+            "overture_shop_corner_values": sorted(OVERTURE_SHOP_CORNER_VALUES),
+            "shop_supermarket_values": sorted(SHOP_SUPERMARKET_VALUES),
+            "shop_supermarket_chains": sorted(SHOP_SUPERMARKET_CHAINS),
+            "shop_mall_values": sorted(SHOP_MALL_VALUES),
+            "shop_small_supermarket_max_footprint_m2": SHOP_SMALL_SUPERMARKET_MAX_FOOTPRINT_M2,
+            "shop_mall_min_footprint_m2": SHOP_MALL_MIN_FOOTPRINT_M2,
+            "healthcare_local_values": sorted(HEALTHCARE_LOCAL_VALUES),
+            "healthcare_clinic_values": sorted(HEALTHCARE_CLINIC_VALUES),
+            "healthcare_hospital_values": sorted(HEALTHCARE_HOSPITAL_VALUES),
+            "healthcare_emergency_values": sorted(HEALTHCARE_EMERGENCY_VALUES),
+            "park_pocket_max_area_m2": PARK_POCKET_MAX_AREA_M2,
+            "park_neighbourhood_max_area_m2": PARK_NEIGHBOURHOOD_MAX_AREA_M2,
+            "park_district_max_area_m2": PARK_DISTRICT_MAX_AREA_M2,
+            "overture_healthcare_local_values": sorted(OVERTURE_HEALTHCARE_LOCAL_VALUES),
+            "overture_healthcare_clinic_values": sorted(OVERTURE_HEALTHCARE_CLINIC_VALUES),
+            "overture_park_pocket_values": sorted(OVERTURE_PARK_POCKET_VALUES),
+            "overture_park_neighbourhood_values": sorted(OVERTURE_PARK_NEIGHBOURHOOD_VALUES),
+            "overture_park_regional_values": sorted(OVERTURE_PARK_REGIONAL_VALUES),
             "coarse_vector_resolutions_m": sorted(COARSE_VECTOR_RESOLUTIONS_M),
             "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
             "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
