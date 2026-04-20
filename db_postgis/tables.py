@@ -34,6 +34,8 @@ grid_walk = Table(
     Column("effective_area_m2", Float, nullable=False),
     Column("effective_area_ratio", Float, nullable=False),
     Column("counts_json", JSONB, nullable=False),
+    Column("cluster_counts_json", JSONB, nullable=False),
+    Column("effective_units_json", JSONB, nullable=False),
     Column("scores_json", JSONB, nullable=False),
     Column("total_score", Float, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),

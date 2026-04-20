@@ -153,8 +153,11 @@ def can_finalize_reach_tier(
     return (
         amenity_data is not None
         and cache_load_for_finalize("walk_nodes_by_cat", reach_cache_dir) is not None
+        and cache_load_for_finalize("walk_cluster_nodes_by_cat", reach_cache_dir) is not None
         and cache_load_large_for_finalize("walk_counts_by_origin_node", reach_cache_dir) is not None
-        and cache_load_large_for_finalize("walk_weighted_units_by_origin_node", reach_cache_dir)
+        and cache_load_large_for_finalize("walk_cluster_counts_by_origin_node", reach_cache_dir)
+        is not None
+        and cache_load_large_for_finalize("walk_effective_units_by_origin_node", reach_cache_dir)
         is not None
     )
 
@@ -182,11 +185,11 @@ def _has_recoverable_reach_artefacts(
         (
             cache_load_for_finalize("amenities", reach_cache_dir) is not None,
             cache_load_for_finalize("walk_nodes_by_cat", reach_cache_dir) is not None,
+            cache_load_for_finalize("walk_cluster_nodes_by_cat", reach_cache_dir) is not None,
             cache_load_large_for_finalize("walk_counts_by_origin_node", reach_cache_dir) is not None,
-            cache_load_large_for_finalize(
-                "walk_weighted_units_by_origin_node",
-                reach_cache_dir,
-            )
+            cache_load_large_for_finalize("walk_cluster_counts_by_origin_node", reach_cache_dir)
+            is not None,
+            cache_load_large_for_finalize("walk_effective_units_by_origin_node", reach_cache_dir)
             is not None,
         )
     )

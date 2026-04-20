@@ -494,6 +494,11 @@ function serviceDesertPopupHtml(properties) {
   );
 }
 
+function formatEffectiveUnits(value) {
+  const numeric = Number(value || 0);
+  return numeric.toFixed(2).replace(/\.?0+$/, "");
+}
+
 function inspectPopupHtml(payload) {
   if (!payload.valid_land) {
     return (
@@ -508,8 +513,16 @@ function inspectPopupHtml(payload) {
   const listHtml = SCORE_SECTIONS.map(function (category) {
     const title = category.charAt(0).toUpperCase() + category.slice(1);
     const count = Number((payload.counts || {})[category] || 0);
+    const clusterCount = Number((payload.cluster_counts || {})[category] || 0);
+    const effectiveUnits = formatEffectiveUnits((payload.effective_units || {})[category] || 0);
     const score = Number((payload.component_scores || {})[category] || 0).toFixed(1);
-    return "<li><strong>" + title + "</strong>: " + score + " points, " + count + " found</li>";
+    return (
+      "<li><strong>" + title + "</strong>: " +
+      count + " raw, " +
+      clusterCount + " clusters, " +
+      effectiveUnits + " effective units, " +
+      score + " points</li>"
+    );
   }).join("");
 
   return (
@@ -527,8 +540,16 @@ function coarseGridPopupHtml(properties) {
   const listHtml = SCORE_SECTIONS.map(function (category) {
     const title = category.charAt(0).toUpperCase() + category.slice(1);
     const count = Number(properties["count_" + category] || 0);
+    const clusterCount = Number(properties["cluster_" + category] || 0);
+    const effectiveUnits = formatEffectiveUnits(properties["effective_units_" + category] || 0);
     const score = Number(properties["score_" + category] || 0).toFixed(1);
-    return "<li><strong>" + title + "</strong>: " + score + " points, " + count + " found</li>";
+    return (
+      "<li><strong>" + title + "</strong>: " +
+      count + " raw, " +
+      clusterCount + " clusters, " +
+      effectiveUnits + " effective units, " +
+      score + " points</li>"
+    );
   }).join("");
 
   return (

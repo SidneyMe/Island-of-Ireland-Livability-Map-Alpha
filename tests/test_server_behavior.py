@@ -72,6 +72,8 @@ class _FakeService:
             "valid_land": True,
             "effective_area_ratio": 1.0,
             "counts": {"shops": 2},
+            "cluster_counts": {"shops": 1},
+            "effective_units": {"shops": 1.5},
             "component_scores": {"shops": 10.0, "transport": 0.0, "healthcare": 0.0, "parks": 0.0},
             "total_score": 10.0,
         }
@@ -263,6 +265,8 @@ class LocalServerEndpointTests(TestCase):
 
         self.assertEqual(payload["resolution_m"], 50)
         self.assertEqual(payload["visible_resolution_m"], 250)
+        self.assertEqual(payload["cluster_counts"], {"shops": 1})
+        self.assertEqual(payload["effective_units"], {"shops": 1.5})
         self.assertIn(("inspect", 53.4, -6.2, 15.0), service.calls)
 
     def test_surface_tile_endpoint_returns_404_when_fine_surface_disabled(self) -> None:

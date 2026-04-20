@@ -136,11 +136,38 @@ class NetworkLoaderTests(TestCase):
         self.assertIn("--amenity-weights-bin", command)
         self.assertIn("--category-count", command)
         self.assertIn("--cutoff-m", command)
+        self.assertIn("--output-mode", command)
+        self.assertIn("counts", command)
         self.assertIn("--out", command)
         self.assertEqual(
             _detail_messages(progress),
             ["walkgraph: loading graph", "walkgraph: completed"],
         )
+
+    def test_run_walkgraph_reachability_supports_decayed_unit_mode(self) -> None:
+        process = _FakeProcess(["loading graph\n", "completed\n"])
+
+        with (
+            mock.patch.object(loader, "ensure_walkgraph_subcommand_available"),
+            mock.patch.object(loader.subprocess, "Popen", return_value=process) as popen_mock,
+        ):
+            loader.run_walkgraph_reachability(
+                Path("cache/walk_graph"),
+                Path("cache/origins.bin"),
+                Path("cache/amenity_weights.bin"),
+                Path("cache/out.bin"),
+                category_count=4,
+                cutoff_m=500.0,
+                walkgraph_bin="walkgraph-dev",
+                output_mode="decayed-units",
+                half_distances_m=[150.0, 250.0, 300.0, 350.0],
+            )
+
+        command = popen_mock.call_args.args[0]
+        self.assertIn("--output-mode", command)
+        self.assertIn("decayed-units", command)
+        self.assertIn("--half-distances-m", command)
+        self.assertIn("150.000000,250.000000,300.000000,350.000000", command)
 
     def test_run_surface_shell_build_invokes_cli_and_streams_stderr(self) -> None:
         progress = mock.Mock()

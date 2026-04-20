@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -12,6 +12,12 @@ use walkgraph::serialize::{
 use walkgraph::surface::{run_surface, SurfaceArgs};
 
 const FORMAT_VERSION: u32 = 3;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum ReachabilityOutputMode {
+    Counts,
+    DecayedUnits,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "walkgraph")]
@@ -46,6 +52,10 @@ enum Commands {
         category_count: usize,
         #[arg(long)]
         cutoff_m: f32,
+        #[arg(long, value_enum, default_value_t = ReachabilityOutputMode::Counts)]
+        output_mode: ReachabilityOutputMode,
+        #[arg(long, value_delimiter = ',')]
+        half_distances_m: Vec<f32>,
         #[arg(long)]
         out: PathBuf,
     },
@@ -209,12 +219,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             amenity_weights_bin,
             category_count,
             cutoff_m,
+            output_mode,
+            half_distances_m,
             out,
         } => {
             let started_at = Instant::now();
             eprintln!(
-                "reachability: loading graph and inputs | category_count={} | cutoff_m={:.2}",
-                category_count, cutoff_m
+                "reachability: loading graph and inputs | category_count={} | cutoff_m={:.2} | mode={:?}",
+                category_count, cutoff_m, output_mode
             );
             run_reachability(
                 &graph_dir,
@@ -222,6 +234,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 &amenity_weights_bin,
                 category_count,
                 cutoff_m,
+                match output_mode {
+                    ReachabilityOutputMode::Counts => "counts",
+                    ReachabilityOutputMode::DecayedUnits => "decayed-units",
+                },
+                &half_distances_m,
                 &out,
             )?;
             eprintln!(

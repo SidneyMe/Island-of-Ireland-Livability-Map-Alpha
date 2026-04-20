@@ -59,6 +59,7 @@ from transit import (
 from walkgraph_support import ensure_walkgraph_subcommand_available
 
 from . import cache as _cache
+from . import amenity_clusters as _amenity_clusters
 from . import grid as _grid
 from . import network as _network
 from . import phases as _phases
@@ -227,6 +228,23 @@ def cache_save_large(key: str, data: Any, cache_dir: Path) -> None:
     )
 
 
+def cache_save_large_append_frame(key: str, frame: Any, cache_dir: Path) -> None:
+    _cache.cache_save_large_append_frame(
+        key,
+        frame,
+        cache_dir,
+        use_compressed_cache=USE_COMPRESSED_CACHE,
+    )
+
+
+def cache_reset_large_frames(key: str, cache_dir: Path) -> None:
+    _cache.cache_reset_large_frames(
+        key,
+        cache_dir,
+        use_compressed_cache=USE_COMPRESSED_CACHE,
+    )
+
+
 def _write_tier_manifest(
     tier_dir: Path,
     tier_name: str,
@@ -384,9 +402,11 @@ _clone_grid_shells = _grid._clone_grid_shells
 nearest_nodes = _network.nearest_nodes
 snap_amenities = _network.snap_amenities
 normalize_origin_node_ids = _network.normalize_origin_node_ids
+merge_normalized_origin_node_ids = _network.merge_normalized_origin_node_ids
 precompute_counts_by_node = _network.precompute_counts_by_node
 precompute_walk_counts_by_origin_node = _network.precompute_walk_counts_by_origin_node
 precompute_walk_weighted_totals_by_origin_node = _network.precompute_walk_weighted_totals_by_origin_node
+precompute_walk_decayed_units_by_origin_node = _network.precompute_walk_decayed_units_by_origin_node
 score_cell = _grid.score_cell
 score_cells = _grid.score_cells
 
@@ -507,12 +527,14 @@ def phase_reachability(
         cache_save=cache_save,
         cache_load_large=cache_load_large,
         cache_save_large=cache_save_large,
+        cache_save_large_append_frame=cache_save_large_append_frame,
+        cache_reset_large_frames=cache_reset_large_frames,
         mark_building=_mark_building,
         mark_complete=_mark_complete,
         snap_amenities=snap_amenities,
         normalize_origin_node_ids=normalize_origin_node_ids,
         precompute_walk_counts_by_origin_node=precompute_walk_counts_by_origin_node,
-        precompute_walk_weighted_totals_by_origin_node=precompute_walk_weighted_totals_by_origin_node,
+        precompute_walk_decayed_units_by_origin_node=precompute_walk_decayed_units_by_origin_node,
     )
 
 
@@ -542,6 +564,7 @@ def phase_grids(
         phase_networks=phase_networks,
         phase_reachability=phase_reachability,
         normalize_origin_node_ids=normalize_origin_node_ids,
+        merge_normalized_origin_node_ids=merge_normalized_origin_node_ids,
         build_grid=build_grid,
         elapsed=_elapsed,
         clone_grid_shells=_clone_grid_shells,

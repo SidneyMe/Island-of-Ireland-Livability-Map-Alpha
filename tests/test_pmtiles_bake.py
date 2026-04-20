@@ -21,6 +21,16 @@ class PmtilesBakeContractTests(TestCase):
                     sql,
                 )
                 self.assertIn(
+                    f"COALESCE((g.cluster_counts_json ->> '{category}')::integer, 0) "
+                    f"AS cluster_{category}",
+                    sql,
+                )
+                self.assertIn(
+                    f"COALESCE((g.effective_units_json ->> '{category}')::double precision, 0.0) "
+                    f"AS effective_units_{category}",
+                    sql,
+                )
+                self.assertIn(
                     f"COALESCE((g.scores_json ->> '{category}')::double precision, 0.0) "
                     f"AS score_{category}",
                     sql,
@@ -41,6 +51,8 @@ class PmtilesBakeContractTests(TestCase):
         for category in bake_pmtiles.GRID_AMENITY_CATEGORIES:
             with self.subTest(category=category):
                 self.assertEqual(grid_layer["fields"][f"count_{category}"], "Number")
+                self.assertEqual(grid_layer["fields"][f"cluster_{category}"], "Number")
+                self.assertEqual(grid_layer["fields"][f"effective_units_{category}"], "Number")
                 self.assertEqual(grid_layer["fields"][f"score_{category}"], "Number")
 
     def test_pmtiles_metadata_declares_transit_reality_and_service_desert_layers(self) -> None:

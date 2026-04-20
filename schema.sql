@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS grid_walk (
     effective_area_m2 DOUBLE PRECISION NOT NULL,
     effective_area_ratio DOUBLE PRECISION NOT NULL,
     counts_json JSONB NOT NULL,
+    cluster_counts_json JSONB NOT NULL,
+    effective_units_json JSONB NOT NULL,
     scores_json JSONB NOT NULL,
     total_score DOUBLE PRECISION NOT NULL,
     created_at TIMESTAMPTZ NOT NULL

@@ -130,7 +130,8 @@ class FineSurfaceRuntimeTests(TestCase):
                 {
                     "categories": ["shops", "transport", "healthcare", "parks"],
                     "counts_matrix": np.zeros((1, 4), dtype=np.uint32),
-                    "weighted_units_matrix": np.zeros((1, 4), dtype=np.float32),
+                    "cluster_counts_matrix": np.zeros((1, 4), dtype=np.uint32),
+                    "effective_units_matrix": np.zeros((1, 4), dtype=np.float32),
                     "reference_scores": np.zeros((1, 4), dtype=np.float32),
                     "reference_total": np.zeros(1, dtype=np.float32),
                 },
@@ -174,7 +175,8 @@ class FineSurfaceRuntimeTests(TestCase):
                 {
                     "categories": ["shops", "transport", "healthcare", "parks"],
                     "counts_matrix": np.zeros((4, 4), dtype=np.uint32),
-                    "weighted_units_matrix": np.zeros((4, 4), dtype=np.float32),
+                    "cluster_counts_matrix": np.zeros((4, 4), dtype=np.uint32),
+                    "effective_units_matrix": np.zeros((4, 4), dtype=np.float32),
                     "reference_scores": np.zeros((4, 4), dtype=np.float32),
                     "reference_total": np.zeros(4, dtype=np.float32),
                 },
@@ -240,7 +242,8 @@ class FineSurfaceRuntimeTests(TestCase):
                 {
                     "categories": ["shops", "transport", "healthcare", "parks"],
                     "counts_matrix": np.array([[1, 0, 0, 0]], dtype=np.uint32),
-                    "weighted_units_matrix": np.array([[6.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+                    "cluster_counts_matrix": np.array([[1, 0, 0, 0]], dtype=np.uint32),
+                    "effective_units_matrix": np.array([[6.0, 0.0, 0.0, 0.0]], dtype=np.float32),
                     "reference_scores": np.array([[25.0, 0.0, 0.0, 0.0]], dtype=np.float32),
                     "reference_total": np.array([25.0], dtype=np.float32),
                 },
@@ -278,6 +281,8 @@ class FineSurfaceRuntimeTests(TestCase):
         self.assertEqual(payload["resolution_m"], 50)
         self.assertEqual(payload["visible_resolution_m"], 250)
         self.assertEqual(payload["counts"], {"shops": 1})
+        self.assertEqual(payload["cluster_counts"], {"shops": 1})
+        self.assertEqual(payload["effective_units"], {"shops": 6.0})
         self.assertEqual(payload["component_scores"]["shops"], 25.0)
         self.assertEqual(payload["total_score"], 25.0)
 

@@ -75,6 +75,8 @@ def _grid_layer_fields() -> dict[str, str]:
     }
     for category in GRID_AMENITY_CATEGORIES:
         fields[f"count_{category}"] = "Number"
+        fields[f"cluster_{category}"] = "Number"
+        fields[f"effective_units_{category}"] = "Number"
         fields[f"score_{category}"] = "Number"
     return fields
 

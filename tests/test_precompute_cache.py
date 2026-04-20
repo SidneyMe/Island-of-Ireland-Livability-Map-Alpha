@@ -78,6 +78,125 @@ class PrecomputeCacheTests(TestCase):
                 payload,
             )
 
+    def test_chunk_only_large_cache_counts_as_existing_and_loads(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            payload = {2: {"shops": 2}}
+
+            cache.cache_save_large_append_frame(
+                "walk",
+                payload,
+                cache_dir,
+                use_compressed_cache=True,
+            )
+
+            self.assertTrue(
+                cache.cache_exists_large(
+                    "walk",
+                    cache_dir,
+                    force_recompute=False,
+                    tier_valid={cache_dir: True},
+                    use_compressed_cache=True,
+                )
+            )
+            self.assertEqual(
+                cache.cache_load_large(
+                    "walk",
+                    cache_dir,
+                    force_recompute=False,
+                    tier_valid={cache_dir: True},
+                    use_compressed_cache=True,
+                ),
+                payload,
+            )
+
+    def test_large_cache_load_merges_base_blob_and_chunk_overlay(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            base_payload = {1: {"shops": 1}}
+            chunk_payload = {2: {"shops": 2}}
+
+            cache.cache_save_large(
+                "walk",
+                base_payload,
+                cache_dir,
+                use_compressed_cache=True,
+            )
+            cache.cache_save_large_append_frame(
+                "walk",
+                chunk_payload,
+                cache_dir,
+                use_compressed_cache=True,
+            )
+
+            self.assertEqual(
+                cache.cache_load_large(
+                    "walk",
+                    cache_dir,
+                    force_recompute=False,
+                    tier_valid={cache_dir: True},
+                    use_compressed_cache=True,
+                ),
+                {**base_payload, **chunk_payload},
+            )
+
+    def test_large_cache_finalize_load_merges_base_blob_and_chunk_overlay(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            base_payload = {1: {"shops": 1}}
+            chunk_payload = {2: {"shops": 2}}
+
+            cache.cache_save_large(
+                "walk",
+                base_payload,
+                cache_dir,
+                use_compressed_cache=True,
+            )
+            cache.cache_save_large_append_frame(
+                "walk",
+                chunk_payload,
+                cache_dir,
+                use_compressed_cache=True,
+            )
+
+            self.assertEqual(
+                cache.cache_load_large_for_finalize(
+                    "walk",
+                    cache_dir,
+                    force_recompute=False,
+                    use_compressed_cache=True,
+                ),
+                {**base_payload, **chunk_payload},
+            )
+
+    def test_corrupted_chunk_cache_falls_back_to_base_blob(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            base_payload = {1: {"shops": 1}}
+            chunk_path = cache_dir / "walk.chunks.pkl.gz"
+
+            cache.cache_save_large(
+                "walk",
+                base_payload,
+                cache_dir,
+                use_compressed_cache=True,
+            )
+            chunk_path.write_bytes(b"not gzip")
+
+            with mock.patch("builtins.print"):
+                value = cache.cache_load_large(
+                    "walk",
+                    cache_dir,
+                    force_recompute=False,
+                    tier_valid={cache_dir: True},
+                    use_compressed_cache=True,
+                )
+
+            self.assertEqual(value, base_payload)
+            self.assertFalse(chunk_path.exists())
+            self.assertTrue(list(cache_dir.glob("walk.chunks.pkl.gz.bad*")))
+            self.assertTrue((cache_dir / "walk.pkl.gz").exists())
+
     def test_force_recompute_and_invalid_tier_skip_cache_reads(self) -> None:
         with TemporaryDirectory() as tmp_name:
             cache_dir = Path(tmp_name)

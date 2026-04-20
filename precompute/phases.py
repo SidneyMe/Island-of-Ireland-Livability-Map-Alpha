@@ -5,7 +5,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from .amenity_tiers import annotate_amenity_row, uses_weighted_units
+from config import DISTANCE_DECAY_HALF_DISTANCE_M, VARIETY_CLUSTER_RADIUS_M
+
+from .amenity_clusters import build_amenity_clusters
+from .amenity_tiers import annotate_amenity_row
 
 
 def _top_count_summary(counts: dict[str, Any], *, limit: int = 3) -> str:
@@ -35,9 +38,8 @@ def _merge_counts_lookup(
     existing_counts: dict[int, dict[str, int]],
     new_counts: dict[int, dict[str, int]],
 ) -> dict[int, dict[str, int]]:
-    merged_counts = dict(existing_counts)
-    merged_counts.update(new_counts)
-    return {node: merged_counts[node] for node in sorted(merged_counts)}
+    existing_counts.update(new_counts)
+    return existing_counts
 
 
 def _park_area_m2_from_row(row: dict[str, Any]) -> float:
@@ -60,31 +62,47 @@ def _footprint_area_m2_from_row(row: dict[str, Any]) -> float:
     return area_m2
 
 
-def _weighted_node_rows(
-    amenity_source_rows: list[dict[str, Any]],
+def _base_unit_node_rows(
+    amenity_cluster_rows: list[dict[str, Any]],
     nodes_by_category: dict[str, list[int]],
 ) -> dict[str, list[tuple[int, int]]]:
-    weighted_rows: dict[str, list[tuple[int, int]]] = {}
+    base_unit_rows: dict[str, list[tuple[int, int]]] = {}
     for category, category_nodes in nodes_by_category.items():
-        if not uses_weighted_units(str(category)):
-            continue
         category_rows = [
-            row for row in amenity_source_rows if str(row.get("category") or "") == str(category)
+            row
+            for row in amenity_cluster_rows
+            if str(row.get("category") or "") == str(category)
         ]
         if len(category_rows) != len(category_nodes):
             raise ValueError(
-                "Cached amenity rows and snapped amenity nodes are out of sync for "
+                "Cached amenity cluster rows and snapped cluster nodes are out of sync for "
                 f"category={category!r}: {len(category_rows)} rows vs {len(category_nodes)} nodes."
             )
         weight_rows: list[tuple[int, int]] = []
         for row, node in zip(category_rows, category_nodes):
-            score_units = max(int(row.get("score_units") or 0), 0)
-            if score_units <= 0:
+            base_units = max(int(row.get("base_units") or 0), 0)
+            if base_units <= 0:
                 continue
-            weight_rows.append((int(node), score_units))
+            weight_rows.append((int(node), base_units))
         if weight_rows:
-            weighted_rows[str(category)] = weight_rows
-    return weighted_rows
+            base_unit_rows[str(category)] = weight_rows
+    return base_unit_rows
+
+
+def _amenity_points_from_rows(
+    amenity_rows: list[dict[str, Any]],
+    *,
+    categories: list[str],
+) -> dict[str, list[tuple[float, float]]]:
+    amenity_points = {category: [] for category in categories}
+    for row in amenity_rows:
+        category = str(row.get("category") or "")
+        if not category:
+            continue
+        amenity_points.setdefault(category, []).append(
+            (float(row["lat"]), float(row["lon"]))
+        )
+    return amenity_points
 
 
 def _record_substep(
@@ -147,12 +165,10 @@ def _load_or_build_walk_origin_nodes(
     if cached_origin_nodes is not None:
         return list(cached_origin_nodes), False
 
-    walk_origin_nodes = list(
-        normalize_origin_node_ids(
-            node
-            for size in sorted(walk_cell_nodes_by_size)
-            for node in walk_cell_nodes_by_size[size]
-        )
+    walk_origin_nodes = normalize_origin_node_ids(
+        node
+        for size in sorted(walk_cell_nodes_by_size)
+        for node in walk_cell_nodes_by_size[size]
     )
     cache_save(origin_key, walk_origin_nodes, cache_dir)
     return walk_origin_nodes, True
@@ -249,14 +265,23 @@ def phase_amenities_impl(
     )
     amenity_source_rows = cache_load("amenities", cache_dir)
     if amenity_source_rows is not None:
-        amenity_data = {category: [] for category in tags}
-        for row in amenity_source_rows:
-            amenity_data.setdefault(row["category"], []).append((row["lat"], row["lon"]))
+        amenity_data = _amenity_points_from_rows(amenity_source_rows, categories=tags)
+        amenity_cluster_rows = cache_load("amenity_clusters", cache_dir)
+        if amenity_cluster_rows is None:
+            _, amenity_cluster_rows = build_amenity_clusters(
+                amenity_source_rows,
+                categories=tags,
+                cluster_radius_m=VARIETY_CLUSTER_RADIUS_M,
+            )
+            cache_save("amenity_clusters", amenity_cluster_rows, cache_dir)
         total = len(amenity_source_rows)
         tracker.credit_phase(
             "amenities",
             len(tags),
-            detail=f"{total:,} cached features",
+            detail=(
+                f"{total:,} cached features | "
+                f"{len(amenity_cluster_rows):,} cached scoring clusters"
+            ),
             force_log=True,
         )
         tracker.finish_phase("amenities", "cached", detail=f"{total:,} features")
@@ -383,10 +408,20 @@ def phase_amenities_impl(
             detail=f"{category} ({counts_by_category.get(category, 0):,} features)",
         )
     cache_save("amenities", amenity_source_rows, cache_dir)
+    _, amenity_cluster_rows = build_amenity_clusters(
+        amenity_source_rows,
+        categories=tags,
+        cluster_radius_m=VARIETY_CLUSTER_RADIUS_M,
+    )
+    cache_save("amenity_clusters", amenity_cluster_rows, cache_dir)
     if can_finalize_reach_tier(amenity_data):
         mark_complete(cache_dir, "reach", reach_hash, "amenities")
     total = len(amenity_source_rows)
-    tracker.finish_phase("amenities", "completed", detail=f"{total:,} features")
+    tracker.finish_phase(
+        "amenities",
+        "completed",
+        detail=f"{total:,} features | {len(amenity_cluster_rows):,} scoring clusters",
+    )
     return amenity_data, amenity_source_rows
 
 
@@ -472,12 +507,14 @@ def phase_reachability_impl(
     cache_save,
     cache_load_large,
     cache_save_large,
+    cache_save_large_append_frame,
+    cache_reset_large_frames,
     mark_building,
     mark_complete,
     snap_amenities,
     normalize_origin_node_ids,
     precompute_walk_counts_by_origin_node,
-    precompute_walk_weighted_totals_by_origin_node,
+    precompute_walk_decayed_units_by_origin_node,
 ):
     if walk_origin_node_ids is None:
         raise ValueError("walk_origin_node_ids is required for walk reachability")
@@ -503,22 +540,71 @@ def phase_reachability_impl(
         _record_substep(tracker, "reachability", "walk_amenity_snap", started_at, force_log=True)
         cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
 
+    amenity_cluster_rows = cache_load("amenity_clusters", cache_dir)
+    if amenity_cluster_rows is None:
+        _, amenity_cluster_rows = build_amenity_clusters(
+            amenity_source_rows,
+            categories=list(amenity_data),
+            cluster_radius_m=VARIETY_CLUSTER_RADIUS_M,
+        )
+        cache_save("amenity_clusters", amenity_cluster_rows, cache_dir)
+    amenity_cluster_data = _amenity_points_from_rows(
+        amenity_cluster_rows,
+        categories=list(amenity_data),
+    )
+
+    walk_cluster_nodes_by_category = cache_load("walk_cluster_nodes_by_cat", cache_dir)
+    if walk_cluster_nodes_by_category is None:
+        built_any = True
+        if cache_dir not in tiers_building:
+            mark_building(cache_dir, "reach", reach_hash, "walk_cluster_nodes")
+        started_at = time.perf_counter()
+        walk_cluster_nodes_by_category = snap_amenities(walk_graph, amenity_cluster_data)
+        _record_substep(
+            tracker,
+            "reachability",
+            "walk_cluster_snap",
+            started_at,
+            force_log=True,
+        )
+        cache_save("walk_cluster_nodes_by_cat", walk_cluster_nodes_by_category, cache_dir)
+
     walk_counts_by_node = cache_load_large("walk_counts_by_origin_node", cache_dir)
     if walk_counts_by_node is None:
         walk_counts_by_node = {}
-    walk_weighted_units_by_node = cache_load_large("walk_weighted_units_by_origin_node", cache_dir)
-    if walk_weighted_units_by_node is None:
-        walk_weighted_units_by_node = {}
+        cache_reset_large_frames("walk_counts_by_origin_node", cache_dir)
+    walk_cluster_counts_by_node = cache_load_large(
+        "walk_cluster_counts_by_origin_node",
+        cache_dir,
+    )
+    if walk_cluster_counts_by_node is None:
+        walk_cluster_counts_by_node = {}
+        cache_reset_large_frames("walk_cluster_counts_by_origin_node", cache_dir)
+    walk_effective_units_by_node = cache_load_large(
+        "walk_effective_units_by_origin_node",
+        cache_dir,
+    )
+    if walk_effective_units_by_node is None:
+        walk_effective_units_by_node = {}
+        cache_reset_large_frames("walk_effective_units_by_origin_node", cache_dir)
 
     missing_count_nodes = tuple(
         node for node in requested_walk_origin_nodes if node not in walk_counts_by_node
     )
-    missing_weighted_nodes = tuple(
-        node for node in requested_walk_origin_nodes if node not in walk_weighted_units_by_node
+    missing_cluster_count_nodes = tuple(
+        node for node in requested_walk_origin_nodes if node not in walk_cluster_counts_by_node
+    )
+    missing_effective_nodes = tuple(
+        node for node in requested_walk_origin_nodes if node not in walk_effective_units_by_node
     )
     missing_origin_nodes = tuple(
-        node for node in requested_walk_origin_nodes if node not in walk_counts_by_node
-        or node not in walk_weighted_units_by_node
+        node
+        for node in requested_walk_origin_nodes
+        if (
+            node not in walk_counts_by_node
+            or node not in walk_cluster_counts_by_node
+            or node not in walk_effective_units_by_node
+        )
     )
 
     if missing_origin_nodes:
@@ -546,7 +632,16 @@ def phase_reachability_impl(
 
     if missing_origin_nodes:
         counts_cache_save_seconds = 0.0
-        weighted_cache_save_seconds = 0.0
+        cluster_counts_cache_save_seconds = 0.0
+        effective_units_cache_save_seconds = 0.0
+        progress_cb = tracker.phase_callback("reachability")
+        active_progress_target = None
+        if missing_count_nodes:
+            active_progress_target = "raw_counts"
+        elif missing_cluster_count_nodes:
+            active_progress_target = "cluster_counts"
+        elif missing_effective_nodes:
+            active_progress_target = "effective_units"
 
         if missing_count_nodes:
             routing_started_at = time.perf_counter()
@@ -555,16 +650,18 @@ def phase_reachability_impl(
                 nonlocal walk_counts_by_node, counts_cache_save_seconds
                 walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, chunk_counts)
                 save_started_at = time.perf_counter()
-                cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
+                cache_save_large_append_frame(
+                    "walk_counts_by_origin_node", chunk_counts, cache_dir
+                )
                 counts_cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
 
             new_walk_counts = precompute_walk_counts_by_origin_node(
                 walk_graph,
                 walk_nodes_by_category,
-                missing_origin_nodes,
+                missing_count_nodes,
                 cutoff=walk_radius_m,
                 weight="length_m",
-                progress_cb=tracker.phase_callback("reachability"),
+                progress_cb=progress_cb if active_progress_target == "raw_counts" else None,
                 detail="walk origins",
                 save_chunk_cb=_checkpoint_save_counts,
             )
@@ -575,7 +672,8 @@ def phase_reachability_impl(
                 routing_started_at,
                 force_log=True,
             )
-            walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, new_walk_counts)
+            if new_walk_counts:
+                walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, new_walk_counts)
             if counts_cache_save_seconds <= 0.0:
                 save_started_at = time.perf_counter()
                 cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
@@ -587,71 +685,137 @@ def phase_reachability_impl(
                 force_log=True,
             )
 
-        if missing_weighted_nodes:
-            weighted_rows = _weighted_node_rows(
-                amenity_source_rows,
-                walk_nodes_by_category,
-            )
-            if weighted_rows:
-                weighted_routing_started_at = time.perf_counter()
+        if missing_cluster_count_nodes:
+            cluster_routing_started_at = time.perf_counter()
 
-                def _checkpoint_save_weighted(chunk_totals: dict[int, dict[str, int]]) -> None:
-                    nonlocal walk_weighted_units_by_node, weighted_cache_save_seconds
-                    walk_weighted_units_by_node = _merge_counts_lookup(
-                        walk_weighted_units_by_node,
-                        chunk_totals,
+            def _checkpoint_save_cluster_counts(chunk_counts: dict[int, dict[str, int]]) -> None:
+                nonlocal walk_cluster_counts_by_node, cluster_counts_cache_save_seconds
+                walk_cluster_counts_by_node = _merge_counts_lookup(
+                    walk_cluster_counts_by_node,
+                    chunk_counts,
+                )
+                save_started_at = time.perf_counter()
+                cache_save_large_append_frame(
+                    "walk_cluster_counts_by_origin_node",
+                    chunk_counts,
+                    cache_dir,
+                )
+                cluster_counts_cache_save_seconds += max(
+                    time.perf_counter() - save_started_at,
+                    0.0,
+                )
+
+            new_cluster_counts = precompute_walk_counts_by_origin_node(
+                walk_graph,
+                walk_cluster_nodes_by_category,
+                missing_cluster_count_nodes,
+                cutoff=walk_radius_m,
+                weight="length_m",
+                progress_cb=progress_cb if active_progress_target == "cluster_counts" else None,
+                detail="walk origins",
+                save_chunk_cb=_checkpoint_save_cluster_counts,
+            )
+            _record_substep(
+                tracker,
+                "reachability",
+                "walk_cluster_routing",
+                cluster_routing_started_at,
+                force_log=True,
+            )
+            if new_cluster_counts:
+                walk_cluster_counts_by_node = _merge_counts_lookup(
+                    walk_cluster_counts_by_node,
+                    new_cluster_counts,
+                )
+            if cluster_counts_cache_save_seconds <= 0.0:
+                save_started_at = time.perf_counter()
+                cache_save_large(
+                    "walk_cluster_counts_by_origin_node",
+                    walk_cluster_counts_by_node,
+                    cache_dir,
+                )
+                cluster_counts_cache_save_seconds = max(
+                    time.perf_counter() - save_started_at,
+                    0.0,
+                )
+            tracker.record_substep(
+                "reachability",
+                "walk_cluster_cache_save",
+                cluster_counts_cache_save_seconds,
+                force_log=True,
+            )
+
+        if missing_effective_nodes:
+            base_unit_rows = _base_unit_node_rows(
+                amenity_cluster_rows,
+                walk_cluster_nodes_by_category,
+            )
+            if base_unit_rows:
+                effective_routing_started_at = time.perf_counter()
+
+                def _checkpoint_save_effective_units(
+                    chunk_units: dict[int, dict[str, float]],
+                ) -> None:
+                    nonlocal walk_effective_units_by_node, effective_units_cache_save_seconds
+                    walk_effective_units_by_node = _merge_counts_lookup(
+                        walk_effective_units_by_node,
+                        chunk_units,
                     )
                     save_started_at = time.perf_counter()
-                    cache_save_large(
-                        "walk_weighted_units_by_origin_node",
-                        walk_weighted_units_by_node,
+                    cache_save_large_append_frame(
+                        "walk_effective_units_by_origin_node",
+                        chunk_units,
                         cache_dir,
                     )
-                    weighted_cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
+                    effective_units_cache_save_seconds += max(
+                        time.perf_counter() - save_started_at,
+                        0.0,
+                    )
 
-                weighted_progress_cb = None
-                if not missing_count_nodes:
-                    weighted_progress_cb = tracker.phase_callback("reachability")
-
-                weighted_totals_by_node = precompute_walk_weighted_totals_by_origin_node(
+                effective_units_by_node = precompute_walk_decayed_units_by_origin_node(
                     walk_graph,
-                    weighted_rows,
-                    missing_origin_nodes,
+                    base_unit_rows,
+                    missing_effective_nodes,
                     cutoff=walk_radius_m,
+                    half_distance_m_by_category=DISTANCE_DECAY_HALF_DISTANCE_M,
                     weight="length_m",
-                    progress_cb=weighted_progress_cb,
+                    progress_cb=progress_cb if active_progress_target == "effective_units" else None,
                     detail="walk origins",
-                    save_chunk_cb=_checkpoint_save_weighted,
+                    save_chunk_cb=_checkpoint_save_effective_units,
                 )
                 _record_substep(
                     tracker,
                     "reachability",
-                    "walk_weighted_units_routing",
-                    weighted_routing_started_at,
+                    "walk_effective_units_routing",
+                    effective_routing_started_at,
                     force_log=True,
                 )
-                walk_weighted_units_by_node = _merge_counts_lookup(
-                    walk_weighted_units_by_node,
-                    weighted_totals_by_node,
-                )
+                if effective_units_by_node:
+                    walk_effective_units_by_node = _merge_counts_lookup(
+                        walk_effective_units_by_node,
+                        effective_units_by_node,
+                    )
             else:
-                walk_weighted_units_by_node = _merge_counts_lookup(
-                    walk_weighted_units_by_node,
-                    {node: {} for node in missing_origin_nodes},
+                walk_effective_units_by_node = _merge_counts_lookup(
+                    walk_effective_units_by_node,
+                    {node: {} for node in missing_effective_nodes},
                 )
 
-            if weighted_cache_save_seconds <= 0.0:
+            if effective_units_cache_save_seconds <= 0.0:
                 save_started_at = time.perf_counter()
                 cache_save_large(
-                    "walk_weighted_units_by_origin_node",
-                    walk_weighted_units_by_node,
+                    "walk_effective_units_by_origin_node",
+                    walk_effective_units_by_node,
                     cache_dir,
                 )
-                weighted_cache_save_seconds = max(time.perf_counter() - save_started_at, 0.0)
+                effective_units_cache_save_seconds = max(
+                    time.perf_counter() - save_started_at,
+                    0.0,
+                )
             tracker.record_substep(
                 "reachability",
-                "walk_weighted_units_cache_save",
-                weighted_cache_save_seconds,
+                "walk_effective_units_cache_save",
+                effective_units_cache_save_seconds,
                 force_log=True,
             )
 
@@ -663,7 +827,12 @@ def phase_reachability_impl(
         detail=f"{len(requested_walk_origin_nodes):,} walk origins",
     )
 
-    return walk_nodes_by_category, walk_counts_by_node, walk_weighted_units_by_node
+    return (
+        walk_nodes_by_category,
+        walk_counts_by_node,
+        walk_cluster_counts_by_node,
+        walk_effective_units_by_node,
+    )
 
 
 def phase_grids_impl(
@@ -686,6 +855,7 @@ def phase_grids_impl(
     phase_networks,
     phase_reachability,
     normalize_origin_node_ids,
+    merge_normalized_origin_node_ids,
     build_grid,
     elapsed,
     clone_grid_shells,
@@ -842,11 +1012,17 @@ def phase_grids_impl(
         )
         surface_origin_nodes = collect_surface_origin_nodes(surface_shell_dir)
 
-    reachability_origin_nodes = list(
-        normalize_origin_node_ids(list(walk_origin_nodes) + list(surface_origin_nodes))
+    reachability_origin_nodes = merge_normalized_origin_node_ids(
+        walk_origin_nodes,
+        surface_origin_nodes,
     )
 
-    _, walk_counts_by_node, walk_weighted_units_by_node = phase_reachability(
+    (
+        _,
+        walk_counts_by_node,
+        walk_cluster_counts_by_node,
+        walk_effective_units_by_node,
+    ) = phase_reachability(
         walk_graph,
         amenity_data,
         amenity_source_rows,
@@ -862,7 +1038,8 @@ def phase_grids_impl(
             score_hash=score_hash,
             walk_graph=walk_graph,
             walk_counts_by_node=walk_counts_by_node,
-            walk_weighted_units_by_node=walk_weighted_units_by_node,
+            walk_cluster_counts_by_node=walk_cluster_counts_by_node,
+            walk_effective_units_by_node=walk_effective_units_by_node,
             tracker=tracker,
         )
 
@@ -893,8 +1070,9 @@ def phase_grids_impl(
         score_cells(
             walk_cells,
             walk_counts_by_node,
+            walk_cluster_counts_by_node,
             walk_cell_nodes_by_size[size],
-            walk_weighted_units_by_node,
+            walk_effective_units_by_node,
         )
         walk_scores = [cell["total"] for cell in walk_cells]
         print(f"{_score_summary(walk_scores)} {elapsed(started_at)}")

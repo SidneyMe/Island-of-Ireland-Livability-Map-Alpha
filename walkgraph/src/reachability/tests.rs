@@ -79,6 +79,22 @@ fn read_u32s(path: &Path) -> Vec<u32> {
         .collect()
 }
 
+fn read_f32s(path: &Path) -> Vec<f32> {
+    let mut bytes = Vec::new();
+    File::open(path)
+        .expect("open output")
+        .read_to_end(&mut bytes)
+        .expect("read output");
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| {
+            let mut value = [0_u8; 4];
+            value.copy_from_slice(chunk);
+            f32::from_le_bytes(value)
+        })
+        .collect()
+}
+
 #[test]
 fn counts_reachable_amenities_by_category_with_shortest_paths() {
     let graph = GraphCsr {
@@ -216,9 +232,41 @@ fn run_reachability_writes_little_endian_rows_for_multiple_origins() {
         weights.path(),
         2,
         10.0,
+        "counts",
+        &[],
         output.path(),
     )
     .expect("run reachability");
 
     assert_eq!(read_u32s(output.path()), vec![1, 2, 0, 2]);
+}
+
+#[test]
+fn run_reachability_writes_decayed_unit_rows() {
+    let graph_dir = TempDir::new().expect("graph dir");
+    write_graph_sidecars(graph_dir.path(), &[0, 1, 1], &[1], &[150.0], 2, 1);
+    let origins = NamedTempFile::new().expect("origins");
+    let weights = NamedTempFile::new().expect("weights");
+    let output = NamedTempFile::new().expect("output");
+    write_u32s(origins.path(), &[0, 1]);
+    write_u32s(weights.path(), &[1, 1, 2]);
+
+    run_reachability(
+        graph_dir.path(),
+        origins.path(),
+        weights.path(),
+        2,
+        500.0,
+        "decayed-units",
+        &[150.0, 150.0],
+        output.path(),
+    )
+    .expect("run reachability");
+
+    let values = read_f32s(output.path());
+    assert_eq!(values.len(), 4);
+    assert!((values[0] - 0.5).abs() < 1e-6);
+    assert!((values[1] - 1.0).abs() < 1e-6);
+    assert!((values[2] - 1.0).abs() < 1e-6);
+    assert!((values[3] - 2.0).abs() < 1e-6);
 }

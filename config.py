@@ -363,6 +363,13 @@ BAKE_PMTILES_WORKERS = _positive_int_env(
 
 WALK_RADIUS_M = 500
 WALKGRAPH_BBOX_PADDING_M = WALK_RADIUS_M
+VARIETY_CLUSTER_RADIUS_M = 25.0
+DISTANCE_DECAY_HALF_DISTANCE_M = {
+    "shops": 150.0,
+    "transport": 250.0,
+    "healthcare": 300.0,
+    "parks": 350.0,
+}
 
 
 CAPS = {"shops": 6, "transport": 5, "healthcare": 5, "parks": 5}
@@ -435,9 +442,9 @@ CATEGORY_COLORS = {
 
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
-PMTILES_SCHEMA_VERSION = 3
+PMTILES_SCHEMA_VERSION = 4
 GRID_GEOMETRY_SCHEMA_VERSION = 4
-CACHE_SCHEMA_VERSION = 10
+CACHE_SCHEMA_VERSION = 11
 FORCE_RECOMPUTE = False
 USE_COMPRESSED_CACHE = True
 MANIFEST_NAME = "manifest.json"
@@ -742,6 +749,8 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "transit_hash": resolved_transit_hash,
         "tags": TAGS,
         "walk_radius_m": WALK_RADIUS_M,
+        "variety_cluster_radius_m": VARIETY_CLUSTER_RADIUS_M,
+        "distance_decay_half_distance_m": DISTANCE_DECAY_HALF_DISTANCE_M,
         "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
         "overture_category_map_signature": overture_category_signature,
         "overture_dataset_signature": overture_signature,
@@ -896,6 +905,8 @@ def build_hashes_for_import(
             "transit_reality_fingerprint": transit_reality_fingerprint,
             "tags": TAGS,
             "walk_radius_m": WALK_RADIUS_M,
+            "variety_cluster_radius_m": VARIETY_CLUSTER_RADIUS_M,
+            "distance_decay_half_distance_m": DISTANCE_DECAY_HALF_DISTANCE_M,
             "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
             "overture_category_map_signature": overture_category_signature,
             "overture_dataset_signature": overture_signature,
@@ -1037,4 +1048,3 @@ def database_url() -> str:
         "postgresql+psycopg://"
         f"{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{quote_plus(database)}"
     )
-

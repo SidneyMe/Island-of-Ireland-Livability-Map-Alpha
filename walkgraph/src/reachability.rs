@@ -243,27 +243,151 @@ fn counts_for_origin(
     counts
 }
 
+fn decayed_units_for_origin(
+    graph: &GraphCsr,
+    weights: &AmenityWeights,
+    origin: u32,
+    cutoff_m: f32,
+    half_distances_m: &[f32],
+) -> Result<Vec<f32>, Box<dyn Error>> {
+    if half_distances_m.len() != weights.category_count {
+        return Err(
+            format!(
+                "half_distances_m length mismatch: expected {}, found {}",
+                weights.category_count,
+                half_distances_m.len()
+            )
+            .into(),
+        );
+    }
+
+    let mut totals = vec![0.0_f32; weights.category_count];
+    let mut heap = BinaryHeap::new();
+    let mut best = HashMap::<u32, f32>::new();
+
+    heap.push(State {
+        distance: 0.0,
+        node: origin,
+    });
+    best.insert(origin, 0.0);
+
+    while let Some(State { distance, node }) = heap.pop() {
+        let Some(&known_distance) = best.get(&node) else {
+            continue;
+        };
+        if distance > known_distance {
+            continue;
+        }
+        if distance > cutoff_m {
+            continue;
+        }
+
+        let row_index = weights.node_to_row[node as usize];
+        if row_index != MISSING_WEIGHT_ROW {
+            let offset = row_index as usize * weights.category_count;
+            for category_index in 0..weights.category_count {
+                let half_distance = half_distances_m[category_index];
+                if !half_distance.is_finite() || half_distance <= 0.0 {
+                    return Err(
+                        format!(
+                            "half-distance must be finite and positive for category index {}",
+                            category_index
+                        )
+                        .into(),
+                    );
+                }
+                let decay = 0.5_f32.powf(distance / half_distance);
+                totals[category_index] += weights.counts_flat[offset + category_index] as f32 * decay;
+            }
+        }
+
+        let edge_start = graph.offsets[node as usize] as usize;
+        let edge_end = graph.offsets[node as usize + 1] as usize;
+        for edge_index in edge_start..edge_end {
+            let next_node = graph.targets[edge_index];
+            let next_distance = distance + graph.lengths[edge_index];
+            if next_distance > cutoff_m {
+                continue;
+            }
+            let should_visit = match best.get(&next_node) {
+                Some(existing) => next_distance < *existing,
+                None => true,
+            };
+            if should_visit {
+                best.insert(next_node, next_distance);
+                heap.push(State {
+                    distance: next_distance,
+                    node: next_node,
+                });
+            }
+        }
+    }
+
+    Ok(totals)
+}
+
 pub fn run_reachability(
     graph_dir: &Path,
     origins_bin: &Path,
     amenity_weights_bin: &Path,
     category_count: usize,
     cutoff_m: f32,
+    output_mode: &str,
+    half_distances_m: &[f32],
     output_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let graph = load_graph_csr(graph_dir)?;
     let origins = load_origins(origins_bin, graph.node_count)?;
     let weights = load_amenity_weights(amenity_weights_bin, category_count, graph.node_count)?;
 
-    let results: Vec<Vec<u32>> = origins
-        .par_iter()
-        .map(|origin| counts_for_origin(&graph, &weights, *origin, cutoff_m))
-        .collect();
-
     let mut writer = BufWriter::new(File::create(output_path)?);
-    for row in results {
-        for value in row {
-            writer.write_all(&value.to_le_bytes())?;
+    match output_mode {
+        "counts" => {
+            let results: Vec<Vec<u32>> = origins
+                .par_iter()
+                .map(|origin| counts_for_origin(&graph, &weights, *origin, cutoff_m))
+                .collect();
+            for row in results {
+                for value in row {
+                    writer.write_all(&value.to_le_bytes())?;
+                }
+            }
+        }
+        "decayed-units" => {
+            if half_distances_m.len() != category_count {
+                return Err(
+                    format!(
+                        "decayed-units output requires {} half-distances, found {}",
+                        category_count,
+                        half_distances_m.len()
+                    )
+                    .into(),
+                );
+            }
+            let results: Vec<Result<Vec<f32>, String>> = origins
+                .par_iter()
+                .map(|origin| {
+                    decayed_units_for_origin(
+                        &graph,
+                        &weights,
+                        *origin,
+                        cutoff_m,
+                        half_distances_m,
+                    )
+                    .map_err(|err| err.to_string())
+                })
+                .collect();
+            for row in results {
+                let values = row.map_err(|err| -> Box<dyn Error> {
+                    std::io::Error::new(std::io::ErrorKind::Other, err).into()
+                })?;
+                for value in values {
+                    writer.write_all(&value.to_le_bytes())?;
+                }
+            }
+        }
+        other => {
+            return Err(format!("unsupported reachability output mode: {}", other).into());
         }
     }
     writer.flush()?;

@@ -131,6 +131,8 @@ def iter_walk_rows_impl(
                     "effective_area_m2": float(cell["effective_area_m2"]),
                     "effective_area_ratio": float(cell["effective_area_ratio"]),
                     "counts_json": cell["counts"],
+                    "cluster_counts_json": cell["cluster_counts"],
+                    "effective_units_json": cell["effective_units"],
                     "scores_json": cell["scores"],
                     "total_score": cell["total"],
                     "created_at": created_at,

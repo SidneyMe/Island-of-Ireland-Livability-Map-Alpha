@@ -135,6 +135,8 @@ def _grid_cell(
         "effective_area_m2": float(effective_area_m2),
         "effective_area_ratio": float(effective_area_ratio),
         "counts": {},
+        "cluster_counts": {},
+        "effective_units": {},
         "scores": {},
         "total": 0.0,
     }
@@ -916,6 +918,35 @@ class PrecomputeReachabilityTests(TestCase):
         self.assertEqual(nodes_by_category["shops"], [0, 0])
         self.assertEqual(nodes_by_category["parks"], [2])
 
+    def test_normalize_origin_node_ids_returns_same_list_for_pre_normalized_inputs(self) -> None:
+        origin_nodes = [1, 3, 5]
+
+        normalized = precompute.normalize_origin_node_ids(origin_nodes)
+
+        self.assertIs(normalized, origin_nodes)
+
+    def test_normalize_origin_node_ids_sorts_and_deduplicates_unsorted_iterable(self) -> None:
+        normalized = precompute.normalize_origin_node_ids([5, None, 3, 5, 1, 3, None])
+
+        self.assertEqual(normalized, [1, 3, 5])
+
+    def test_normalize_origin_node_ids_handles_single_pass_iterable(self) -> None:
+        normalized = precompute.normalize_origin_node_ids(
+            value for value in [4, None, 2, 4, 3]
+        )
+
+        self.assertEqual(normalized, [2, 3, 4])
+
+    def test_merge_normalized_origin_node_ids_unions_sorted_unique_lists(self) -> None:
+        merged = precompute.merge_normalized_origin_node_ids(
+            [1, 3, 5],
+            [1, 2, 5, 8],
+            [],
+            [2, 9],
+        )
+
+        self.assertEqual(merged, [1, 2, 3, 5, 8, 9])
+
     def test_precompute_walk_counts_by_origin_node_counts_duplicate_amenities(self) -> None:
         graph = _FakeGraph(
             {
@@ -966,12 +997,109 @@ class PrecomputeReachabilityTests(TestCase):
         self.assertEqual(totals_by_node[0], {"parks": 75_000})
         self.assertEqual(totals_by_node[1], {"parks": 75_000})
 
+    def test_build_amenity_clusters_collapse_same_category_points_and_pick_stable_representative(self) -> None:
+        amenity_source_rows = [
+            {
+                "category": "shops",
+                "lat": 53.34980,
+                "lon": -6.26030,
+                "source": "beta",
+                "source_ref": "2",
+                "name": "Beta",
+                "score_units": 3,
+            },
+            {
+                "category": "shops",
+                "lat": 53.34986,
+                "lon": -6.26026,
+                "source": "alpha",
+                "source_ref": "9",
+                "name": "Alpha",
+                "score_units": 3,
+            },
+            {
+                "category": "shops",
+                "lat": 53.34982,
+                "lon": -6.26028,
+                "source": "gamma",
+                "source_ref": "1",
+                "name": "",
+                "score_units": 3,
+            },
+            {
+                "category": "shops",
+                "lat": 53.35100,
+                "lon": -6.26030,
+                "source": "delta",
+                "source_ref": "4",
+                "name": "Delta",
+                "score_units": 2,
+            },
+        ]
+
+        cluster_data, cluster_rows = precompute._amenity_clusters.build_amenity_clusters(
+            amenity_source_rows,
+            categories=["shops"],
+        )
+
+        self.assertEqual(len(cluster_data["shops"]), 2)
+        self.assertEqual(len(cluster_rows), 2)
+        self.assertEqual(cluster_rows[0]["source"], "alpha")
+        self.assertEqual(cluster_rows[0]["source_ref"], "9")
+        self.assertEqual(cluster_rows[0]["cluster_size"], 3)
+        self.assertEqual(cluster_rows[0]["base_units"], 3)
+
+    def test_precompute_walk_decayed_units_by_origin_node_applies_half_distance_formula(self) -> None:
+        graph = _FakeGraph(
+            {
+                (0, 1): 150.0,
+                (0, 2): 250.0,
+            }
+        )
+        node_weights_by_category = {
+            "shops": [(1, 2)],
+            "transport": [(2, 1)],
+        }
+
+        with mock.patch.object(precompute._network, "ig", object()):
+            decayed_units = precompute.precompute_walk_decayed_units_by_origin_node(
+                graph,
+                node_weights_by_category,
+                [0],
+                cutoff=500.0,
+                half_distance_m_by_category={
+                    "shops": 150.0,
+                    "transport": 250.0,
+                },
+            )
+
+        self.assertAlmostEqual(decayed_units[0]["shops"], 1.0, places=5)
+        self.assertAlmostEqual(decayed_units[0]["transport"], 0.5, places=5)
+
+    def test_score_cells_preserve_raw_counts_while_scoring_from_cluster_effective_units(self) -> None:
+        cell = _grid_cell("clustered-shop-cell", effective_area_ratio=1.0)
+
+        precompute.score_cells(
+            [cell],
+            {1: {"shops": 3}},
+            {1: {"shops": 1}},
+            [1],
+            effective_units_by_node={1: {"shops": 1}},
+        )
+
+        self.assertEqual(cell["counts"], {"shops": 3})
+        self.assertEqual(cell["cluster_counts"], {"shops": 1})
+        self.assertEqual(cell["effective_units"], {"shops": 1.0})
+        self.assertAlmostEqual(cell["scores"]["shops"], (1.0 / 6.0) * 25.0)
+
     def test_score_cells_missing_nodes_default_to_zero_counts(self) -> None:
         cells = [{"cell_id": "cell-1"}]
 
-        precompute.score_cells(cells, {}, ["missing-node"])
+        precompute.score_cells(cells, {}, {}, ["missing-node"])
 
         self.assertEqual(cells[0]["counts"], {})
+        self.assertEqual(cells[0]["cluster_counts"], {})
+        self.assertEqual(cells[0]["effective_units"], {})
         self.assertEqual(cells[0]["scores"], {category: 0.0 for category in precompute.CAPS})
         self.assertEqual(cells[0]["total"], 0.0)
 
@@ -985,16 +1113,19 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [cell],
             {1: {"shops": 1}},
+            {1: {"shops": 1}},
             [1],
-            {1: {"shops": 2}},
+            effective_units_by_node={1: {"shops": 2}},
         )
 
         self.assertEqual(cell["counts"], {"shops": 1})
+        self.assertEqual(cell["cluster_counts"], {"shops": 1})
+        self.assertEqual(cell["effective_units"], {"shops": 2.0})
         self.assertAlmostEqual(cell["scores"]["shops"], (2.0 / 6.0) * 25.0)
         self.assertEqual(cell["scores"]["parks"], 0.0)
         self.assertAlmostEqual(cell["total"], (2.0 / 6.0) * 25.0)
 
-    def test_score_cells_use_weighted_park_units_for_inland_park_scoring(self) -> None:
+    def test_score_cells_use_effective_park_units_for_inland_park_scoring(self) -> None:
         cell = _grid_cell(
             "inland-park",
             effective_area_m2=1.0,
@@ -1004,11 +1135,14 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [cell],
             {1: {"parks": 1}},
+            {1: {"parks": 1}},
             [1],
-            {1: {"parks": 4}},
+            effective_units_by_node={1: {"parks": 4}},
         )
 
         self.assertEqual(cell["counts"], {"parks": 1})
+        self.assertEqual(cell["cluster_counts"], {"parks": 1})
+        self.assertEqual(cell["effective_units"], {"parks": 4.0})
         self.assertEqual(cell["scores"]["parks"], 20.0)
         self.assertEqual(cell["total"], 20.0)
 
@@ -1027,8 +1161,9 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [inland_cell, coastal_cell],
             {1: {"shops": 1}},
+            {1: {"shops": 1}},
             [1, 1],
-            {1: {"shops": 2}},
+            effective_units_by_node={1: {"shops": 2}},
         )
 
         self.assertEqual(inland_cell["counts"], coastal_cell["counts"])
@@ -1046,14 +1181,15 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [coastal_cell],
             {1: {"healthcare": 2}},
+            {1: {"healthcare": 2}},
             [1],
-            {1: {"healthcare": 5}},
+            effective_units_by_node={1: {"healthcare": 5}},
         )
 
         self.assertEqual(coastal_cell["counts"], {"healthcare": 2})
         self.assertEqual(coastal_cell["scores"]["healthcare"], 25.0)
 
-    def test_score_cells_normalize_weighted_park_units_by_effective_area(self) -> None:
+    def test_score_cells_normalize_effective_park_units_by_effective_area(self) -> None:
         inland_cell = _grid_cell(
             "inland-park",
             effective_area_ratio=1.0,
@@ -1066,15 +1202,16 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [inland_cell, coastal_cell],
             {7: {"parks": 1}},
+            {7: {"parks": 1}},
             [7, 7],
-            {7: {"parks": 2}},
+            effective_units_by_node={7: {"parks": 2}},
         )
 
         self.assertEqual(inland_cell["counts"], coastal_cell["counts"])
         self.assertEqual(inland_cell["counts"], {"parks": 1})
         self.assertLess(inland_cell["scores"]["parks"], coastal_cell["scores"]["parks"])
 
-    def test_score_cells_clamp_weighted_park_unit_normalization_floor_for_tiny_land_slivers(self) -> None:
+    def test_score_cells_clamp_effective_park_unit_normalization_floor_for_tiny_land_slivers(self) -> None:
         coastal_cell = _grid_cell(
             "tiny-coastal-park",
             effective_area_ratio=0.01,
@@ -1083,8 +1220,9 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [coastal_cell],
             {3: {"parks": 1}},
+            {3: {"parks": 1}},
             [3],
-            {3: {"parks": 2}},
+            effective_units_by_node={3: {"parks": 2}},
         )
 
         self.assertEqual(coastal_cell["counts"], {"parks": 1})
@@ -1103,7 +1241,9 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [inland_cell, coastal_cell],
             {7: {"transport": 2}},
+            {7: {"transport": 2}},
             [7, 7],
+            effective_units_by_node={7: {"transport": 2}},
         )
 
         self.assertEqual(inland_cell["counts"], coastal_cell["counts"])
@@ -1123,8 +1263,9 @@ class PrecomputeReachabilityTests(TestCase):
         precompute.score_cells(
             [inland_cell, coastal_cell],
             {9: {"parks": 1}},
+            {9: {"parks": 1}},
             [9, 9],
-            {9: {"parks": 2}},
+            effective_units_by_node={9: {"parks": 2}},
         )
 
         self.assertEqual(inland_cell["counts"], coastal_cell["counts"])
@@ -1153,14 +1294,33 @@ class PrecomputeReachabilityTests(TestCase):
         with TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir)
             precompute.cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
+            precompute.cache_save(
+                "amenity_clusters",
+                [
+                    {
+                        "category": "transport",
+                        "lat": 53.0,
+                        "lon": -6.0,
+                        "source_ref": "gtfs/1",
+                        "base_units": 1,
+                    }
+                ],
+                cache_dir,
+            )
+            precompute.cache_save("walk_cluster_nodes_by_cat", {"transport": [0]}, cache_dir)
             precompute.cache_save_large(
                 "walk_counts_by_origin_node",
                 {0: {"transport": 1}},
                 cache_dir,
             )
             precompute.cache_save_large(
-                "walk_weighted_units_by_origin_node",
-                {0: {}},
+                "walk_cluster_counts_by_origin_node",
+                {0: {"transport": 1}},
+                cache_dir,
+            )
+            precompute.cache_save_large(
+                "walk_effective_units_by_origin_node",
+                {0: {"transport": 1.0}},
                 cache_dir,
             )
 
@@ -1176,15 +1336,20 @@ class PrecomputeReachabilityTests(TestCase):
                 mock.patch.object(
                     precompute,
                     "precompute_walk_counts_by_origin_node",
-                    return_value={1: {"transport": 1}},
+                    side_effect=[{1: {"transport": 1}}, {1: {"transport": 1}}],
                 ) as walk_counts_mock,
                 mock.patch.object(
                     precompute,
-                    "precompute_walk_weighted_totals_by_origin_node",
-                    side_effect=AssertionError("weighted lookup should use zero fill when no weighted rows exist"),
-                ),
+                    "precompute_walk_decayed_units_by_origin_node",
+                    return_value={1: {"transport": 0.5}},
+                ) as decayed_units_mock,
             ):
-                _, walk_counts_by_node, walk_weighted_units_by_node = precompute.phase_reachability(
+                (
+                    _,
+                    walk_counts_by_node,
+                    walk_cluster_counts_by_node,
+                    walk_effective_units_by_node,
+                ) = precompute.phase_reachability(
                     walk_graph,
                     amenity_data={},
                     amenity_source_rows=amenity_source_rows,
@@ -1192,21 +1357,30 @@ class PrecomputeReachabilityTests(TestCase):
                     walk_origin_node_ids=[0, 1],
                 )
                 cached_walk_counts = precompute.cache_load_large("walk_counts_by_origin_node", cache_dir)
-                cached_weighted_units = precompute.cache_load_large(
-                    "walk_weighted_units_by_origin_node",
+                cached_cluster_counts = precompute.cache_load_large(
+                    "walk_cluster_counts_by_origin_node",
+                    cache_dir,
+                )
+                cached_effective_units = precompute.cache_load_large(
+                    "walk_effective_units_by_origin_node",
                     cache_dir,
                 )
 
             _clear_state_cache(cache_dir)
 
-        walk_counts_mock.assert_called_once()
-        self.assertEqual(walk_counts_mock.call_args.args[2], (1,))
+        self.assertEqual(walk_counts_mock.call_count, 2)
+        self.assertEqual(walk_counts_mock.call_args_list[0].args[2], (1,))
+        self.assertEqual(walk_counts_mock.call_args_list[1].args[2], (1,))
+        decayed_units_mock.assert_called_once()
+        self.assertEqual(decayed_units_mock.call_args.args[2], (1,))
         self.assertEqual(walk_counts_by_node, {0: {"transport": 1}, 1: {"transport": 1}})
-        self.assertEqual(walk_weighted_units_by_node, {0: {}, 1: {}})
+        self.assertEqual(walk_cluster_counts_by_node, {0: {"transport": 1}, 1: {"transport": 1}})
+        self.assertEqual(walk_effective_units_by_node, {0: {"transport": 1.0}, 1: {"transport": 0.5}})
         self.assertEqual(cached_walk_counts, walk_counts_by_node)
-        self.assertEqual(cached_weighted_units, walk_weighted_units_by_node)
+        self.assertEqual(cached_cluster_counts, walk_cluster_counts_by_node)
+        self.assertEqual(cached_effective_units, walk_effective_units_by_node)
 
-    def test_phase_reachability_builds_and_caches_weighted_unit_lookup(self) -> None:
+    def test_phase_reachability_builds_and_caches_cluster_and_effective_unit_lookups(self) -> None:
         walk_graph = mock.Mock()
         walk_graph.vcount.return_value = 2
         walk_nodes_by_category = {
@@ -1235,33 +1409,517 @@ class PrecomputeReachabilityTests(TestCase):
                 mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False),
                 mock.patch.object(
                     precompute,
-                    "precompute_walk_counts_by_origin_node",
-                    return_value={0: {"shops": 1}},
+                    "snap_amenities",
+                    return_value={"shops": [2]},
                 ),
                 mock.patch.object(
                     precompute,
-                    "precompute_walk_weighted_totals_by_origin_node",
-                    return_value={0: {"shops": 3}},
-                ) as weighted_totals_mock,
+                    "precompute_walk_counts_by_origin_node",
+                    side_effect=[{0: {"shops": 1}}, {0: {"shops": 1}}],
+                ),
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_decayed_units_by_origin_node",
+                    return_value={0: {"shops": 1.5}},
+                ) as decayed_units_mock,
             ):
-                _, walk_counts_by_node, walk_weighted_units_by_node = precompute.phase_reachability(
+                (
+                    _,
+                    walk_counts_by_node,
+                    walk_cluster_counts_by_node,
+                    walk_effective_units_by_node,
+                ) = precompute.phase_reachability(
                     walk_graph,
                     amenity_data={},
                     amenity_source_rows=amenity_source_rows,
                     tracker=tracker,
                     walk_origin_node_ids=[0],
                 )
-                cached_weighted_units = precompute.cache_load_large(
-                    "walk_weighted_units_by_origin_node",
+                cached_cluster_counts = precompute.cache_load_large(
+                    "walk_cluster_counts_by_origin_node",
+                    cache_dir,
+                )
+                cached_effective_units = precompute.cache_load_large(
+                    "walk_effective_units_by_origin_node",
                     cache_dir,
                 )
 
             _clear_state_cache(cache_dir)
 
-        weighted_totals_mock.assert_called_once()
+        decayed_units_mock.assert_called_once()
         self.assertEqual(walk_counts_by_node, {0: {"shops": 1}})
-        self.assertEqual(walk_weighted_units_by_node, {0: {"shops": 3}})
-        self.assertEqual(cached_weighted_units, {0: {"shops": 3}})
+        self.assertEqual(walk_cluster_counts_by_node, {0: {"shops": 1}})
+        self.assertEqual(walk_effective_units_by_node, {0: {"shops": 1.5}})
+        self.assertEqual(cached_cluster_counts, {0: {"shops": 1}})
+        self.assertEqual(cached_effective_units, {0: {"shops": 1.5}})
+
+    def test_phase_reachability_checkpoint_callbacks_persist_chunk_only_large_caches(self) -> None:
+        walk_graph = mock.Mock()
+        walk_graph.vcount.return_value = 2
+        amenity_source_rows = [
+            {
+                "category": "shops",
+                "lat": 53.0,
+                "lon": -6.0,
+                "source_ref": "node/1",
+                "score_units": 3,
+            }
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            tracker = _tracker_mock()
+
+            def _checkpoint_counts(
+                graph,
+                nodes_by_category,
+                origin_node_ids,
+                *,
+                save_chunk_cb,
+                **kwargs,
+            ):
+                del graph, nodes_by_category, kwargs
+                chunk = {int(node): {"shops": 1} for node in origin_node_ids}
+                save_chunk_cb(chunk)
+                return {}
+
+            def _checkpoint_effective_units(
+                graph,
+                node_weights_by_category,
+                origin_node_ids,
+                *,
+                save_chunk_cb,
+                **kwargs,
+            ):
+                del graph, node_weights_by_category, kwargs
+                chunk = {int(node): {"shops": 1.5} for node in origin_node_ids}
+                save_chunk_cb(chunk)
+                return {}
+
+            with (
+                mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir),
+                mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False),
+                mock.patch.object(
+                    precompute,
+                    "snap_amenities",
+                    return_value={"shops": [2]},
+                ),
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_counts_by_origin_node",
+                    side_effect=_checkpoint_counts,
+                ) as walk_counts_mock,
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_decayed_units_by_origin_node",
+                    side_effect=_checkpoint_effective_units,
+                ) as decayed_units_mock,
+            ):
+                (
+                    _,
+                    walk_counts_by_node,
+                    walk_cluster_counts_by_node,
+                    walk_effective_units_by_node,
+                ) = precompute.phase_reachability(
+                    walk_graph,
+                    amenity_data={},
+                    amenity_source_rows=amenity_source_rows,
+                    tracker=tracker,
+                    walk_origin_node_ids=[0, 1],
+                )
+                cached_walk_counts = precompute.cache_load_large(
+                    "walk_counts_by_origin_node",
+                    cache_dir,
+                )
+                cached_cluster_counts = precompute.cache_load_large(
+                    "walk_cluster_counts_by_origin_node",
+                    cache_dir,
+                )
+                cached_effective_units = precompute.cache_load_large(
+                    "walk_effective_units_by_origin_node",
+                    cache_dir,
+                )
+
+            _clear_state_cache(cache_dir)
+
+        self.assertEqual(walk_counts_mock.call_count, 2)
+        self.assertEqual(decayed_units_mock.call_count, 1)
+        self.assertEqual(walk_counts_by_node, {0: {"shops": 1}, 1: {"shops": 1}})
+        self.assertEqual(walk_cluster_counts_by_node, {0: {"shops": 1}, 1: {"shops": 1}})
+        self.assertEqual(walk_effective_units_by_node, {0: {"shops": 1.5}, 1: {"shops": 1.5}})
+        self.assertEqual(cached_walk_counts, walk_counts_by_node)
+        self.assertEqual(cached_cluster_counts, walk_cluster_counts_by_node)
+        self.assertEqual(cached_effective_units, walk_effective_units_by_node)
+
+    def test_phase_reachability_accepts_pre_normalized_origin_lists(self) -> None:
+        walk_graph = mock.Mock()
+        walk_graph.vcount.return_value = 3
+        walk_nodes_by_category = {
+            "shops": [],
+            "transport": [0],
+            "healthcare": [],
+            "parks": [],
+        }
+        amenity_source_rows = [
+            {
+                "category": "transport",
+                "lat": 53.0,
+                "lon": -6.0,
+                "source_ref": "gtfs/1",
+                "score_units": 1,
+            }
+        ]
+        normalized_origin_nodes = precompute.normalize_origin_node_ids([0, 1])
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            precompute.cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
+            precompute.cache_save(
+                "amenity_clusters",
+                [
+                    {
+                        "category": "transport",
+                        "lat": 53.0,
+                        "lon": -6.0,
+                        "source_ref": "gtfs/1",
+                        "base_units": 1,
+                    }
+                ],
+                cache_dir,
+            )
+            precompute.cache_save("walk_cluster_nodes_by_cat", {"transport": [0]}, cache_dir)
+            precompute.cache_save_large(
+                "walk_counts_by_origin_node",
+                {0: {"transport": 1}},
+                cache_dir,
+            )
+            precompute.cache_save_large(
+                "walk_cluster_counts_by_origin_node",
+                {0: {"transport": 1}},
+                cache_dir,
+            )
+            precompute.cache_save_large(
+                "walk_effective_units_by_origin_node",
+                {0: {"transport": 1.0}},
+                cache_dir,
+            )
+
+            tracker = _tracker_mock()
+            with (
+                mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir),
+                mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False),
+                mock.patch.object(
+                    precompute,
+                    "snap_amenities",
+                    side_effect=AssertionError("cached amenity snaps should be reused"),
+                ),
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_counts_by_origin_node",
+                    side_effect=[{1: {"transport": 1}}, {1: {"transport": 1}}],
+                ) as walk_counts_mock,
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_decayed_units_by_origin_node",
+                    return_value={1: {"transport": 0.5}},
+                ) as decayed_units_mock,
+            ):
+                (
+                    _,
+                    walk_counts_by_node,
+                    walk_cluster_counts_by_node,
+                    walk_effective_units_by_node,
+                ) = precompute.phase_reachability(
+                    walk_graph,
+                    amenity_data={},
+                    amenity_source_rows=amenity_source_rows,
+                    tracker=tracker,
+                    walk_origin_node_ids=normalized_origin_nodes,
+                )
+
+            _clear_state_cache(cache_dir)
+
+        self.assertEqual(walk_counts_mock.call_count, 2)
+        self.assertEqual(walk_counts_mock.call_args_list[0].args[2], (1,))
+        self.assertEqual(walk_counts_mock.call_args_list[1].args[2], (1,))
+        decayed_units_mock.assert_called_once()
+        self.assertEqual(decayed_units_mock.call_args.args[2], (1,))
+        self.assertEqual(walk_counts_by_node, {0: {"transport": 1}, 1: {"transport": 1}})
+        self.assertEqual(walk_cluster_counts_by_node, {0: {"transport": 1}, 1: {"transport": 1}})
+        self.assertEqual(walk_effective_units_by_node, {0: {"transport": 1.0}, 1: {"transport": 0.5}})
+
+    def test_phase_reachability_recomputes_each_metric_only_for_its_own_missing_nodes(self) -> None:
+        walk_graph = mock.Mock()
+        walk_graph.vcount.return_value = 4
+        walk_nodes_by_category = {
+            "shops": [],
+            "transport": [0],
+            "healthcare": [],
+            "parks": [],
+        }
+        amenity_cluster_rows = [
+            {
+                "category": "transport",
+                "lat": 53.0,
+                "lon": -6.0,
+                "source_ref": "gtfs/1",
+                "base_units": 1,
+            }
+        ]
+        amenity_source_rows = [
+            {
+                "category": "transport",
+                "lat": 53.0,
+                "lon": -6.0,
+                "source_ref": "gtfs/1",
+                "score_units": 1,
+            }
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            precompute.cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
+            precompute.cache_save("amenity_clusters", amenity_cluster_rows, cache_dir)
+            precompute.cache_save("walk_cluster_nodes_by_cat", {"transport": [0]}, cache_dir)
+            precompute.cache_save_large(
+                "walk_counts_by_origin_node",
+                {
+                    0: {"transport": 1},
+                    2: {"transport": 1},
+                    3: {"transport": 1},
+                },
+                cache_dir,
+            )
+            precompute.cache_save_large(
+                "walk_cluster_counts_by_origin_node",
+                {
+                    0: {"transport": 1},
+                    1: {"transport": 1},
+                    3: {"transport": 1},
+                },
+                cache_dir,
+            )
+            precompute.cache_save_large(
+                "walk_effective_units_by_origin_node",
+                {
+                    0: {"transport": 1.0},
+                    1: {"transport": 1.0},
+                    2: {"transport": 1.0},
+                },
+                cache_dir,
+            )
+
+            tracker = _tracker_mock()
+            with (
+                mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir),
+                mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False),
+                mock.patch.object(
+                    precompute,
+                    "snap_amenities",
+                    side_effect=AssertionError("cached amenity snaps should be reused"),
+                ),
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_counts_by_origin_node",
+                    side_effect=[{1: {"transport": 1}}, {2: {"transport": 1}}],
+                ) as walk_counts_mock,
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_decayed_units_by_origin_node",
+                    return_value={3: {"transport": 0.5}},
+                ) as decayed_units_mock,
+            ):
+                (
+                    _,
+                    walk_counts_by_node,
+                    walk_cluster_counts_by_node,
+                    walk_effective_units_by_node,
+                ) = precompute.phase_reachability(
+                    walk_graph,
+                    amenity_data={},
+                    amenity_source_rows=amenity_source_rows,
+                    tracker=tracker,
+                    walk_origin_node_ids=[0, 1, 2, 3],
+                )
+
+            _clear_state_cache(cache_dir)
+
+        self.assertEqual(walk_counts_mock.call_count, 2)
+        self.assertEqual(walk_counts_mock.call_args_list[0].args[2], (1,))
+        self.assertEqual(walk_counts_mock.call_args_list[1].args[2], (2,))
+        decayed_units_mock.assert_called_once()
+        self.assertEqual(decayed_units_mock.call_args.args[2], (3,))
+        self.assertEqual(
+            walk_counts_by_node,
+            {
+                0: {"transport": 1},
+                1: {"transport": 1},
+                2: {"transport": 1},
+                3: {"transport": 1},
+            },
+        )
+        self.assertEqual(
+            walk_cluster_counts_by_node,
+            {
+                0: {"transport": 1},
+                1: {"transport": 1},
+                2: {"transport": 1},
+                3: {"transport": 1},
+            },
+        )
+        self.assertEqual(
+            walk_effective_units_by_node,
+            {
+                0: {"transport": 1.0},
+                1: {"transport": 1.0},
+                2: {"transport": 1.0},
+                3: {"transport": 0.5},
+            },
+        )
+
+    def test_phase_reachability_salvages_legacy_blob_and_chunk_overlay_before_resuming(self) -> None:
+        walk_graph = mock.Mock()
+        walk_graph.vcount.return_value = 3
+        walk_nodes_by_category = {
+            "shops": [],
+            "transport": [0],
+            "healthcare": [],
+            "parks": [],
+        }
+        amenity_cluster_rows = [
+            {
+                "category": "transport",
+                "lat": 53.0,
+                "lon": -6.0,
+                "source_ref": "gtfs/1",
+                "base_units": 1,
+            }
+        ]
+        amenity_source_rows = [
+            {
+                "category": "transport",
+                "lat": 53.0,
+                "lon": -6.0,
+                "source_ref": "gtfs/1",
+                "score_units": 1,
+            }
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            precompute.cache_save("walk_nodes_by_cat", walk_nodes_by_category, cache_dir)
+            precompute.cache_save("amenity_clusters", amenity_cluster_rows, cache_dir)
+            precompute.cache_save("walk_cluster_nodes_by_cat", {"transport": [0]}, cache_dir)
+            precompute.cache_save_large(
+                "walk_counts_by_origin_node",
+                {0: {"transport": 1}},
+                cache_dir,
+            )
+            precompute.cache_save_large_append_frame(
+                "walk_counts_by_origin_node",
+                {1: {"transport": 1}},
+                cache_dir,
+            )
+            precompute.cache_save_large(
+                "walk_cluster_counts_by_origin_node",
+                {0: {"transport": 1}},
+                cache_dir,
+            )
+            precompute.cache_save_large_append_frame(
+                "walk_cluster_counts_by_origin_node",
+                {1: {"transport": 1}},
+                cache_dir,
+            )
+            precompute.cache_save_large(
+                "walk_effective_units_by_origin_node",
+                {0: {"transport": 1.0}},
+                cache_dir,
+            )
+            precompute.cache_save_large_append_frame(
+                "walk_effective_units_by_origin_node",
+                {1: {"transport": 0.75}},
+                cache_dir,
+            )
+
+            tracker = _tracker_mock()
+            with (
+                mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir),
+                mock.patch.dict(precompute._STATE.tier_valid, {cache_dir: True}, clear=False),
+                mock.patch.object(
+                    precompute,
+                    "snap_amenities",
+                    side_effect=AssertionError("cached amenity snaps should be reused"),
+                ),
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_counts_by_origin_node",
+                    side_effect=[{2: {"transport": 1}}, {2: {"transport": 1}}],
+                ) as walk_counts_mock,
+                mock.patch.object(
+                    precompute,
+                    "precompute_walk_decayed_units_by_origin_node",
+                    return_value={2: {"transport": 0.5}},
+                ) as decayed_units_mock,
+            ):
+                (
+                    _,
+                    walk_counts_by_node,
+                    walk_cluster_counts_by_node,
+                    walk_effective_units_by_node,
+                ) = precompute.phase_reachability(
+                    walk_graph,
+                    amenity_data={},
+                    amenity_source_rows=amenity_source_rows,
+                    tracker=tracker,
+                    walk_origin_node_ids=[0, 1, 2],
+                )
+                cached_walk_counts = precompute.cache_load_large(
+                    "walk_counts_by_origin_node",
+                    cache_dir,
+                )
+                cached_cluster_counts = precompute.cache_load_large(
+                    "walk_cluster_counts_by_origin_node",
+                    cache_dir,
+                )
+                cached_effective_units = precompute.cache_load_large(
+                    "walk_effective_units_by_origin_node",
+                    cache_dir,
+                )
+
+            _clear_state_cache(cache_dir)
+
+        self.assertEqual(walk_counts_mock.call_count, 2)
+        self.assertEqual(walk_counts_mock.call_args_list[0].args[2], (2,))
+        self.assertEqual(walk_counts_mock.call_args_list[1].args[2], (2,))
+        decayed_units_mock.assert_called_once()
+        self.assertEqual(decayed_units_mock.call_args.args[2], (2,))
+        self.assertEqual(
+            walk_counts_by_node,
+            {
+                0: {"transport": 1},
+                1: {"transport": 1},
+                2: {"transport": 1},
+            },
+        )
+        self.assertEqual(
+            walk_cluster_counts_by_node,
+            {
+                0: {"transport": 1},
+                1: {"transport": 1},
+                2: {"transport": 1},
+            },
+        )
+        self.assertEqual(
+            walk_effective_units_by_node,
+            {
+                0: {"transport": 1.0},
+                1: {"transport": 0.75},
+                2: {"transport": 0.5},
+            },
+        )
+        self.assertEqual(cached_walk_counts, walk_counts_by_node)
+        self.assertEqual(cached_cluster_counts, walk_cluster_counts_by_node)
+        self.assertEqual(cached_effective_units, walk_effective_units_by_node)
 
     def test_precompute_walk_counts_by_origin_node_uses_rust_bridge_for_walkgraph_index(self) -> None:
         graph = WalkGraphIndex(
@@ -1302,12 +1960,59 @@ class PrecomputeReachabilityTests(TestCase):
         self.assertEqual(counts_by_node[0], {"shops": 2})
         self.assertEqual(counts_by_node[1], {"shops": 2, "transport": 1})
 
+    def test_precompute_walk_decayed_units_by_origin_node_uses_rust_bridge_for_walkgraph_index(self) -> None:
+        graph = WalkGraphIndex(
+            graph_dir=Path("cache/walk_graph"),
+            meta={"node_count": 3, "edge_count": 2},
+            node_latitudes=np.array([53.0, 53.1, 53.2], dtype=np.float64),
+            node_longitudes=np.array([-6.3, -6.2, -6.1], dtype=np.float64),
+        )
+        node_weights_by_category = {
+            "shops": [(0, 2)],
+            "transport": [(1, 1)],
+        }
+
+        def _fake_rust_run(
+            graph_dir,
+            origins_bin,
+            amenity_weights_bin,
+            output_bin,
+            *,
+            category_count,
+            cutoff_m,
+            walkgraph_bin,
+            output_mode,
+            half_distances_m,
+            progress_cb,
+        ) -> None:
+            del graph_dir, origins_bin, amenity_weights_bin, category_count, cutoff_m, walkgraph_bin, progress_cb
+            self.assertEqual(output_mode, "decayed-units")
+            self.assertEqual(half_distances_m, [150.0, 250.0])
+            np.asarray([1.0, 0.5, 0.25, 0.0], dtype=np.float32).tofile(output_bin)
+
+        with mock.patch.object(precompute._network, "run_walkgraph_reachability", side_effect=_fake_rust_run):
+            decayed_units = precompute.precompute_walk_decayed_units_by_origin_node(
+                graph,
+                node_weights_by_category,
+                [0, 1],
+                cutoff=500.0,
+                half_distance_m_by_category={
+                    "shops": 150.0,
+                    "transport": 250.0,
+                },
+            )
+
+        self.assertEqual(decayed_units[0], {"shops": 1.0, "transport": 0.5})
+        self.assertEqual(decayed_units[1], {"shops": 0.25})
+
     def test_reach_tier_finalization_uses_walk_origin_count_cache(self) -> None:
         with TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir)
             precompute.cache_save("walk_nodes_by_cat", _empty_amenity_data(), cache_dir)
+            precompute.cache_save("walk_cluster_nodes_by_cat", _empty_amenity_data(), cache_dir)
             precompute.cache_save_large("walk_counts_by_origin_node", {0: {}}, cache_dir)
-            precompute.cache_save_large("walk_weighted_units_by_origin_node", {0: {}}, cache_dir)
+            precompute.cache_save_large("walk_cluster_counts_by_origin_node", {0: {}}, cache_dir)
+            precompute.cache_save_large("walk_effective_units_by_origin_node", {0: {}}, cache_dir)
 
             with mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir):
                 can_finalize = precompute._can_finalize_reach_tier(_empty_amenity_data())
@@ -1698,8 +2403,12 @@ class GridArtifactTests(TestCase):
                     20: {"parks": 1},
                 },
                 {
-                    10: {},
+                    10: {"shops": 1},
                     20: {"parks": 1},
+                },
+                {
+                    10: {},
+                    20: {"parks": 0.5},
                 },
             )
         )
@@ -1765,9 +2474,14 @@ class GridArtifactTests(TestCase):
                     30: {"parks": 1},
                 },
                 {
-                    10: 0.0,
-                    20: 0.0,
-                    30: 1.0,
+                    10: {"shops": 1},
+                    20: {"transport": 1},
+                    30: {"parks": 1},
+                },
+                {
+                    10: {"shops": 0.5},
+                    20: {"transport": 0.5},
+                    30: {"parks": 1.0},
                 },
             )
         )
@@ -1800,7 +2514,8 @@ class GridArtifactTests(TestCase):
             grid_cells_are_2d=precompute._grid._grid_cells_are_2d,
             phase_networks=mock.Mock(return_value=walk_graph),
             phase_reachability=phase_reachability_mock,
-            normalize_origin_node_ids=lambda values: sorted({int(value) for value in values}),
+            normalize_origin_node_ids=precompute.normalize_origin_node_ids,
+            merge_normalized_origin_node_ids=precompute.merge_normalized_origin_node_ids,
             build_grid=mock.Mock(return_value=[_grid_cell("1000-a")]),
             elapsed=lambda started_at: "[0.0s]",
             clone_grid_shells=precompute._grid._clone_grid_shells,
@@ -1813,7 +2528,7 @@ class GridArtifactTests(TestCase):
             surface_score_dir=Path("surface-scores"),
             ensure_surface_shell_cache=ensure_surface_shell_cache_mock,
             ensure_surface_score_cache=ensure_surface_score_cache_mock,
-            collect_surface_origin_nodes=mock.Mock(return_value=[30, 20, 20]),
+            collect_surface_origin_nodes=mock.Mock(return_value=[20, 30]),
             surface_analysis_ready=mock.Mock(return_value=False),
             graph_dir=Path("graph-dir"),
             walkgraph_bin="walkgraph.exe",
@@ -1832,7 +2547,9 @@ class GridArtifactTests(TestCase):
         walk_graph = mock.Mock()
         walk_graph.vcount.return_value = 42
         cache_store: dict[str, object] = {}
-        phase_reachability_mock = mock.Mock(return_value=({}, {10: {"shops": 1}}, {10: {}}))
+        phase_reachability_mock = mock.Mock(
+            return_value=({}, {10: {"shops": 1}}, {10: {"shops": 1}}, {10: {"shops": 1.0}})
+        )
         ensure_surface_shell_cache_mock = mock.Mock(
             side_effect=AssertionError("dev mode should not build fine surface shells")
         )
@@ -1858,7 +2575,8 @@ class GridArtifactTests(TestCase):
             grid_cells_are_2d=precompute._grid._grid_cells_are_2d,
             phase_networks=mock.Mock(return_value=walk_graph),
             phase_reachability=phase_reachability_mock,
-            normalize_origin_node_ids=lambda values: sorted({int(value) for value in values}),
+            normalize_origin_node_ids=precompute.normalize_origin_node_ids,
+            merge_normalized_origin_node_ids=precompute.merge_normalized_origin_node_ids,
             build_grid=mock.Mock(return_value=[_grid_cell("1000-a")]),
             elapsed=lambda started_at: "[0.0s]",
             clone_grid_shells=precompute._grid._clone_grid_shells,
@@ -2179,6 +2897,8 @@ class StudyAreaAndPublishTests(TestCase):
         self.assertFalse(walk_rows[0]["centre_geom"].has_z)
         self.assertEqual(walk_rows[0]["effective_area_m2"], 1.0)
         self.assertEqual(walk_rows[0]["effective_area_ratio"], 1.0)
+        self.assertEqual(walk_rows[0]["cluster_counts_json"], {})
+        self.assertEqual(walk_rows[0]["effective_units_json"], {})
 
         invalid_grids = {
             1000: [_grid_cell("bad-cell", geometry=_polygon_z(0.0, 0.0, 1.0, 1.0))],

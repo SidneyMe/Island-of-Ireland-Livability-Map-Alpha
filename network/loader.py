@@ -198,6 +198,8 @@ def run_walkgraph_reachability(
     category_count: int,
     cutoff_m: float,
     walkgraph_bin: str = "walkgraph",
+    output_mode: str = "counts",
+    half_distances_m: list[float] | None = None,
     progress_cb=None,
 ) -> None:
     ensure_walkgraph_subcommand_available(walkgraph_bin, "reachability")
@@ -214,9 +216,16 @@ def run_walkgraph_reachability(
         str(int(category_count)),
         "--cutoff-m",
         f"{float(cutoff_m):.6f}",
+        "--output-mode",
+        str(output_mode),
         "--out",
         str(output_bin),
     ]
+    if half_distances_m is not None:
+        command += [
+            "--half-distances-m",
+            ",".join(f"{float(value):.6f}" for value in half_distances_m),
+        ]
 
     try:
         process = subprocess.Popen(

@@ -266,6 +266,8 @@ def load_walk_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
                 grid_walk.c.effective_area_m2,
                 grid_walk.c.effective_area_ratio,
                 grid_walk.c.counts_json,
+                grid_walk.c.cluster_counts_json,
+                grid_walk.c.effective_units_json,
                 grid_walk.c.scores_json,
                 grid_walk.c.total_score,
             )
@@ -283,6 +285,8 @@ def load_walk_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:
             "effective_area_m2": float(row["effective_area_m2"]),
             "effective_area_ratio": float(row["effective_area_ratio"]),
             "counts_json": row["counts_json"],
+            "cluster_counts_json": row["cluster_counts_json"],
+            "effective_units_json": row["effective_units_json"],
             "scores_json": row["scores_json"],
             "total_score": row["total_score"],
         }
@@ -309,6 +313,8 @@ def load_walk_rows_for_resolutions(
                 grid_walk.c.effective_area_m2,
                 grid_walk.c.effective_area_ratio,
                 grid_walk.c.counts_json,
+                grid_walk.c.cluster_counts_json,
+                grid_walk.c.effective_units_json,
                 grid_walk.c.scores_json,
                 grid_walk.c.total_score,
             )
@@ -327,6 +333,8 @@ def load_walk_rows_for_resolutions(
             "effective_area_m2": float(row["effective_area_m2"]),
             "effective_area_ratio": float(row["effective_area_ratio"]),
             "counts_json": row["counts_json"],
+            "cluster_counts_json": row["cluster_counts_json"],
+            "effective_units_json": row["effective_units_json"],
             "scores_json": row["scores_json"],
             "total_score": row["total_score"],
         }

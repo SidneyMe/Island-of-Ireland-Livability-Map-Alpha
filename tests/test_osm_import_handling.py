@@ -740,6 +740,8 @@ class DbReadTests(TestCase):
                 "effective_area_m2": 12_500_000.0,
                 "effective_area_ratio": 0.5,
                 "counts_json": {"shops": 2},
+                "cluster_counts_json": {"shops": 1},
+                "effective_units_json": {"shops": 1.5},
                 "scores_json": {"shops": 10.0},
                 "total_score": 10.0,
             }
@@ -751,6 +753,8 @@ class DbReadTests(TestCase):
         self.assertEqual(rows[0]["effective_area_m2"], 12_500_000.0)
         self.assertEqual(rows[0]["effective_area_ratio"], 0.5)
         self.assertEqual(rows[0]["cell_geom"], "cell-geom")
+        self.assertEqual(rows[0]["cluster_counts_json"], {"shops": 1})
+        self.assertEqual(rows[0]["effective_units_json"], {"shops": 1.5})
 
     def test_load_walk_rows_for_resolutions_includes_effective_area_fields(self) -> None:
         engine = mock.MagicMock()
@@ -764,6 +768,8 @@ class DbReadTests(TestCase):
                 "effective_area_m2": 80_000_000.0,
                 "effective_area_ratio": 0.8,
                 "counts_json": {"parks": 1},
+                "cluster_counts_json": {"parks": 1},
+                "effective_units_json": {"parks": 0.75},
                 "scores_json": {"parks": 12.5},
                 "total_score": 12.5,
             }
@@ -775,6 +781,8 @@ class DbReadTests(TestCase):
         self.assertEqual(rows[0]["effective_area_m2"], 80_000_000.0)
         self.assertEqual(rows[0]["effective_area_ratio"], 0.8)
         self.assertEqual(rows[0]["centre_geom"], "centre-geom-2")
+        self.assertEqual(rows[0]["cluster_counts_json"], {"parks": 1})
+        self.assertEqual(rows[0]["effective_units_json"], {"parks": 0.75})
 
     def test_load_point_scores_for_build_short_circuits_empty_points(self) -> None:
         engine = mock.MagicMock()
