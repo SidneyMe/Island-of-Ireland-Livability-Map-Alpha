@@ -196,7 +196,7 @@ Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 
 The v1 model counts features by presence. A corner shop scores the same as a supermarket, a 7 m² pocket park the same as Phoenix Park, a rural GP the same as a major hospital. v2 introduces sub-tiering, variety, distance decay, mode awareness, and land-use context.
 
-### Sub-tier shops
+### ~~Sub-tier shops~~
 
 **What:** corner shop → regular shop → supermarket → mall / retail cluster.
 
@@ -210,7 +210,7 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
 - Footprint thresholds need calibration against the sanity fixture.
 - The existing `CAPS = {"shops": 5, ...}` in `config.py` becomes a per-tier table rather than a single cap.
 
-### Sub-tier healthcare
+### ~~Sub-tier healthcare~~
 
 **What:** pharmacy / GP → clinic / health centre → hospital → major hospital with A&E.
 
@@ -222,7 +222,7 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
 - `amenity=hospital` with `emergency=yes` → tier 4.
 - Cross-reference with HSE facility lists for ROI when they're available as open data.
 
-### Sub-tier parks by area
+### ~~Sub-tier parks by area~~
 
 **What:** Pocket park / playground (<0.5 ha) → neighbourhood park (0.5–5 ha) → district park (5–25 ha) → regional park / nature reserve (25+ ha).
 
