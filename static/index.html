@@ -48,6 +48,83 @@
                     <span>Show walk score grid</span>
                     <input id="grid-toggle" type="checkbox" checked>
                 </label>
+
+                <section id="grid-debug-section" class="grid-debug-section" hidden>
+                    <div class="section-heading">
+                        <h3>Grid debug</h3>
+                        <span class="grid-debug-chip">Debug mode: on</span>
+                    </div>
+                    <p id="grid-debug-diagnosis" class="grid-debug-diagnosis" aria-live="polite">
+                        Waiting for livability diagnostics...
+                    </p>
+                    <div id="grid-debug-controls" class="grid-debug-controls"></div>
+                    <dl class="grid-debug-list">
+                        <div class="grid-debug-row">
+                            <dt>Debug mode</dt>
+                            <dd id="grid-debug-enabled">on</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Zoom</dt>
+                            <dd id="grid-debug-zoom" class="grid-debug-mono">--</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Active resolution</dt>
+                            <dd id="grid-debug-resolution" class="grid-debug-mono">--</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Grid toggle</dt>
+                            <dd id="grid-debug-grid-visible">on</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Filter</dt>
+                            <dd id="grid-debug-filter" class="grid-debug-mono">none</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Source features in viewport</dt>
+                            <dd id="grid-debug-source-count" class="grid-debug-mono">0</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Rendered features in viewport</dt>
+                            <dd id="grid-debug-rendered-count" class="grid-debug-mono">0</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Source resolutions</dt>
+                            <dd id="grid-debug-source-resolutions" class="grid-debug-mono">none</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Fill layer</dt>
+                            <dd id="grid-debug-fill-layer">missing + none</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Fill layer id</dt>
+                            <dd id="grid-debug-fill-layer-id" class="grid-debug-mono">none</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Outline layer</dt>
+                            <dd id="grid-debug-outline-layer">missing + none</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Outline layer id</dt>
+                            <dd id="grid-debug-outline-layer-id" class="grid-debug-mono">none</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Livability source</dt>
+                            <dd id="grid-debug-source-loaded">loading</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Last source event</dt>
+                            <dd id="grid-debug-last-source-event" class="grid-debug-mono">none</dd>
+                        </div>
+                        <div class="grid-debug-row">
+                            <dt>Last map error</dt>
+                            <dd id="grid-debug-last-map-error" class="grid-debug-mono">none</dd>
+                        </div>
+                    </dl>
+                    <button id="grid-debug-copy-button" class="grid-debug-copy-button" type="button">
+                        Copy grid debug snapshot
+                    </button>
+                    <pre id="grid-debug-snapshot-fallback" class="grid-debug-snapshot-fallback" hidden></pre>
+                </section>
             </section>
 
             <section class="panel-section">

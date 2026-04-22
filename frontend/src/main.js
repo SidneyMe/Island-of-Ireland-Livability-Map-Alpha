@@ -9,10 +9,28 @@ import {
   tierOptionsForCategory
 } from "./amenity_filters.js";
 import {
+  GRID_INSERT_BEFORE_LAYER_ID as runtimeGridInsertBeforeLayerId,
+  activeGridLifecycle as runtimeActiveGridLifecycle,
+  activeDebugGridLayerId as runtimeActiveDebugGridLayerId,
+  activeGridLayerId as runtimeActiveGridLayerId,
+  activeGridOutlineLayerId as runtimeActiveGridOutlineLayerId,
   buildStyle as buildRuntimeStyle,
+  buildActiveGridLayers as runtimeBuildActiveGridLayers,
+  debugGridVisibilityPlan as runtimeDebugGridVisibilityPlan,
   fineSurfaceEnabled as runtimeFineSurfaceEnabled,
+  gridVisibilityPlan as runtimeGridVisibilityPlan,
   resolutionForZoom as runtimeResolutionForZoom
 } from "./runtime_contract.js";
+import {
+  buildGridDebugSnapshot,
+  copyGridDebugSnapshot,
+  createGridDebugState,
+  debugGridEnabledFromUrl,
+  formatGridDebugFilter,
+  formatResolutionLabel,
+  formatSourceEventLabel,
+  renderGridDebugCard
+} from "./grid_debug.js";
 import { transportRealityPopupHtml } from "./transport_reality_popup.js";
 
 const protocol = new Protocol();
@@ -23,6 +41,9 @@ const DEBUG_GRID_QUERY_PARAM = "debug-grid";
 const SCORE_SECTIONS = ["shops", "transport", "healthcare", "parks"];
 const RUNTIME_FETCH_TIMEOUT_MS = 10000;
 const INSPECT_FETCH_TIMEOUT_MS = 15000;
+const DEBUG_GRID_ENABLED = debugGridEnabledFromUrl(window.location.href, {
+  paramName: DEBUG_GRID_QUERY_PARAM
+});
 
 function fetchWithTimeout(input, init, timeoutMs) {
   const controller = new AbortController();
@@ -59,7 +80,31 @@ const elements = {
   transportRealityDownload: document.getElementById("transport-reality-download"),
   gridToggle: document.getElementById("grid-toggle"),
   map: document.getElementById("map"),
-  mapStage: document.getElementById("map-stage")
+  mapStage: document.getElementById("map-stage"),
+  gridDebug: {
+    section: document.getElementById("grid-debug-section"),
+    controls: document.getElementById("grid-debug-controls"),
+    diagnosis: document.getElementById("grid-debug-diagnosis"),
+    copyButton: document.getElementById("grid-debug-copy-button"),
+    snapshotFallback: document.getElementById("grid-debug-snapshot-fallback"),
+    values: {
+      enabled: document.getElementById("grid-debug-enabled"),
+      zoom: document.getElementById("grid-debug-zoom"),
+      resolutionM: document.getElementById("grid-debug-resolution"),
+      gridVisible: document.getElementById("grid-debug-grid-visible"),
+      activeFilter: document.getElementById("grid-debug-filter"),
+      sourceCount: document.getElementById("grid-debug-source-count"),
+      renderedCount: document.getElementById("grid-debug-rendered-count"),
+      sourceResolutions: document.getElementById("grid-debug-source-resolutions"),
+      fillLayer: document.getElementById("grid-debug-fill-layer"),
+      fillLayerId: document.getElementById("grid-debug-fill-layer-id"),
+      outlineLayer: document.getElementById("grid-debug-outline-layer"),
+      outlineLayerId: document.getElementById("grid-debug-outline-layer-id"),
+      sourceLoaded: document.getElementById("grid-debug-source-loaded"),
+      lastSourceEvent: document.getElementById("grid-debug-last-source-event"),
+      lastMapError: document.getElementById("grid-debug-last-map-error")
+    }
+  }
 };
 
 const state = {
@@ -70,7 +115,10 @@ const state = {
   enabledAmenityCategories: new Set(),
   enabledAmenityTiers: new Map(),
   gridVisible: true,
+  activeGridResolutionM: null,
   debugGridVisible: false,
+  gridDebug: createGridDebugState(DEBUG_GRID_ENABLED),
+  gridDebugSnapshotFallbackText: "",
   transportRealityVisible: false,
   serviceDesertsVisible: false,
   pendingInspect: null
@@ -95,13 +143,28 @@ function resolutionForZoom(zoom) {
   return runtimeResolutionForZoom(state.runtime, zoom);
 }
 
-function formatResolutionLabel(resolutionM) {
-  const resolution = Number(resolutionM);
-  if (resolution >= 1000) {
-    const km = resolution / 1000;
-    return Number.isInteger(km) ? km + "km" : km.toFixed(1) + "km";
-  }
-  return resolution + "m";
+function activeGridLayerId() {
+  const zoom = state.map ? state.map.getZoom() : 0;
+  return runtimeActiveGridLayerId(state.runtime || {}, zoom);
+}
+
+function activeGridOutlineLayerId() {
+  const zoom = state.map ? state.map.getZoom() : 0;
+  return runtimeActiveGridOutlineLayerId(state.runtime || {}, zoom);
+}
+
+function activeDebugGridLayerId() {
+  const zoom = state.map ? state.map.getZoom() : 0;
+  return runtimeActiveDebugGridLayerId(state.runtime || {}, zoom);
+}
+
+function activeGridLifecycle() {
+  const zoom = state.map ? state.map.getZoom() : 0;
+  return runtimeActiveGridLifecycle(
+    state.runtime || {},
+    state.activeGridResolutionM,
+    zoom
+  );
 }
 
 function setResolutionChip() {
@@ -172,23 +235,156 @@ function resizeMapAfterPanelTransition() {
   window.setTimeout(finish, 400);
 }
 
-function applyGridVisibility() {
-  if (!state.map) return;
-  const visibility = state.gridVisible ? "visible" : "none";
-  state.map.setLayoutProperty("grid-fill-coarse", "visibility", visibility);
-  if (!fineSurfaceEnabled()) return;
-  (state.runtime.fine_resolutions_m || []).forEach(function (resolutionM) {
-    state.map.setLayoutProperty("surface-" + resolutionM, "visibility", visibility);
+function setLayerVisibility(layerId, visibility) {
+  if (!state.map || !state.map.getLayer(layerId)) return;
+  state.map.setLayoutProperty(layerId, "visibility", visibility);
+}
+
+function removeLayerIfPresent(layerId) {
+  if (!state.map || !state.map.getLayer(layerId)) return;
+  state.map.removeLayer(layerId);
+}
+
+function livabilitySourceLoaded() {
+  if (!state.map || typeof state.map.isSourceLoaded !== "function") {
+    return Boolean(state.gridDebug.sourceLoaded);
+  }
+  try {
+    return Boolean(state.map.isSourceLoaded("livability"));
+  } catch (error) {
+    return Boolean(state.gridDebug.sourceLoaded);
+  }
+}
+
+function queryGridSourceCount(filter) {
+  if (!state.map) return 0;
+  try {
+    return state.map.querySourceFeatures("livability", {
+      sourceLayer: "grid",
+      filter: filter
+    }).length;
+  } catch (error) {
+    return 0;
+  }
+}
+
+function queryGridSourceResolutionCounts() {
+  if (!state.map) return {};
+  try {
+    const features = state.map.querySourceFeatures("livability", {
+      sourceLayer: "grid"
+    });
+    const counts = {};
+    for (let i = 0; i < features.length; i += 1) {
+      const props = features[i] && features[i].properties;
+      if (!props) continue;
+      const key = String(Number(props.resolution_m));
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return counts;
+  } catch (error) {
+    return {};
+  }
+}
+
+function queryGridRenderedCount(activeFillLayerId) {
+  if (!state.map || !activeFillLayerId || !state.map.getLayer(activeFillLayerId)) {
+    return 0;
+  }
+  try {
+    return state.map.queryRenderedFeatures(undefined, {
+      layers: [activeFillLayerId]
+    }).length;
+  } catch (error) {
+    return 0;
+  }
+}
+
+function refreshGridDebugCard(overrides = {}) {
+  const zoom = state.map
+    ? state.map.getZoom()
+    : Number(state.runtime && state.runtime.default_zoom || 0);
+  const lifecycle = runtimeActiveGridLifecycle(
+    state.runtime || {},
+    state.activeGridResolutionM,
+    zoom
+  );
+  const activeFillLayer = runtimeActiveGridLayerId(state.runtime || {}, zoom);
+  const activeOutlineLayer = runtimeActiveGridOutlineLayerId(state.runtime || {}, zoom);
+  const fillLayerPresent = Boolean(state.map && activeFillLayer && state.map.getLayer(activeFillLayer));
+  const outlineLayerPresent = Boolean(state.map && activeOutlineLayer && state.map.getLayer(activeOutlineLayer));
+  const nextGridDebug = Object.assign({}, state.gridDebug, {
+    enabled: DEBUG_GRID_ENABLED,
+    zoom: zoom,
+    resolutionM: lifecycle.resolutionM,
+    gridVisible: state.gridVisible,
+    activeFillLayerId: activeFillLayer,
+    activeOutlineLayerId: activeOutlineLayer,
+    activeFilter: formatGridDebugFilter(lifecycle.filter),
+    sourceCount: queryGridSourceCount(lifecycle.filter),
+    renderedCount: queryGridRenderedCount(activeFillLayer),
+    sourceResolutions: queryGridSourceResolutionCounts(),
+    fillLayerPresent: fillLayerPresent,
+    outlineLayerPresent: outlineLayerPresent,
+    fillVisibility: fillLayerPresent
+      ? String(state.map.getLayoutProperty(activeFillLayer, "visibility") || "visible")
+      : "none",
+    outlineVisibility: outlineLayerPresent
+      ? String(state.map.getLayoutProperty(activeOutlineLayer, "visibility") || "visible")
+      : "none",
+    sourceLoaded: livabilitySourceLoaded()
+  }, overrides);
+  state.gridDebug = nextGridDebug;
+  renderGridDebugCard(elements.gridDebug, state.runtime, state.gridDebug, {
+    snapshotFallbackText: state.gridDebugSnapshotFallbackText
   });
 }
 
+function ensureActiveGridLayers() {
+  if (!state.map) return null;
+  const lifecycle = activeGridLifecycle();
+  const requiredLayerIds = [
+    activeGridLayerId(),
+    activeGridOutlineLayerId(),
+    activeDebugGridLayerId()
+  ];
+  const layersPresent = requiredLayerIds.every(function (layerId) {
+    return Boolean(state.map && state.map.getLayer(layerId));
+  });
+  if (!lifecycle.rebuild && layersPresent) {
+    return lifecycle;
+  }
+
+  removeLayerIfPresent(activeDebugGridLayerId());
+  removeLayerIfPresent(activeGridOutlineLayerId());
+  removeLayerIfPresent(activeGridLayerId());
+
+  const beforeLayerId = state.map.getLayer(runtimeGridInsertBeforeLayerId)
+    ? runtimeGridInsertBeforeLayerId
+    : undefined;
+  runtimeBuildActiveGridLayers(state.runtime || {}, lifecycle.resolutionM).forEach(function (layer) {
+    state.map.addLayer(layer, beforeLayerId);
+  });
+  state.activeGridResolutionM = lifecycle.resolutionM;
+  return lifecycle;
+}
+
+function applyGridVisibility() {
+  const lifecycle = ensureActiveGridLayers();
+  if (!state.map || !lifecycle) return;
+  runtimeGridVisibilityPlan(state.runtime || {}, state.map.getZoom(), state.gridVisible).forEach(function (entry) {
+    setLayerVisibility(entry.layerId, entry.visibility);
+  });
+  refreshGridDebugCard();
+}
+
 function applyDebugGridVisibility() {
-  if (!state.map) return;
-  state.map.setLayoutProperty(
-    "grid-fill-debug",
-    "visibility",
-    state.debugGridVisible ? "visible" : "none"
-  );
+  const lifecycle = ensureActiveGridLayers();
+  if (!state.map || !lifecycle) return;
+  runtimeDebugGridVisibilityPlan(state.runtime || {}, state.map.getZoom(), state.debugGridVisible).forEach(function (entry) {
+    setLayerVisibility(entry.layerId, entry.visibility);
+  });
+  refreshGridDebugCard();
 }
 
 function applyAmenityFilter() {
@@ -427,17 +623,17 @@ function buildTransitControls() {
 }
 
 function maybeBuildDebugGridControl() {
-  const url = new URL(window.location.href);
-  if (url.searchParams.get(DEBUG_GRID_QUERY_PARAM) !== "1") return;
-  const gridSection = elements.gridToggle.closest(".panel-section");
-  if (!gridSection) return;
+  renderGridDebugCard(elements.gridDebug, state.runtime, state.gridDebug, {
+    snapshotFallbackText: state.gridDebugSnapshotFallbackText
+  });
+  if (!DEBUG_GRID_ENABLED || !elements.gridDebug.controls) return;
 
   const label = document.createElement("label");
   label.className = "toggle-row";
   label.htmlFor = "grid-debug-toggle";
 
   const text = document.createElement("span");
-  text.textContent = "Show coarse vector debug grid";
+  text.textContent = "Show vector debug grid";
 
   const input = document.createElement("input");
   input.type = "checkbox";
@@ -450,7 +646,7 @@ function maybeBuildDebugGridControl() {
 
   label.appendChild(text);
   label.appendChild(input);
-  gridSection.appendChild(label);
+  elements.gridDebug.controls.appendChild(label);
 }
 
 function amenityPopupHtml(properties) {
@@ -591,6 +787,18 @@ async function fetchInspect(lngLat) {
   }
 }
 
+function isLivabilitySourceEvent(event) {
+  if (!event) return false;
+  if (event.sourceId === "livability") return true;
+  if (event.source && event.source.id === "livability") return true;
+  if (!state.map || typeof state.map.getSource !== "function") return false;
+  try {
+    return event.source === state.map.getSource("livability");
+  } catch (error) {
+    return false;
+  }
+}
+
 function wireUi() {
   elements.panelToggle.addEventListener("click", function () {
     state.panelHidden = !state.panelHidden;
@@ -612,6 +820,28 @@ function wireUi() {
     state.gridVisible = elements.gridToggle.checked;
     applyGridVisibility();
   });
+
+  if (elements.gridDebug.copyButton) {
+    elements.gridDebug.copyButton.addEventListener("click", async function () {
+      const snapshot = buildGridDebugSnapshot(state.runtime, state.gridDebug);
+      await copyGridDebugSnapshot(
+        window.navigator && window.navigator.clipboard,
+        snapshot,
+        function (fallbackText) {
+          state.gridDebugSnapshotFallbackText = fallbackText || "";
+        }
+      );
+      if (state.gridDebugSnapshotFallbackText.length === 0) {
+        renderGridDebugCard(elements.gridDebug, state.runtime, state.gridDebug, {
+          snapshotFallbackText: ""
+        });
+        return;
+      }
+      renderGridDebugCard(elements.gridDebug, state.runtime, state.gridDebug, {
+        snapshotFallbackText: state.gridDebugSnapshotFallbackText
+      });
+    });
+  }
 
   window.addEventListener("resize", function () {
     if (state.map) state.map.resize();
@@ -653,8 +883,34 @@ function initializeMap() {
     elements.statusPill.style.display = "none";
   });
 
-  state.map.on("zoom", setResolutionChip);
-  state.map.on("zoomend", setResolutionChip);
+  state.map.on("zoom", function () {
+    setResolutionChip();
+    applyGridVisibility();
+    applyDebugGridVisibility();
+  });
+  state.map.on("zoomend", function () {
+    setResolutionChip();
+    applyGridVisibility();
+    applyDebugGridVisibility();
+  });
+  state.map.on("moveend", function () {
+    refreshGridDebugCard();
+  });
+  state.map.on("sourcedata", function (event) {
+    if (!isLivabilitySourceEvent(event)) return;
+    refreshGridDebugCard({
+      lastSourceEvent: formatSourceEventLabel(event),
+      sourceLoaded: event.isSourceLoaded === undefined
+        ? livabilitySourceLoaded()
+        : Boolean(event.isSourceLoaded)
+    });
+  });
+  state.map.on("data", function (event) {
+    if (!isLivabilitySourceEvent(event)) return;
+    refreshGridDebugCard({
+      lastSourceEvent: formatSourceEventLabel(event)
+    });
+  });
 
   state.map.on("click", async function (event) {
     const transportRealityFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["transport-reality-circle"] });
@@ -701,7 +957,12 @@ function initializeMap() {
       return;
     }
 
-    const gridFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["grid-fill-coarse"] });
+    const activeLayerId = state.gridVisible ? activeGridLayerId() : null;
+    const visibleGridLayers = activeLayerId ? [activeLayerId] : [];
+    if (visibleGridLayers.length === 0) {
+      return;
+    }
+    const gridFeatures = state.map.queryRenderedFeatures(event.point, { layers: visibleGridLayers });
     if (gridFeatures.length > 0) {
       state.popup
         .setLngLat(event.lngLat)
@@ -733,12 +994,19 @@ function initializeMap() {
     const message = (event && event.error && event.error.message) || "Map error";
     updateStatus(message);
     elements.statusPill.style.display = "";
+    refreshGridDebugCard({
+      lastMapError: message
+    });
   });
 }
 
 function initializeApp(runtime) {
   state.runtime = runtime;
   state.gridVisible = true;
+  state.activeGridResolutionM = null;
+  state.debugGridVisible = false;
+  state.gridDebug = createGridDebugState(DEBUG_GRID_ENABLED);
+  state.gridDebugSnapshotFallbackText = "";
   state.enabledAmenityCategories = new Set();
   state.enabledAmenityTiers = new Map(
     Object.entries(defaultAmenityTierSelections(runtime)).map(function (entry) {

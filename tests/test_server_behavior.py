@@ -39,7 +39,6 @@ class _FakeService:
                 {"min_zoom": 8, "resolution_m": 10000},
                 {"min_zoom": 0, "resolution_m": 20000},
             ],
-            "surface_tile_url_template": "/tiles/surface/{resolution_m}/{z}/{x}/{y}.png",
             "inspect_url": "/api/inspect",
             "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
             "amenity_tier_counts": {
@@ -132,12 +131,24 @@ def _make_fixture(tmp: Path, pmtiles_bytes: bytes = b"PMTILESFAKE" * 32) -> tupl
     static_dir = tmp / "static"
     static_dir.mkdir()
     (static_dir / "index.html").write_bytes(b"<!doctype html><title>livability</title>")
+    dist_dir = static_dir / "dist"
+    dist_dir.mkdir()
+    (dist_dir / "app.js").write_text("console.log('livability');", encoding="utf-8")
     pmtiles_path = tmp / "livability.pmtiles"
     pmtiles_path.write_bytes(pmtiles_bytes)
     return static_dir, pmtiles_path
 
 
 class LocalServerEndpointTests(TestCase):
+    def test_client_disconnect_logging_suppresses_inspect_abort_noise(self) -> None:
+        handler = serve_from_db.LivabilityRequestHandler.__new__(serve_from_db.LivabilityRequestHandler)
+        with mock.patch("builtins.print") as print_mock:
+            handler._log_client_disconnect("/api/inspect", ConnectionAbortedError("aborted"))
+            handler._log_client_disconnect("/tiles/livability.pmtiles", ConnectionAbortedError("aborted"))
+            handler._log_client_disconnect("/api/runtime", ConnectionAbortedError("aborted"))
+
+        print_mock.assert_called_once_with("Client disconnected during /api/runtime: aborted")
+
     def test_runtime_endpoint_returns_payload(self) -> None:
         service = _FakeService()
         with TemporaryDirectory() as tmp_name:
@@ -148,7 +159,14 @@ class LocalServerEndpointTests(TestCase):
 
         self.assertEqual(payload["build_key"], "build-123")
         self.assertEqual(payload["pmtiles_url"], "/tiles/livability.pmtiles")
+        self.assertNotIn("surface_tile_url_template", payload)
         self.assertEqual(service.calls, [("runtime",)])
+
+    def test_missing_precompute_message_uses_test_flag(self) -> None:
+        message = serve_from_db._missing_precompute_message(profile="test")
+
+        self.assertIn("profile=test", message)
+        self.assertIn("Run --precompute-test first.", message)
 
     def test_root_serves_static_index_html(self) -> None:
         service = _FakeService()
@@ -158,9 +176,25 @@ class LocalServerEndpointTests(TestCase):
                 with urlopen(base_url + "/") as response:
                     body = response.read()
                     content_type = response.headers.get_content_type()
+                    cache_control = response.headers.get("Cache-Control")
 
         self.assertEqual(content_type, "text/html")
         self.assertIn(b"livability", body.lower())
+        self.assertEqual(cache_control, "no-store")
+
+    def test_static_assets_are_served_no_store(self) -> None:
+        service = _FakeService()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                with urlopen(base_url + "/static/dist/app.js") as response:
+                    body = response.read()
+                    content_type = response.headers.get_content_type()
+                    cache_control = response.headers.get("Cache-Control")
+
+        self.assertIn("javascript", content_type)
+        self.assertIn(b"livability", body)
+        self.assertEqual(cache_control, "no-store")
 
     def test_export_endpoint_serves_transport_reality_zip(self) -> None:
         service = _FakeService()
@@ -187,9 +221,11 @@ class LocalServerEndpointTests(TestCase):
                 with urlopen(base_url + "/tiles/livability.pmtiles") as response:
                     payload = response.read()
                     accept_ranges = response.headers.get("Accept-Ranges")
+                    cache_control = response.headers.get("Cache-Control")
 
         self.assertEqual(payload, body)
         self.assertEqual(accept_ranges, "bytes")
+        self.assertEqual(cache_control, "public, max-age=3600")
 
     def test_dev_profile_pmtiles_route_is_profile_specific(self) -> None:
         body = b"PMTILES_DEV_BYTES" * 16
@@ -202,6 +238,21 @@ class LocalServerEndpointTests(TestCase):
                 profile="dev",
             ) as base_url:
                 with urlopen(base_url + "/tiles/livability-dev.pmtiles") as response:
+                    payload = response.read()
+
+        self.assertEqual(payload, body)
+
+    def test_test_profile_pmtiles_route_is_profile_specific(self) -> None:
+        body = b"PMTILES_TEST_BYTES" * 16
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name), pmtiles_bytes=body)
+            with _ServerHarness(
+                _FakeService(),
+                pmtiles_path=pmtiles_path,
+                static_dir=static_dir,
+                profile="test",
+            ) as base_url:
+                with urlopen(base_url + "/tiles/livability-test.pmtiles") as response:
                     payload = response.read()
 
         self.assertEqual(payload, body)
@@ -379,6 +430,7 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["max_zoom"], 19)
         self.assertTrue(payload["fine_surface_enabled"])
         self.assertEqual(payload["fine_resolutions_m"], [2500, 1000, 500, 250, 100, 50])
+        self.assertNotIn("surface_tile_url_template", payload)
         self.assertEqual(payload["inspect_url"], "/api/inspect")
         self.assertTrue(payload["transport_reality_enabled"])
         self.assertTrue(payload["service_deserts_enabled"])
@@ -476,6 +528,58 @@ class RenderAndCliTests(TestCase):
         self.assertNotIn("surface_tile_url_template", payload)
         self.assertNotIn("inspect_url", payload)
 
+    def test_runtime_service_uses_test_config_hash_and_profile_specific_pmtiles(self) -> None:
+        manifest = {
+            "build_key": "build-test-123",
+            "reach_hash": "reach-hash-test",
+            "score_hash": "score-hash-test",
+            "render_hash": "render-hash-test",
+            "summary_json": {
+                "build_profile": "test",
+                "map_center": {"lat": 51.9, "lon": -8.47},
+                "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {"corner": 3, "regular": 9},
+                    "transport": {},
+                    "healthcare": {"local": 1},
+                    "parks": {"district": 3},
+                },
+                "transport_reality_enabled": True,
+                "service_deserts_enabled": True,
+                "fine_resolutions_m": [2500, 1000, 500, 250, 100, 50],
+                "surface_zoom_breaks": [
+                    [18, 50],
+                    [16, 100],
+                    [15, 250],
+                    [14, 500],
+                    [13, 1000],
+                    [12, 2500],
+                    [10, 5000],
+                    [8, 10000],
+                    [0, 20000],
+                ],
+            },
+        }
+        expected_config_hash = config.build_config_hashes(profile="test").config_hash
+        with (
+            mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=manifest) as runtime_mock,
+            mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
+            mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=True),
+            mock.patch.object(serve_from_db._surface, "build_surface_shell_hash", return_value="shell-hash-test"),
+            mock.patch.object(serve_from_db._surface, "surface_shell_dir", return_value=Path("surface-shell")),
+            mock.patch.object(serve_from_db._surface, "surface_score_dir", return_value=Path("surface-scores")),
+            mock.patch.object(serve_from_db._surface, "surface_tile_dir", return_value=Path("surface-tiles")),
+            mock.patch.object(serve_from_db._surface, "ensure_surface_tile_cache_manifest", return_value={}),
+            mock.patch.object(serve_from_db._surface, "surface_analysis_ready", return_value=True),
+        ):
+            payload = serve_from_db.RuntimeService(mock.sentinel.engine, profile="test").get_runtime()
+
+        self.assertEqual(runtime_mock.call_args.kwargs["config_hash"], expected_config_hash)
+        self.assertEqual(payload["build_profile"], "test")
+        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-test.pmtiles")
+        self.assertEqual(payload["fine_resolutions_m"], [2500, 1000, 500, 250, 100, 50])
+        self.assertEqual(payload["inspect_url"], "/api/inspect")
+
     def test_main_serve_flag_starts_local_app(self) -> None:
         with (
             mock.patch.object(sys, "argv", ["main.py", "--serve"]),
@@ -500,6 +604,20 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(exit_code, 0)
         render_mock.assert_called_once_with(
             profile="dev",
+            host=config.DEFAULT_SERVER_HOST,
+            port=config.DEFAULT_SERVER_PORT,
+        )
+
+    def test_main_serve_test_flag_starts_test_local_app(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--serve-test"]),
+            mock.patch("render_from_db.run_render_from_db", return_value="http://127.0.0.1:8000/") as render_mock,
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        render_mock.assert_called_once_with(
+            profile="test",
             host=config.DEFAULT_SERVER_HOST,
             port=config.DEFAULT_SERVER_PORT,
         )

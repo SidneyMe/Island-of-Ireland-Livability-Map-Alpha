@@ -447,7 +447,10 @@ def phase_geometry(tracker: PrecomputeProgressTracker):
         mark_complete=_mark_complete,
         geometry_is_2d=_geometry_is_2d,
         can_finalize_geo_tier=_can_finalize_geo_tier,
-        load_study_area_geometries=load_study_area_geometries,
+        load_study_area_geometries=lambda *, progress_cb=None: load_study_area_geometries(
+            profile=_STATE.profile,
+            progress_cb=progress_cb,
+        ),
         study_area_wgs84_from_metric=study_area_wgs84_envelope_from_metric,
     )
     _STATE.study_area_metric = study_area_metric

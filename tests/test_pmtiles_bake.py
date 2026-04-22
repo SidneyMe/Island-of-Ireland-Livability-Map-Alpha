@@ -41,6 +41,7 @@ class PmtilesBakeContractTests(TestCase):
             min_zoom=5,
             max_zoom=14,
             grid_max_zoom=11,
+            service_desert_max_zoom=11,
             amenity_min_zoom=9,
             transport_reality_min_zoom=9,
         )
@@ -60,6 +61,7 @@ class PmtilesBakeContractTests(TestCase):
             min_zoom=5,
             max_zoom=14,
             grid_max_zoom=11,
+            service_desert_max_zoom=11,
             amenity_min_zoom=9,
             transport_reality_min_zoom=9,
         )
@@ -83,6 +85,7 @@ class PmtilesBakeContractTests(TestCase):
             min_zoom=5,
             max_zoom=14,
             grid_max_zoom=11,
+            service_desert_max_zoom=11,
             amenity_min_zoom=9,
             transport_reality_min_zoom=9,
         )
@@ -149,7 +152,7 @@ class PmtilesBakeContractTests(TestCase):
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[(-6.1, 53.5)]),
                 mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)) as bbox_mock,
                 mock.patch.object(bake_pmtiles, "_point_tile_coordinates", return_value=[(1, 2)]) as point_tiles_mock,
-                mock.patch.object(bake_pmtiles, "_tile_mvt_bytes_by_flags", return_value=b"mvt"),
+                mock.patch.object(bake_pmtiles, "_vector_tile_mvt_bytes_by_flags", return_value=b"mvt"),
             ):
                 bake_pmtiles.bake_pmtiles(
                     _FakeEngine(),
@@ -159,10 +162,65 @@ class PmtilesBakeContractTests(TestCase):
                     max_zoom=12,
                     amenity_min_zoom=9,
                     workers=1,
+                    fine_grid_config={},
                 )
 
-        self.assertEqual([call.args[0] for call in bbox_mock.call_args_list], [11])
-        self.assertEqual([call.kwargs["zoom"] for call in point_tiles_mock.call_args_list], [12, 12])
+        self.assertTrue(bbox_mock.call_args_list)
+        self.assertTrue(point_tiles_mock.call_args_list)
+        self.assertEqual(sorted({call.args[0] for call in bbox_mock.call_args_list}), [11])
+        self.assertEqual(
+            sorted({call.kwargs["zoom"] for call in point_tiles_mock.call_args_list}),
+            [12],
+        )
+
+    def test_bake_pmtiles_caps_archive_header_max_zoom_at_15(self) -> None:
+        captured = {}
+
+        class _FakeWriter:
+            def __init__(self, handle) -> None:
+                self.handle = handle
+
+            def write_tile(self, tile_id, payload) -> None:
+                del tile_id, payload
+
+            def finalize(self, header, metadata) -> None:
+                captured["header"] = header
+                captured["metadata"] = metadata
+
+        class _FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+
+            def close(self) -> None:
+                pass
+
+        class _FakeEngine:
+            def connect(self):
+                return _FakeConnection()
+
+        with TemporaryDirectory() as tmp_name:
+            output_path = Path(tmp_name) / "livability.pmtiles"
+            with (
+                mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
+                mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)),
+                mock.patch.object(bake_pmtiles, "_vector_tile_mvt_bytes_by_flags", return_value=b"mvt"),
+            ):
+                bake_pmtiles.bake_pmtiles(
+                    _FakeEngine(),
+                    "build-key-123",
+                    output_path,
+                    min_zoom=11,
+                    max_zoom=19,
+                    workers=1,
+                    fine_grid_config={},
+                )
+
+        self.assertEqual(captured["header"]["max_zoom"], 15)
 
 
 class PmtilesTileSpecIteratorTests(TestCase):
@@ -178,6 +236,7 @@ class PmtilesTileSpecIteratorTests(TestCase):
                 coarse_grid_max_zoom=11,
                 amenity_min_zoom=9,
                 transport_reality_min_zoom=9,
+                fine_grid_tile_coords_by_zoom={12: [(1, 2)]},
             )
         )
 
@@ -197,6 +256,7 @@ class PmtilesTileSpecIteratorTests(TestCase):
         for z, _, _, layers in z12_specs:
             self.assertEqual(z, 12)
             self.assertFalse(layers & bake_pmtiles._LAYER_GRID)
+            self.assertTrue(layers & bake_pmtiles._LAYER_FINE_GRID)
             self.assertTrue(layers & bake_pmtiles._LAYER_AMENITIES)
             self.assertTrue(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY)
             self.assertFalse(layers & bake_pmtiles._LAYER_SERVICE_DESERTS)
@@ -224,6 +284,267 @@ class PmtilesTileSpecIteratorTests(TestCase):
             self.assertFalse(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY)
             self.assertTrue(layers & bake_pmtiles._LAYER_SERVICE_DESERTS)
 
+    def test_fine_grid_specs_exist_only_for_z12_to_z15(self) -> None:
+        specs = list(
+            bake_pmtiles._iter_tile_specs(
+                min_zoom=12,
+                max_zoom=15,
+                bbox=(-6.2, 53.4, -6.2, 53.4),
+                amenity_points=[],
+                transport_reality_points=[],
+                coarse_grid_max_zoom=11,
+                amenity_min_zoom=9,
+                transport_reality_min_zoom=9,
+                fine_grid_tile_coords_by_zoom={
+                    12: [(0, 0)],
+                    13: [(0, 0)],
+                    14: [(0, 0)],
+                    15: [(0, 0)],
+                },
+            )
+        )
+
+        self.assertEqual(sorted({z for z, _, _, _ in specs}), [12, 13, 14, 15])
+        for z, _, _, layers in specs:
+            self.assertTrue(layers & bake_pmtiles._LAYER_FINE_GRID)
+            self.assertFalse(layers & bake_pmtiles._LAYER_GRID)
+
     def test_chunked_splits_into_fixed_chunks(self) -> None:
         chunks = list(bake_pmtiles._chunked(range(10), 4))
         self.assertEqual(chunks, [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9]])
+
+
+class PmtilesBakeReliabilityTests(TestCase):
+    def test_bake_parallel_keeps_bounded_in_flight_futures(self) -> None:
+        class _FakeWriter:
+            def __init__(self) -> None:
+                self.tiles: list[tuple[int, bytes]] = []
+
+            def write_tile(self, tile_id, payload) -> None:
+                self.tiles.append((tile_id, payload))
+
+        class _FakeFuture:
+            def __init__(self, chunk: list[tuple[int, int, int, int]]) -> None:
+                self.chunk = list(chunk)
+
+            def result(self) -> list[tuple[int, bytes]]:
+                return [
+                    (
+                        bake_pmtiles.zxy_to_tileid(z, x, y),
+                        f"tile-{z}-{x}-{y}".encode("utf-8"),
+                    )
+                    for z, x, y, _ in self.chunk
+                ]
+
+        class _FakePool:
+            def __init__(self, *, max_workers: int) -> None:
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+
+            def submit(self, fn, chunk, build_key, db_url, fine_grid_config):
+                del fn, build_key, db_url, fine_grid_config
+                return _FakeFuture(chunk)
+
+        pending_sizes: list[int] = []
+
+        def _fake_wait(futures, *, return_when):
+            del return_when
+            pending_sizes.append(len(futures))
+            done = next(iter(futures))
+            return {done}, set(futures) - {done}
+
+        tile_specs = [
+            (12, idx, 0, bake_pmtiles._LAYER_FINE_GRID)
+            for idx in range(10)
+        ]
+        writer = _FakeWriter()
+        with (
+            mock.patch.object(bake_pmtiles, "ProcessPoolExecutor", _FakePool),
+            mock.patch.object(bake_pmtiles, "wait", side_effect=_fake_wait),
+            mock.patch.object(bake_pmtiles, "_CHUNK_SIZE", 1),
+        ):
+            tiles_written, tiles_empty, per_zoom = bake_pmtiles._bake_parallel(
+                writer=writer,
+                build_key="build-key-123",
+                db_url="postgresql://example",
+                tile_specs=tile_specs,
+                workers=2,
+                total_tile_count=len(tile_specs),
+                fine_grid_config={"shell_dir": "shell", "score_dir": "scores"},
+            )
+
+        self.assertEqual(tiles_written, len(tile_specs))
+        self.assertEqual(tiles_empty, 0)
+        self.assertEqual(per_zoom, {12: len(tile_specs)})
+        self.assertEqual(len(writer.tiles), len(tile_specs))
+        self.assertTrue(pending_sizes)
+        self.assertLessEqual(max(pending_sizes), 4)
+
+    def test_bake_pmtiles_retries_broken_pool_with_half_worker_count(self) -> None:
+        class _FakeWriter:
+            def __init__(self, handle) -> None:
+                self.handle = handle
+
+            def write_tile(self, tile_id, payload) -> None:
+                del tile_id, payload
+
+            def finalize(self, header, metadata) -> None:
+                del header, metadata
+                self.handle.write(b"pmtiles")
+
+        class _FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+
+        class _FakeEngine:
+            def connect(self):
+                return _FakeConnection()
+
+        with TemporaryDirectory() as tmp_name:
+            output_path = Path(tmp_name) / "livability.pmtiles"
+            parallel_error = bake_pmtiles.ParallelBakeWorkerFailure(
+                workers=4,
+                completed_specs=1,
+                total_tile_count=1,
+                has_fine_grid=True,
+                reason="worker crashed",
+            )
+            with (
+                mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
+                mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(
+                    bake_pmtiles,
+                    "fine_grid_tile_coordinates_by_zoom",
+                    return_value={12: [(0, 0)]},
+                ),
+                mock.patch.object(bake_pmtiles, "_fine_grid_shard_count", return_value=278),
+                mock.patch.object(
+                    bake_pmtiles,
+                    "_bake_parallel",
+                    side_effect=[parallel_error, (1, 0, {12: 1})],
+                ) as parallel_mock,
+            ):
+                result = bake_pmtiles.bake_pmtiles(
+                    _FakeEngine(),
+                    "build-key-123",
+                    output_path,
+                    min_zoom=12,
+                    max_zoom=12,
+                    workers=8,
+                    fine_grid_config={"shell_dir": "shell", "score_dir": "scores"},
+                )
+                self.assertTrue(output_path.exists())
+
+        self.assertEqual(result, output_path)
+        self.assertEqual(
+            [call.kwargs["workers"] for call in parallel_mock.call_args_list],
+            [4, 2],
+        )
+
+    def test_bake_pmtiles_failure_cleans_temp_output_and_leaves_final_missing(self) -> None:
+        class _FakeWriter:
+            def __init__(self, handle) -> None:
+                self.handle = handle
+
+            def write_tile(self, tile_id, payload) -> None:
+                del tile_id, payload
+
+            def finalize(self, header, metadata) -> None:
+                del header, metadata
+
+        class _FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+
+        class _FakeEngine:
+            def connect(self):
+                return _FakeConnection()
+
+        with TemporaryDirectory() as tmp_name:
+            output_path = Path(tmp_name) / "livability.pmtiles"
+            output_path.write_bytes(b"old-archive")
+            temp_output_path = output_path.with_name(output_path.name + ".tmp")
+            with (
+                mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
+                mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)),
+                mock.patch.object(
+                    bake_pmtiles,
+                    "_bake_sequential",
+                    side_effect=RuntimeError("boom"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    bake_pmtiles.bake_pmtiles(
+                        _FakeEngine(),
+                        "build-key-123",
+                        output_path,
+                        min_zoom=11,
+                        max_zoom=11,
+                        workers=1,
+                        fine_grid_config={},
+                    )
+
+        self.assertFalse(output_path.exists())
+        self.assertFalse(temp_output_path.exists())
+
+    def test_bake_pmtiles_success_replaces_temp_output_atomically(self) -> None:
+        class _FakeWriter:
+            def __init__(self, handle) -> None:
+                self.handle = handle
+
+            def write_tile(self, tile_id, payload) -> None:
+                del tile_id, payload
+
+            def finalize(self, header, metadata) -> None:
+                del header, metadata
+                self.handle.write(b"new-archive")
+
+        class _FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+
+        class _FakeEngine:
+            def connect(self):
+                return _FakeConnection()
+
+        with TemporaryDirectory() as tmp_name:
+            output_path = Path(tmp_name) / "livability.pmtiles"
+            output_path.write_bytes(b"old-archive")
+            temp_output_path = output_path.with_name(output_path.name + ".tmp")
+            with (
+                mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
+                mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)),
+                mock.patch.object(bake_pmtiles, "_bake_sequential", return_value=(0, 0, {})),
+            ):
+                result = bake_pmtiles.bake_pmtiles(
+                    _FakeEngine(),
+                    "build-key-123",
+                    output_path,
+                    min_zoom=11,
+                    max_zoom=11,
+                    workers=1,
+                    fine_grid_config={},
+                )
+
+            self.assertEqual(result, output_path)
+            self.assertEqual(output_path.read_bytes(), b"new-archive")
+            self.assertFalse(temp_output_path.exists())

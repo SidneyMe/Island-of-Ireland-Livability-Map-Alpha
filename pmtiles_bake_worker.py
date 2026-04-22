@@ -30,6 +30,7 @@ _LAYER_GRID = 1 << 0
 _LAYER_AMENITIES = 1 << 1
 _LAYER_TRANSPORT_REALITY = 1 << 2
 _LAYER_SERVICE_DESERTS = 1 << 3
+_LAYER_FINE_GRID = 1 << 4
 
 
 # ── Per-tile SQL (one ST_AsMVT call per layer) ──────────────────────────────
@@ -328,6 +329,7 @@ __all__ = [
     "_LAYER_AMENITIES",
     "_LAYER_TRANSPORT_REALITY",
     "_LAYER_SERVICE_DESERTS",
+    "_LAYER_FINE_GRID",
     "_GRID_TILE_SQL",
     "_AMENITY_TILE_SQL",
     "_TRANSPORT_REALITY_TILE_SQL",

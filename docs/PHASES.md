@@ -493,7 +493,7 @@ Additive refinements to the scoring model. Each item is independent and can be p
 
 Improvements to the local frontend. Most of these are also prerequisites for the Phase 8 public launch — without per-cell breakdowns, layer toggles, and the rest of this phase, there is nothing meaningful to put on a public site.
 
-### Per-cell score breakdowns on click
+### ~~Per-cell score breakdowns on click~~
 
 **What:** Clicking a grid cell opens a panel showing the component scores (shops, transport, healthcare, parks, plus modifiers once they exist) and the top features driving each.
 
@@ -502,7 +502,14 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - Precompute stores per-cell component scores, not just the combined score.
 - The amenity features referenced in the breakdown come from the amenity layer already baked into the PMTiles archive.
 - Frontend handles the click, queries the tile at the click location, and renders a side panel with the breakdown.
-- Enables the weight sliders below — once components are stored separately, client-side reweighting is trivial.
+- Enables the weight sliders below - once components are stored separately, client-side reweighting is trivial.
+
+**Done so far:**
+
+- Coarse `grid` tiles now carry per-category raw counts, cluster counts, effective units, component scores, and `total_score` for popup inspection.
+- `/api/inspect` returns the exact 50 m fine-surface breakdown for a clicked location, including component scores, raw counts, cluster counts, effective units, visible resolution, and land coverage.
+- The frontend now opens a click popup using coarse tile properties when that is enough and falls back to `/api/inspect` for exact fine-surface details.
+- This item is functionally done even though the UI is currently a popup rather than a dedicated side panel, and it does not yet list individual top amenity drivers.
 
 ### Layer toggles
 

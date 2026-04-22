@@ -1,4 +1,10 @@
 const BASEMAP_RASTER = "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png";
+const ACTIVE_GRID_FILL_LAYER_ID = "grid-fill-active";
+const ACTIVE_GRID_OUTLINE_LAYER_ID = "grid-outline-active";
+const ACTIVE_DEBUG_GRID_LAYER_ID = "grid-fill-debug-active";
+const GRID_SOURCE_ID = "livability";
+const GRID_SOURCE_LAYER_ID = "grid";
+const GRID_INSERT_BEFORE_LAYER_ID = "amenities-circle";
 
 function runtimeZoomBreaks(runtime) {
   const breaks = runtime && Array.isArray(runtime.surface_zoom_breaks)
@@ -27,6 +33,207 @@ function runtimeFineResolutions(runtime) {
 
 function fineSurfaceEnabled(runtime) {
   return Boolean(runtime && runtime.fine_surface_enabled);
+}
+
+function gridResolutions(runtime) {
+  const seen = new Set();
+  const resolutions = [];
+  runtimeZoomBreaks(runtime).forEach(function (entry) {
+    if (seen.has(entry.resolutionM)) return;
+    seen.add(entry.resolutionM);
+    resolutions.push(entry.resolutionM);
+  });
+  return resolutions;
+}
+
+function gridFillLayerId(resolutionM) {
+  return ACTIVE_GRID_FILL_LAYER_ID;
+}
+
+function gridOutlineLayerId(resolutionM) {
+  return ACTIVE_GRID_OUTLINE_LAYER_ID;
+}
+
+function gridLayerId(resolutionM) {
+  return gridFillLayerId(resolutionM);
+}
+
+function gridDebugLayerId(resolutionM) {
+  return ACTIVE_DEBUG_GRID_LAYER_ID;
+}
+
+function gridFillLayerIds(runtime) {
+  return gridResolutions(runtime).length > 0 ? [gridFillLayerId()] : [];
+}
+
+function gridOutlineLayerIds(runtime) {
+  return gridResolutions(runtime).length > 0 ? [gridOutlineLayerId()] : [];
+}
+
+function gridLayerIds(runtime) {
+  return gridFillLayerIds(runtime);
+}
+
+function gridLayerPairs(runtime) {
+  return gridResolutions(runtime).length > 0
+    ? [{
+      fillLayerId: gridFillLayerId(),
+      outlineLayerId: gridOutlineLayerId()
+    }]
+    : [];
+}
+
+function debugGridLayerIds(runtime) {
+  return gridResolutions(runtime).length > 0 ? [gridDebugLayerId()] : [];
+}
+
+function activeGridResolution(runtime, zoom) {
+  return resolutionForZoom(runtime, zoom);
+}
+
+function activeGridLayerId(runtime, zoom) {
+  return gridFillLayerId();
+}
+
+function activeGridOutlineLayerId(runtime, zoom) {
+  return gridOutlineLayerId();
+}
+
+function activeDebugGridLayerId(runtime, zoom) {
+  return gridDebugLayerId();
+}
+
+function gridFilterForResolution(resolutionM) {
+  return ["==", ["get", "resolution_m"], Number(resolutionM)];
+}
+
+function activeGridFilter(runtime, zoom) {
+  return gridFilterForResolution(activeGridResolution(runtime, zoom));
+}
+
+function activeDebugGridFilter(runtime, zoom) {
+  return activeGridFilter(runtime, zoom);
+}
+
+function gridZoomRange(runtime) {
+  const breaks = runtimeZoomBreaks(runtime);
+  return {
+    minZoom: breaks.length > 0 ? breaks[breaks.length - 1].minZoom : 0,
+    maxZoom: Number(runtime && runtime.max_zoom || 19) + 1
+  };
+}
+
+function buildActiveGridLayers(runtime, resolutionM) {
+  const range = gridZoomRange(runtime);
+  const filter = gridFilterForResolution(resolutionM);
+  return [
+    {
+      id: gridFillLayerId(),
+      type: "fill",
+      source: GRID_SOURCE_ID,
+      "source-layer": GRID_SOURCE_LAYER_ID,
+      minzoom: range.minZoom,
+      maxzoom: range.maxZoom,
+      filter: filter,
+      layout: { visibility: "none" },
+      paint: {
+        "fill-color": gridFillColorExpression(),
+        "fill-antialias": false,
+        "fill-opacity": 0.52
+      }
+    },
+    {
+      id: gridOutlineLayerId(),
+      type: "line",
+      source: GRID_SOURCE_ID,
+      "source-layer": GRID_SOURCE_LAYER_ID,
+      minzoom: range.minZoom,
+      maxzoom: range.maxZoom,
+      filter: filter,
+      layout: {
+        visibility: "none",
+        "line-cap": "butt",
+        "line-join": "miter"
+      },
+      paint: {
+        "line-color": "#334155",
+        "line-opacity": gridOutlineOpacityExpression(),
+        "line-width": gridOutlineWidthExpression()
+      }
+    },
+    {
+      id: gridDebugLayerId(),
+      type: "fill",
+      source: GRID_SOURCE_ID,
+      "source-layer": GRID_SOURCE_LAYER_ID,
+      minzoom: range.minZoom,
+      maxzoom: range.maxZoom,
+      filter: filter,
+      layout: { visibility: "none" },
+      paint: {
+        "fill-color": "#222222",
+        "fill-opacity": 0.1,
+        "fill-outline-color": "#111111"
+      }
+    }
+  ];
+}
+
+function activeGridLifecycle(runtime, previousResolutionM, zoom) {
+  const resolutionM = activeGridResolution(runtime, zoom);
+  return {
+    resolutionM: resolutionM,
+    rebuild: Number(previousResolutionM) !== Number(resolutionM),
+    filter: gridFilterForResolution(resolutionM),
+    layerDefinitions: buildActiveGridLayers(runtime, resolutionM)
+  };
+}
+
+function formatResolutionLabel(resolutionM) {
+  const resolution = Number(resolutionM);
+  if (resolution >= 1000) {
+    const km = resolution / 1000;
+    return Number.isInteger(km) ? km + "km" : km.toFixed(1) + "km";
+  }
+  return resolution + "m";
+}
+
+function debugGridStatusMessage(resolutionM, zoom, sourceCount, renderedCount) {
+  return (
+    "Grid debug: " +
+    formatResolutionLabel(resolutionM) +
+    " at z" +
+    Number(zoom).toFixed(2) +
+    " -> source " +
+    Number(sourceCount) +
+    ", rendered " +
+    Number(renderedCount)
+  );
+}
+
+function gridVisibilityPlan(runtime, zoom, enabled) {
+  return gridLayerPairs(runtime).flatMap(function (entry) {
+    return [
+      {
+        layerId: entry.fillLayerId,
+        visibility: enabled ? "visible" : "none"
+      },
+      {
+        layerId: entry.outlineLayerId,
+        visibility: enabled ? "visible" : "none"
+      }
+    ];
+  });
+}
+
+function debugGridVisibilityPlan(runtime, zoom, enabled) {
+  const activeLayer = enabled ? activeDebugGridLayerId(runtime, zoom) : null;
+  return debugGridLayerIds(runtime).map(function (layerId) {
+    return {
+      layerId: layerId,
+      visibility: layerId === activeLayer ? "visible" : "none"
+    };
+  });
 }
 
 function resolutionForZoom(runtime, zoom) {
@@ -71,6 +278,30 @@ function gridFillColorExpression() {
   ];
 }
 
+function gridOutlineOpacityExpression() {
+  return [
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    5, 0.18,
+    12, 0.24,
+    15, 0.30,
+    19, 0.38
+  ];
+}
+
+function gridOutlineWidthExpression() {
+  return [
+    "interpolate",
+    ["linear"],
+    ["zoom"],
+    5, 0.35,
+    12, 0.45,
+    15, 0.55,
+    19, 0.75
+  ];
+}
+
 function amenityCircleColorExpression(colors) {
   const expr = ["match", ["get", "category"]];
   Object.keys(colors).forEach(function (category) {
@@ -110,69 +341,16 @@ function serviceDesertFillColorExpression() {
   ];
 }
 
-function fineSurfaceSource(runtime, resolutionM) {
-  const template = String(runtime.surface_tile_url_template || "");
-  return {
-    type: "raster",
-    tiles: [template.replace("{resolution_m}", String(resolutionM))],
-    tileSize: 256
-  };
-}
-
-
 function buildStyle(runtime, options = {}) {
   const colors = runtime.category_colors || {};
   const origin = options.windowOrigin || "http://127.0.0.1:8000";
   const pmtilesUrl = "pmtiles://" + origin + (runtime.pmtiles_url || "/tiles/livability.pmtiles");
-  const fineSources = {};
-  runtimeFineResolutions(runtime).forEach(function (resolutionM) {
-    fineSources["surface-" + resolutionM] = fineSurfaceSource(runtime, resolutionM);
-  });
-
-  const layers = [
-    { id: "basemap", type: "raster", source: "basemap" },
-    {
-      id: "grid-fill-coarse",
-      type: "fill",
-      source: "livability",
-      "source-layer": "grid",
-      maxzoom: 12,
-      paint: {
-        "fill-color": gridFillColorExpression(),
-        "fill-opacity": 0.58
-      }
-    }
-  ];
-
-  if (fineSurfaceEnabled(runtime)) {
-    runtimeFineResolutions(runtime).forEach(function (resolutionM) {
-      const zoomBounds = zoomBoundsForResolution(runtime, resolutionM);
-      layers.push({
-        id: "surface-" + resolutionM,
-        type: "raster",
-        source: "surface-" + resolutionM,
-        minzoom: zoomBounds.minZoom,
-        maxzoom: zoomBounds.maxZoom,
-        paint: {
-          "raster-opacity": 0.82,
-          "raster-resampling": "nearest",
-          "raster-fade-duration": 0
-        }
-      });
-    });
-  }
-
-  layers.push({
-    id: "grid-fill-debug",
-    type: "fill",
-    source: "livability",
-    "source-layer": "grid",
-    layout: { visibility: "none" },
-    paint: {
-      "fill-color": "#222222",
-      "fill-opacity": 0.1,
-      "fill-outline-color": "#111111"
-    }
+  const layers = [{ id: "basemap", type: "raster", source: "basemap" }];
+  buildActiveGridLayers(
+    runtime,
+    activeGridResolution(runtime, Number(runtime.default_zoom || 0))
+  ).forEach(function (layer) {
+    layers.push(layer);
   });
 
   layers.push({
@@ -241,15 +419,35 @@ function buildStyle(runtime, options = {}) {
         type: "vector",
         url: pmtilesUrl
       },
-...fineSources
     },
     layers: layers
   };
 }
 
 export {
+  GRID_INSERT_BEFORE_LAYER_ID,
+  GRID_SOURCE_ID,
+  GRID_SOURCE_LAYER_ID,
+  activeDebugGridFilter,
+  activeDebugGridLayerId,
+  activeGridFilter,
+  activeGridLayerId,
+  activeGridLifecycle,
+  activeGridOutlineLayerId,
+  activeGridResolution,
   buildStyle,
+  buildActiveGridLayers,
+  debugGridVisibilityPlan,
+  debugGridStatusMessage,
+  debugGridLayerIds,
   fineSurfaceEnabled,
+  gridFilterForResolution,
+  gridFillLayerId,
+  gridFillLayerIds,
+  gridOutlineLayerId,
+  gridOutlineLayerIds,
+  gridVisibilityPlan,
+  gridLayerIds,
   resolutionForZoom,
   runtimeFineResolutions,
   runtimeZoomBreaks,

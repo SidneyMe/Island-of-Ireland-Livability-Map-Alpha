@@ -70,12 +70,24 @@ input {
     top: 18px;
     left: 18px;
     width: min(360px, calc(100vw - 36px));
+    max-height: calc(100vh - 36px);
     padding: 18px 18px 16px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+    scrollbar-gutter: stable;
     border-radius: 20px;
     z-index: 40;
     transition: transform 180ms ease, opacity 180ms ease;
     transform: translateX(0);
     opacity: 1;
+}
+
+#control-panel::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
 }
 
 body.panel-hidden #control-panel {
@@ -130,6 +142,118 @@ body.panel-hidden #control-panel {
 .panel-section h2 {
     margin: 0 0 10px;
     font-size: 15px;
+}
+
+.grid-debug-section {
+    display: grid;
+    gap: 12px;
+    margin-top: 14px;
+    padding: 14px;
+    border-radius: 18px;
+    border: 1px solid rgba(151, 74, 32, 0.16);
+    background:
+        linear-gradient(180deg, rgba(255, 241, 224, 0.96), rgba(255, 248, 238, 0.9)),
+        rgba(255, 244, 230, 0.92);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+.grid-debug-section[hidden] {
+    display: none;
+}
+
+.grid-debug-section h3 {
+    margin: 0;
+    font-size: 14px;
+}
+
+.grid-debug-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 8px;
+    border-radius: 999px;
+    background: rgba(151, 74, 32, 0.14);
+    color: #8b3f16;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.grid-debug-diagnosis {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 14px;
+    background: rgba(99, 40, 15, 0.1);
+    color: #5f2f13;
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.grid-debug-controls {
+    display: grid;
+    gap: 8px;
+}
+
+.grid-debug-list {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+}
+
+.grid-debug-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+    gap: 12px;
+    align-items: baseline;
+    padding: 8px 10px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.56);
+    border: 1px solid rgba(24, 33, 38, 0.06);
+}
+
+.grid-debug-row dt,
+.grid-debug-row dd {
+    margin: 0;
+}
+
+.grid-debug-row dt {
+    color: var(--muted);
+    font-size: 12px;
+}
+
+.grid-debug-row dd {
+    text-align: right;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    word-break: break-word;
+}
+
+.grid-debug-mono {
+    font-family: Consolas, "SFMono-Regular", "Liberation Mono", monospace;
+    font-size: 12.5px;
+}
+
+.grid-debug-copy-button {
+    padding: 10px 12px;
+    border: 1px solid rgba(151, 74, 32, 0.24);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.82);
+    color: #7a3512;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.grid-debug-snapshot-fallback {
+    margin: 0;
+    padding: 12px;
+    border-radius: 14px;
+    background: rgba(48, 26, 16, 0.9);
+    color: #fff6eb;
+    font-family: Consolas, "SFMono-Regular", "Liberation Mono", monospace;
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .section-heading {
@@ -363,7 +487,6 @@ body.panel-hidden #panel-toggle {
         right: 18px;
         width: auto;
         max-height: min(52vh, 460px);
-        overflow-y: auto;
         transform: translateY(0);
     }
 

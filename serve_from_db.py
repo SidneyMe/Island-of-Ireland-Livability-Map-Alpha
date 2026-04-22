@@ -24,6 +24,7 @@ from config import (
     normalize_build_profile,
     pmtiles_output_path,
     pmtiles_url_path,
+    precompute_flag_for_profile,
     profile_fine_surface_enabled,
 )
 from db_postgis import (
@@ -52,7 +53,7 @@ def _missing_precompute_message(
 ) -> str:
     normalized_profile = normalize_build_profile(profile)
     resolved_hash = config_hash or build_config_hashes(normalized_profile).config_hash
-    precompute_flag = "--precompute-dev" if normalized_profile == "dev" else "--precompute"
+    precompute_flag = precompute_flag_for_profile(normalized_profile)
     message = (
         f"{MISSING_PRECOMPUTE_MESSAGE} "
         f"(profile={normalized_profile}, config_hash={resolved_hash}, extract_path={OSM_EXTRACT_PATH}). "
@@ -257,7 +258,6 @@ class RuntimeService:
         payload = self._get_runtime_base()
         state = self.state()
         if state.fine_surface_enabled:
-            payload["surface_tile_url_template"] = "/tiles/surface/{resolution_m}/{z}/{x}/{y}.png"
             payload["inspect_url"] = "/api/inspect"
         return payload
 
@@ -386,6 +386,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 self.livability_server.index_html,
                 "text/html; charset=utf-8",
+                extra_headers={"Cache-Control": "no-store"},
             )
             return
         if parsed.path == "/exports/transport-reality.zip":
@@ -485,6 +486,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         content = resolved.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", content_type)
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
         self.wfile.write(content)
@@ -582,7 +584,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _log_client_disconnect(self, path: str, exc: BaseException) -> None:
-        if path.startswith("/tiles/"):
+        if path.startswith("/tiles/") or path.startswith("/api/inspect"):
             return
         print(f"Client disconnected during {path}: {exc}")
 
@@ -611,7 +613,7 @@ def create_http_server(
         raise RuntimeError(f"static index.html not found at {index_html_path}")
     index_html = index_html_path.read_bytes()
     if not resolved_pmtiles_path.exists():
-        precompute_flag = "--precompute-dev" if normalized_profile == "dev" else "--precompute"
+        precompute_flag = precompute_flag_for_profile(normalized_profile)
         raise RuntimeError(
             f"PMTiles archive not found at {resolved_pmtiles_path}. "
             f"Run {precompute_flag} to bake it before serving; the map cannot load without it."

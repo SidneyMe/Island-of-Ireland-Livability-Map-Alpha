@@ -34,6 +34,9 @@ load_dotenv(BASE_DIR / ".env")
 
 ROI_BOUNDARY_PATH = BOUNDARIES_DIR / "Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson"
 ROI_BOUNDARY_LAYER = None
+COUNTY_BOUNDARY_PATH = ROI_BOUNDARY_PATH
+COUNTY_BOUNDARY_LAYER = ROI_BOUNDARY_LAYER
+COUNTY_BOUNDARY_NAME_FIELD = "ENG_NAME_VALUE"
 
 NI_BOUNDARY_PATH = BOUNDARIES_DIR / "osni_open_data_largescale_boundaries_ni_outline.geojson"
 NI_BOUNDARY_LAYER = None
@@ -203,7 +206,10 @@ TO_WGS84 = Transformer.from_crs(TARGET_CRS, DISPLAY_CRS, always_xy=True).transfo
 TO_TARGET = Transformer.from_crs(DISPLAY_CRS, TARGET_CRS, always_xy=True).transform
 
 
-STUDY_AREA_KIND = "ireland"
+StudyAreaKind = Literal["ireland", "m1_corridor", "county", "bbox"]
+STUDY_AREA_KIND: StudyAreaKind = "ireland"
+STUDY_AREA_COUNTY_NAME: str | None = None
+STUDY_AREA_BBOX_WGS84: tuple[float, float, float, float] | None = None
 M1_CORRIDOR_BUFFER_M = 10_000
 M1_CORRIDOR_ANCHORS_WGS84 = [
     (-6.2267, 53.4238),
@@ -217,7 +223,7 @@ M1_CORRIDOR_ANCHORS_WGS84 = [
 ]
 
 
-BuildProfile = Literal["full", "dev"]
+BuildProfile = Literal["full", "dev", "test"]
 DEFAULT_BUILD_PROFILE: BuildProfile = "full"
 
 
@@ -255,6 +261,9 @@ class BuildProfileSettings:
     fine_resolutions_m: tuple[int, ...]
     surface_zoom_breaks: tuple[tuple[int, int], ...]
     fine_surface_enabled: bool
+    study_area_kind: StudyAreaKind = "ireland"
+    study_area_county_name: str | None = None
+    study_area_bbox_wgs84: tuple[float, float, float, float] | None = None
 
     @property
     def surface_resolutions_m(self) -> list[int]:
@@ -282,6 +291,7 @@ _BUILD_PROFILE_SETTINGS: dict[BuildProfile, BuildProfileSettings] = {
             (0, 20_000),
         ),
         fine_surface_enabled=True,
+        study_area_kind="ireland",
     ),
     "dev": BuildProfileSettings(
         name="dev",
@@ -293,6 +303,26 @@ _BUILD_PROFILE_SETTINGS: dict[BuildProfile, BuildProfileSettings] = {
             (0, 20_000),
         ),
         fine_surface_enabled=False,
+        study_area_kind="ireland",
+    ),
+    "test": BuildProfileSettings(
+        name="test",
+        coarse_vector_resolutions_m=(20_000, 10_000, 5_000),
+        fine_resolutions_m=(2_500, 1_000, 500, 250, 100, 50),
+        surface_zoom_breaks=(
+            (18, 50),
+            (16, 100),
+            (15, 250),
+            (14, 500),
+            (13, 1_000),
+            (12, 2_500),
+            (10, 5_000),
+            (8, 10_000),
+            (0, 20_000),
+        ),
+        fine_surface_enabled=True,
+        study_area_kind="bbox",
+        study_area_bbox_wgs84=(-8.55, 51.87, -8.41, 51.93),
     ),
 }
 
@@ -309,6 +339,7 @@ def build_profile_settings(profile: str | None = None) -> BuildProfileSettings:
 
 
 FULL_BUILD_PROFILE_SETTINGS = build_profile_settings("full")
+TEST_BUILD_PROFILE_SETTINGS = build_profile_settings("test")
 
 
 COARSE_VECTOR_RESOLUTIONS_M = list(FULL_BUILD_PROFILE_SETTINGS.coarse_vector_resolutions_m)
@@ -442,7 +473,7 @@ CATEGORY_COLORS = {
 
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
-PMTILES_SCHEMA_VERSION = 4
+PMTILES_SCHEMA_VERSION = 5
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 11
 FORCE_RECOMPUTE = False
@@ -453,6 +484,15 @@ MANIFEST_NAME = "manifest.json"
 def profile_fine_surface_enabled(profile: str | None = None) -> bool:
     settings = build_profile_settings(profile)
     return bool(settings.fine_surface_enabled and ENABLE_FINE_RASTER_SURFACE)
+
+
+def precompute_flag_for_profile(profile: str | None = None) -> str:
+    normalized_profile = normalize_build_profile(profile)
+    if normalized_profile == "dev":
+        return "--precompute-dev"
+    if normalized_profile == "test":
+        return "--precompute-test"
+    return "--precompute"
 
 
 def pmtiles_filename(profile: str | None = None) -> str:
@@ -714,6 +754,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     profile_settings = build_profile_settings(normalized_profile)
     roi_meta = _file_meta(ROI_BOUNDARY_PATH)
     ni_meta = _file_meta(NI_BOUNDARY_PATH)
+    county_meta = _file_meta(COUNTY_BOUNDARY_PATH)
     overture_info = overture_dataset_info()
     overture_category_signature = overture_category_map_signature()
     overture_signature = overture_dataset_signature()
@@ -729,9 +770,8 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "ni_size": ni_meta["size"],
         "target_crs": TARGET_CRS,
         "display_crs": DISPLAY_CRS,
-        "study_area_kind": STUDY_AREA_KIND,
-        "m1_corridor_buffer_m": M1_CORRIDOR_BUFFER_M,
-        "m1_corridor_anchors_wgs84": list(M1_CORRIDOR_ANCHORS_WGS84),
+        "study_area_kind": profile_settings.study_area_kind,
+        "study_area_county_name": profile_settings.study_area_county_name,
         "walk_radius_m": WALK_RADIUS_M,
         "walkgraph_format_version": WALKGRAPH_FORMAT_VERSION,
         "walkgraph_bbox_padding_m": WALKGRAPH_BBOX_PADDING_M,
@@ -741,6 +781,17 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "coastal_cleanup_skip_mainland_area_m2": COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
         "schema_version": CACHE_SCHEMA_VERSION,
     }
+    if profile_settings.study_area_kind == "m1_corridor":
+        geo_params["m1_corridor_buffer_m"] = M1_CORRIDOR_BUFFER_M
+        geo_params["m1_corridor_anchors_wgs84"] = list(M1_CORRIDOR_ANCHORS_WGS84)
+    if profile_settings.study_area_kind == "bbox":
+        geo_params["study_area_bbox_wgs84"] = list(profile_settings.study_area_bbox_wgs84 or ())
+    if profile_settings.study_area_kind == "county":
+        geo_params["county_boundary_path"] = str(COUNTY_BOUNDARY_PATH)
+        geo_params["county_boundary_layer"] = str(COUNTY_BOUNDARY_LAYER)
+        geo_params["county_boundary_name_field"] = COUNTY_BOUNDARY_NAME_FIELD
+        geo_params["county_boundary_mtime_ns"] = county_meta["mtime_ns"]
+        geo_params["county_boundary_size"] = county_meta["size"]
     geo_hash = hash_dict(geo_params)
     resolved_transit_hash = transit_config_hash()
 

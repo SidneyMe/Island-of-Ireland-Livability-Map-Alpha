@@ -4,6 +4,45 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-04-22 - Fine-vector PMTiles grid, Cork test profile, and grid diagnostics
+
+### Added
+
+#### Fine vector bake path
+
+- `fine_vector_pmtiles_worker.py`: Windows-safe fine-grid MVT worker that loads shell and score shards directly, aggregates canonical 50 m surfaces into 2500 / 1000 / 500 / 250 / 100 / 50 m polygons, clips them with a tile buffer, and encodes local `grid` layer bytes
+- `mapbox_vector_tile.py`: lightweight local vector-tile encoder used by the fine-grid worker path
+- `tests/test_fine_vector_pmtiles_worker.py`: dedicated coverage for encoded per-zoom resolutions, buffered border continuity, degenerate-ring rejection, and worker cache limits
+
+#### Test profile and CLI
+
+- `config.py`: new `test` build profile using the full fine-resolution ladder against a compact Cork city bbox `(-8.55, 51.87, -8.41, 51.93)` and writing `livability-test.pmtiles`
+- `main.py`: `--precompute-test`, `--serve-test`, and `--render-test`
+- `serve_from_db.py`: profile-specific missing-precompute guidance now points at the correct precompute flag for `full`, `dev`, or `test`
+
+#### Frontend diagnostics
+
+- `frontend/src/grid_debug.js`: persistent `/?debug-grid=1` control-panel card with live source-vs-rendered counts, layer/source state, diagnosis text, and a copyable plain-text snapshot
+- `frontend/src/grid_debug.test.js`: regression coverage for the debug card, diagnosis states, and snapshot formatting
+
+### Changed
+
+- `precompute/bake_pmtiles.py`: PMTiles bake now stitches coarse SQL tiles through z11 together with sparse fine vector grid tiles at z12-z15, with the archive source max zoom capped at 15 and the browser expected to overzoom to 19
+- `frontend/src/runtime_contract.js` and `frontend/src/main.js`: main grid rendering is now vector-only, rebuilding one active fill / outline / debug layer trio as the zoom band changes instead of swapping raster fine-surface layers
+- `/api/runtime` no longer advertises `surface_tile_url_template`; exact click inspection continues through `/api/inspect`
+- `static/index.html` and `static/app.css`: the fixed control panel now scrolls internally so stacked debug and amenity controls remain reachable
+
+### Fixed
+
+- Parallel PMTiles baking now bounds in-flight work, clamps fine-grid bake workers to 4, retries once at half worker count after `BrokenProcessPool`, and only replaces the final archive after temp-file finalize succeeds
+- Failed bakes now clean up temp output instead of leaving behind partial archives
+- Fine-grid polygon encoding now buffers neighboring border cells and drops degenerate clipped rings, closing high-zoom seam and sliver failure cases covered by the new worker tests
+- `/` and `/static/*` now ship with `Cache-Control: no-store`, and expected client aborts on `/api/inspect` are suppressed from server logs like PMTiles range disconnects
+
+### Scoring logic
+
+- No scoring logic change. This patch changes how fine-resolution grid data is baked, served, and debugged, not how category scores are computed.
+
 ## 2026-04-20 - Phase 2 amenity tiers, sub-tier filters, and park-source cleanup
 
 ### Added

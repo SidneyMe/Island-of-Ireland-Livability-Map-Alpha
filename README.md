@@ -378,25 +378,25 @@ Implementation detail, phase ordering, and open design questions for every item 
 
 The current model counts features by presence: a corner shop scores the same as a supermarket, a pocket playground the same as a regional park, a rural GP the same as a major hospital. The next iteration tiers each category by type and, where relevant, by physical size.
 
-- [ ] **Shops:** corner shop → regular shop → supermarket → mall / retail cluster.
-- [ ] **Healthcare:** pharmacy / GP → clinic / health centre → hospital → major hospital with A&E.
-- [ ] **Parks:** score by area, not count. Pocket park / playground (<0.5 ha) → neighbourhood park (0.5–5 ha) → district park (5–25 ha) → regional park / nature reserve (25+ ha).
+- [x] **Shops:** corner shop → regular shop → supermarket → mall / retail cluster.
+- [x] **Healthcare:** pharmacy / GP → clinic / health centre → hospital → major hospital with A&E.
+- [x] **Parks:** score by area, not count. Pocket park / playground (<0.5 ha) → neighbourhood park (0.5–5 ha) → district park (5–25 ha) → regional park / nature reserve (25+ ha).
 - [ ] **Variety signal** — count distinct clusters rather than distinct tags, so co-located services don't inflate the score.
 
 ### Service reality check
 
 A prerequisite for any transport scoring work. Every stop the model counts is assumed to exist in practice, and that assumption currently holds across derelict stations, routes that were cancelled during COVID and never restored, school-only runs tagged as general transit, and rural services that run on an informal schedule. Filtering phantom stops is upstream of every transport-scoring improvement — there is no value in tiering a bus stop by frequency if its effective frequency is zero.
 
-- [ ] Cross-reference OSM bus stops against live GTFS feeds; stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
-- [ ] Separate public services from school-only routes so the latter don't count toward general transit access.
-- [ ] Flag service deserts — grid cells with nominal transport features that resolve to zero real weekly departures — and expose them as a dedicated overlay.
-- [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL.
+- [x] Cross-reference OSM bus stops against live GTFS feeds (GTFS-first: stops sourced directly from NTA + Translink feeds, inherently excluding phantom and inactive stops); stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
+- [x] Separate public services from school-only routes so the latter don't count toward general transit access.
+- [x] Flag service deserts — grid cells with nominal transport features that resolve to zero real weekly departures — and expose them as a dedicated overlay.
+- [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL. Local export to `cache/exports/` is generated after each transit refresh; hosted publishing is pending Phase 8.
 
 ### Transport scoring overhaul
 
 Depends on the service reality check above — every item assumes phantom stops have already been filtered.
 
-- [ ] Pull GTFS feeds (NTA + Translink) and compute departures per stop per day.
+- [x] Pull GTFS feeds (NTA + Translink) and compute departures per stop per day.
 - [ ] Tier transport by mode: Luas → rail station → high-frequency bus → rural bus.
 - [ ] Rail proximity sweet spot: reward walking distance to a station, penalize immediate adjacency (noise, dust).
 - [ ] Cap rural bus stops so a single low-frequency stop cannot match urban transit access.
@@ -423,12 +423,12 @@ Depends on the service reality check above — every item assumes phantom stops 
 
 ### Scoring mechanics
 
-- [ ] Distance-decay scoring to replace the binary in-range / out-of-range cutoff.
+- [x] Distance-decay scoring to replace the binary in-range / out-of-range cutoff.
 - [ ] Mode-aware scoring: cycling, transit-chained trips, and variable walk radii instead of a single fixed 500 m.
 
 ### UI and features
 
-- [ ] **Per-cell score breakdowns on click** — show the component scores behind a cell.
+- [x] **Per-cell score breakdowns on click** - click popups now show total score plus per-category raw counts, cluster counts, effective units, and component scores; fine-surface clicks use `/api/inspect` for exact values.
 - [ ] **User-adjustable weight sliders** — let users score for their own priorities rather than the built-in defaults.
 - [ ] **Layer toggles** — view the map by a single category instead of only the combined score.
 - [ ] **Shortlist mode** — save multiple locations and view their breakdowns in one panel.

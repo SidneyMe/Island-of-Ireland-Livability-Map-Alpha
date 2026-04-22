@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import pickle
 import time
@@ -20,16 +21,19 @@ from config import (
     COASTAL_ARTIFACT_WIDTH_M,
     COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
     COASTAL_COMPONENT_PRESERVE_AREA_M2,
+    COUNTY_BOUNDARY_LAYER,
+    COUNTY_BOUNDARY_NAME_FIELD,
+    COUNTY_BOUNDARY_PATH,
     M1_CORRIDOR_ANCHORS_WGS84,
     M1_CORRIDOR_BUFFER_M,
     NI_BOUNDARY_LAYER,
     NI_BOUNDARY_PATH,
     ROI_BOUNDARY_LAYER,
     ROI_BOUNDARY_PATH,
-    STUDY_AREA_KIND,
     TARGET_CRS,
     TO_TARGET,
     TO_WGS84,
+    build_profile_settings,
 )
 
 
@@ -696,18 +700,118 @@ def load_m1_corridor_metric(island_geom_metric):
     return clipped
 
 
-def load_study_area_metric(*, progress_cb=None):
+def load_county_geometry_metric(county_name: str, *, progress_cb=None):
+    normalized_name = str(county_name or "").strip()
+    if not normalized_name:
+        raise RuntimeError("County study area configuration requires a non-empty county name.")
+
+    boundary_label = f"county_{normalized_name.lower()}"
+    _emit_progress(progress_cb, f"reading county boundary file {COUNTY_BOUNDARY_PATH.name}")
+    read_started_at = time.perf_counter()
+    gdf = _read_boundary_file(COUNTY_BOUNDARY_PATH, layer=COUNTY_BOUNDARY_LAYER, geometry_only=False)
+    _emit_substep(progress_cb, f"{boundary_label}_read", time.perf_counter() - read_started_at)
+    if gdf.empty:
+        raise ValueError(f"No features loaded from {COUNTY_BOUNDARY_PATH}")
+    if COUNTY_BOUNDARY_NAME_FIELD not in gdf.columns:
+        raise RuntimeError(
+            f"County boundary file {COUNTY_BOUNDARY_PATH} is missing {COUNTY_BOUNDARY_NAME_FIELD!r}."
+        )
+
+    county_series = gdf[COUNTY_BOUNDARY_NAME_FIELD].astype(str).str.strip().str.casefold()
+    target_name = normalized_name.casefold()
+    gdf = gdf.loc[county_series == target_name].copy()
+    if gdf.empty:
+        raise RuntimeError(
+            f"Configured county study area {normalized_name!r} was not found in {COUNTY_BOUNDARY_PATH.name}."
+        )
+    gdf = gdf[gdf.geometry.notna()].copy()
+    if gdf.empty:
+        raise RuntimeError(
+            f"Configured county study area {normalized_name!r} has no usable geometry in {COUNTY_BOUNDARY_PATH.name}."
+        )
+    if gdf.crs is None:
+        raise ValueError(f"{COUNTY_BOUNDARY_PATH} has no CRS. Supply source_crs explicitly.")
+
+    _emit_progress(progress_cb, f"projecting county {normalized_name} to {TARGET_CRS}")
+    project_started_at = time.perf_counter()
+    gdf = gdf.to_crs(TARGET_CRS)
+    _emit_substep(progress_cb, f"{boundary_label}_project", time.perf_counter() - project_started_at)
+
+    _emit_progress(progress_cb, f"unioning county geometry for {normalized_name}")
+    union_started_at = time.perf_counter()
+    unioned = clean_union(gdf.geometry)
+    _emit_substep(progress_cb, f"{boundary_label}_union", time.perf_counter() - union_started_at)
+    return unioned
+
+
+def load_bbox_geometry_metric(
+    island_geom_metric,
+    bbox_wgs84: tuple[float, float, float, float] | None,
+    *,
+    progress_cb=None,
+):
+    if bbox_wgs84 is None or len(bbox_wgs84) != 4:
+        raise RuntimeError("BBox study area configuration requires four WGS84 coordinates.")
+
+    min_lon, min_lat, max_lon, max_lat = (
+        float(bbox_wgs84[0]),
+        float(bbox_wgs84[1]),
+        float(bbox_wgs84[2]),
+        float(bbox_wgs84[3]),
+    )
+    if not all(math.isfinite(value) for value in (min_lon, min_lat, max_lon, max_lat)):
+        raise RuntimeError("BBox study area configuration must use finite WGS84 coordinates.")
+    if min_lon >= max_lon or min_lat >= max_lat:
+        raise RuntimeError(
+            "BBox study area configuration must satisfy min_lon < max_lon and min_lat < max_lat."
+        )
+
+    _emit_progress(progress_cb, "building bbox study area in WGS84")
+    bbox_wgs84_geom = _as_2d(box(min_lon, min_lat, max_lon, max_lat))
+    _emit_progress(progress_cb, "projecting bbox study area to metric CRS")
+    bbox_metric = _as_2d(transform(TO_TARGET, bbox_wgs84_geom))
+    if not bbox_metric.is_valid:
+        bbox_metric = _as_2d(bbox_metric.buffer(0))
+
+    _emit_progress(progress_cb, "clipping bbox study area to island geometry")
+    clipped = _as_2d(bbox_metric.intersection(_as_2d(island_geom_metric)))
+    if not clipped.is_valid:
+        clipped = _as_2d(clipped.buffer(0))
+    if clipped.is_empty:
+        raise RuntimeError("Configured bbox study area is empty after clipping to the island boundary.")
+    return clipped
+
+
+def load_study_area_metric(*, profile: str | None = None, progress_cb=None):
+    settings = build_profile_settings(profile)
+    if settings.study_area_kind == "county":
+        _emit_progress(
+            progress_cb,
+            f"loading county study area {settings.study_area_county_name}",
+        )
+        return load_county_geometry_metric(
+            str(settings.study_area_county_name or ""),
+            progress_cb=progress_cb,
+        )
+
     island_geom_metric = load_island_geometry_metric(progress_cb=progress_cb)
-    if STUDY_AREA_KIND == "m1_corridor":
+    if settings.study_area_kind == "m1_corridor":
         _emit_progress(progress_cb, "clipping island geometry to M1 corridor")
         return load_m1_corridor_metric(island_geom_metric)
-    if STUDY_AREA_KIND == "ireland":
+    if settings.study_area_kind == "bbox":
+        _emit_progress(progress_cb, "clipping island geometry to configured bbox")
+        return load_bbox_geometry_metric(
+            island_geom_metric,
+            settings.study_area_bbox_wgs84,
+            progress_cb=progress_cb,
+        )
+    if settings.study_area_kind == "ireland":
         return island_geom_metric
-    raise RuntimeError(f"Unsupported STUDY_AREA_KIND={STUDY_AREA_KIND!r}.")
+    raise RuntimeError(f"Unsupported STUDY_AREA_KIND={settings.study_area_kind!r}.")
 
 
-def load_study_area_geometries(*, progress_cb=None):
-    study_area_metric = _as_2d(load_study_area_metric(progress_cb=progress_cb))
+def load_study_area_geometries(*, profile: str | None = None, progress_cb=None):
+    study_area_metric = _as_2d(load_study_area_metric(profile=profile, progress_cb=progress_cb))
     _emit_progress(progress_cb, "transforming study area to WGS84")
     transform_started_at = time.perf_counter()
     study_area_wgs84 = _as_2d(transform(TO_WGS84, study_area_metric))

@@ -33,7 +33,7 @@ class MainCliTests(TestCase):
 
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn(
-            "--force-precompute requires --precompute or --precompute-dev",
+            "--force-precompute requires --precompute, --precompute-dev, or --precompute-test",
             stderr.getvalue(),
         )
 
@@ -47,11 +47,11 @@ class MainCliTests(TestCase):
 
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn(
-            "--auto-refresh-import requires --precompute or --precompute-dev",
+            "--auto-refresh-import requires --precompute, --precompute-dev, or --precompute-test",
             stderr.getvalue(),
         )
 
-    def test_precompute_and_precompute_dev_are_mutually_exclusive(self) -> None:
+    def test_precompute_flags_are_mutually_exclusive(self) -> None:
         with (
             mock.patch.object(sys, "argv", ["main.py", "--precompute", "--precompute-dev"]),
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
@@ -60,9 +60,12 @@ class MainCliTests(TestCase):
             main.main()
 
         self.assertEqual(ctx.exception.code, 2)
-        self.assertIn("--precompute and --precompute-dev are mutually exclusive", stderr.getvalue())
+        self.assertIn(
+            "--precompute, --precompute-dev, and --precompute-test are mutually exclusive",
+            stderr.getvalue(),
+        )
 
-    def test_serve_and_serve_dev_are_mutually_exclusive(self) -> None:
+    def test_serve_profiles_are_mutually_exclusive(self) -> None:
         with (
             mock.patch.object(sys, "argv", ["main.py", "--serve", "--serve-dev"]),
             mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
@@ -72,7 +75,7 @@ class MainCliTests(TestCase):
 
         self.assertEqual(ctx.exception.code, 2)
         self.assertIn(
-            "--serve/--render and --serve-dev/--render-dev are mutually exclusive",
+            "--serve/--render, --serve-dev/--render-dev, and --serve-test/--render-test are mutually exclusive",
             stderr.getvalue(),
         )
 
@@ -131,6 +134,27 @@ class MainCliTests(TestCase):
             auto_refresh_import=True,
         )
 
+    def test_precompute_test_dispatches_test_profile(self) -> None:
+        precompute_mock = mock.Mock(return_value="build-key-test")
+        fake_precompute_module = SimpleNamespace(run_precompute=precompute_mock)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--precompute-test", "--force-precompute", "--auto-refresh-import"],
+            ),
+            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        precompute_mock.assert_called_once_with(
+            profile="test",
+            force_precompute=True,
+            auto_refresh_import=True,
+        )
+
     def test_serve_dev_dispatches_dev_profile(self) -> None:
         render_mock = mock.Mock(return_value="http://127.0.0.1:8000/")
         fake_render_module = SimpleNamespace(run_render_from_db=render_mock)
@@ -144,6 +168,23 @@ class MainCliTests(TestCase):
         self.assertEqual(exit_code, 0)
         render_mock.assert_called_once_with(
             profile="dev",
+            host=main.DEFAULT_SERVER_HOST,
+            port=main.DEFAULT_SERVER_PORT,
+        )
+
+    def test_serve_test_dispatches_test_profile(self) -> None:
+        render_mock = mock.Mock(return_value="http://127.0.0.1:8000/")
+        fake_render_module = SimpleNamespace(run_render_from_db=render_mock)
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--serve-test"]),
+            mock.patch.dict(sys.modules, {"render_from_db": fake_render_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        render_mock.assert_called_once_with(
+            profile="test",
             host=main.DEFAULT_SERVER_HOST,
             port=main.DEFAULT_SERVER_PORT,
         )
@@ -197,6 +238,23 @@ class MainCliTests(TestCase):
         self.assertEqual(exit_code, 0)
         render_mock.assert_called_once_with(
             profile="dev",
+            host=main.DEFAULT_SERVER_HOST,
+            port=main.DEFAULT_SERVER_PORT,
+        )
+
+    def test_render_test_alias_dispatches_test_profile(self) -> None:
+        render_mock = mock.Mock(return_value="http://127.0.0.1:8000/")
+        fake_render_module = SimpleNamespace(run_render_from_db=render_mock)
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--render-test"]),
+            mock.patch.dict(sys.modules, {"render_from_db": fake_render_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        render_mock.assert_called_once_with(
+            profile="test",
             host=main.DEFAULT_SERVER_HOST,
             port=main.DEFAULT_SERVER_PORT,
         )

@@ -2801,9 +2801,10 @@ class StudyAreaAndPublishTests(TestCase):
 
     def test_load_study_area_metric_defaults_to_island_geometry(self) -> None:
         island_geom = box(0.0, 0.0, 2.0, 2.0)
+        settings = SimpleNamespace(study_area_kind="ireland", study_area_county_name=None)
 
         with (
-            mock.patch.object(study_area, "STUDY_AREA_KIND", "ireland"),
+            mock.patch.object(study_area, "build_profile_settings", return_value=settings),
             mock.patch.object(study_area, "load_island_geometry_metric", return_value=island_geom),
             mock.patch.object(study_area, "load_m1_corridor_metric") as corridor_mock,
         ):
@@ -2815,9 +2816,10 @@ class StudyAreaAndPublishTests(TestCase):
     def test_load_study_area_metric_keeps_corridor_mode_available(self) -> None:
         island_geom = box(0.0, 0.0, 2.0, 2.0)
         corridor_geom = box(0.5, 0.5, 1.5, 1.5)
+        settings = SimpleNamespace(study_area_kind="m1_corridor", study_area_county_name=None)
 
         with (
-            mock.patch.object(study_area, "STUDY_AREA_KIND", "m1_corridor"),
+            mock.patch.object(study_area, "build_profile_settings", return_value=settings),
             mock.patch.object(study_area, "load_island_geometry_metric", return_value=island_geom),
             mock.patch.object(study_area, "load_m1_corridor_metric", return_value=corridor_geom) as corridor_mock,
         ):
@@ -2825,6 +2827,99 @@ class StudyAreaAndPublishTests(TestCase):
 
         self.assertEqual(returned, corridor_geom)
         corridor_mock.assert_called_once_with(island_geom)
+
+    def test_load_study_area_metric_uses_bbox_geometry_for_test_profile(self) -> None:
+        island_geom = box(0.0, 0.0, 2.0, 2.0)
+        cork_geom = box(1.0, 1.0, 1.5, 1.5)
+        settings = SimpleNamespace(
+            study_area_kind="bbox",
+            study_area_county_name=None,
+            study_area_bbox_wgs84=(-8.55, 51.87, -8.41, 51.93),
+        )
+
+        with (
+            mock.patch.object(study_area, "build_profile_settings", return_value=settings),
+            mock.patch.object(study_area, "load_island_geometry_metric", return_value=island_geom) as island_mock,
+            mock.patch.object(study_area, "load_bbox_geometry_metric", return_value=cork_geom) as bbox_mock,
+        ):
+            returned = study_area.load_study_area_metric(profile="test")
+
+        self.assertEqual(returned, cork_geom)
+        island_mock.assert_called_once_with(progress_cb=None)
+        bbox_mock.assert_called_once_with(
+            island_geom,
+            (-8.55, 51.87, -8.41, 51.93),
+            progress_cb=None,
+        )
+
+    def test_load_bbox_geometry_metric_clips_bbox_to_island_geometry(self) -> None:
+        island_geom = box(100.0, 100.0, 200.0, 200.0)
+
+        with mock.patch.object(study_area, "transform", return_value=box(120.0, 130.0, 170.0, 180.0)):
+            returned = study_area.load_bbox_geometry_metric(
+                island_geom,
+                (-8.55, 51.87, -8.41, 51.93),
+            )
+
+        self.assertTrue(returned.equals(box(120.0, 130.0, 170.0, 180.0)))
+
+    def test_load_bbox_geometry_metric_reports_empty_clip_clearly(self) -> None:
+        island_geom = box(100.0, 100.0, 200.0, 200.0)
+
+        with mock.patch.object(study_area, "transform", return_value=box(0.0, 0.0, 10.0, 10.0)):
+            with self.assertRaises(RuntimeError) as ctx:
+                study_area.load_bbox_geometry_metric(
+                    island_geom,
+                    (-8.55, 51.87, -8.41, 51.93),
+                )
+
+        self.assertIn("empty after clipping", str(ctx.exception))
+
+    def test_load_bbox_geometry_metric_rejects_invalid_bbox_config(self) -> None:
+        island_geom = box(100.0, 100.0, 200.0, 200.0)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            study_area.load_bbox_geometry_metric(
+                island_geom,
+                (-8.41, 51.93, -8.55, 51.87),
+            )
+
+        self.assertIn("min_lon < max_lon", str(ctx.exception))
+
+    def test_load_county_geometry_metric_selects_county_name_case_insensitively(self) -> None:
+        county_rows = study_area.gpd.GeoDataFrame(
+            {
+                "ENG_NAME_VALUE": ["CORK", "Cork", "DUBLIN"],
+                "geometry": [
+                    box(0.0, 0.0, 1.0, 1.0),
+                    box(1.0, 0.0, 2.0, 1.0),
+                    box(10.0, 10.0, 11.0, 11.0),
+                ],
+            },
+            crs=config.TARGET_CRS,
+        )
+
+        with mock.patch.object(study_area, "_read_boundary_file", return_value=county_rows):
+            returned = study_area.load_county_geometry_metric("cork")
+
+        self.assertFalse(returned.is_empty)
+        self.assertFalse(returned.has_z)
+        self.assertEqual(returned.bounds, (0.0, 0.0, 2.0, 1.0))
+
+    def test_load_county_geometry_metric_reports_unknown_county_clearly(self) -> None:
+        county_rows = study_area.gpd.GeoDataFrame(
+            {
+                "ENG_NAME_VALUE": ["DUBLIN"],
+                "geometry": [box(10.0, 10.0, 11.0, 11.0)],
+            },
+            crs=config.TARGET_CRS,
+        )
+
+        with mock.patch.object(study_area, "_read_boundary_file", return_value=county_rows):
+            with self.assertRaises(RuntimeError) as ctx:
+                study_area.load_county_geometry_metric("CORK")
+
+        self.assertIn("CORK", str(ctx.exception))
 
     def test_build_scoring_grid_emits_2d_geometry(self) -> None:
         with mock.patch.object(precompute._grid, "TO_WGS84", lambda x, y: (x, y)):
@@ -3114,12 +3209,16 @@ class ConfigTests(TestCase):
 
     def test_default_study_area_kind_is_ireland(self) -> None:
         self.assertEqual(config.STUDY_AREA_KIND, "ireland")
+        self.assertEqual(config.build_profile_settings("full").study_area_kind, "ireland")
+        self.assertEqual(config.build_profile_settings("test").study_area_kind, "bbox")
+        self.assertEqual(
+            config.build_profile_settings("test").study_area_bbox_wgs84,
+            (-8.55, 51.87, -8.41, 51.93),
+        )
 
-    def test_config_hash_changes_when_study_area_kind_changes(self) -> None:
-        with mock.patch.object(config, "STUDY_AREA_KIND", "ireland"):
-            island_hashes = config.build_config_hashes()
-        with mock.patch.object(config, "STUDY_AREA_KIND", "m1_corridor"):
-            corridor_hashes = config.build_config_hashes()
+    def test_config_hash_changes_when_profile_study_area_changes(self) -> None:
+        island_hashes = config.build_config_hashes(profile="full")
+        corridor_hashes = config.build_config_hashes(profile="test")
 
         self.assertNotEqual(island_hashes.geo_hash, corridor_hashes.geo_hash)
         self.assertNotEqual(island_hashes.config_hash, corridor_hashes.config_hash)

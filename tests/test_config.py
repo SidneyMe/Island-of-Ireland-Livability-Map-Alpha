@@ -93,20 +93,28 @@ class ConfigHashTests(TestCase):
     def test_build_profiles_produce_distinct_config_hashes_and_build_keys(self) -> None:
         full_hashes = config.build_config_hashes(profile="full")
         dev_hashes = config.build_config_hashes(profile="dev")
+        test_hashes = config.build_config_hashes(profile="test")
         full_build = config.build_hashes_for_import("import-fingerprint-123", profile="full")
         dev_build = config.build_hashes_for_import("import-fingerprint-123", profile="dev")
+        test_build = config.build_hashes_for_import("import-fingerprint-123", profile="test")
 
         self.assertEqual(full_hashes.geo_hash, dev_hashes.geo_hash)
         self.assertEqual(full_hashes.reach_hash, dev_hashes.reach_hash)
         self.assertEqual(full_hashes.score_hash, dev_hashes.score_hash)
         self.assertNotEqual(full_hashes.config_hash, dev_hashes.config_hash)
         self.assertNotEqual(full_hashes.render_hash, dev_hashes.render_hash)
+        self.assertNotEqual(full_hashes.geo_hash, test_hashes.geo_hash)
+        self.assertNotEqual(full_hashes.reach_hash, test_hashes.reach_hash)
+        self.assertNotEqual(full_hashes.score_hash, test_hashes.score_hash)
+        self.assertNotEqual(full_hashes.config_hash, test_hashes.config_hash)
         self.assertEqual(full_build.geo_hash, dev_build.geo_hash)
         self.assertEqual(full_build.reach_hash, dev_build.reach_hash)
         self.assertEqual(full_build.score_hash, dev_build.score_hash)
         self.assertNotEqual(full_build.build_key, dev_build.build_key)
+        self.assertNotEqual(full_build.build_key, test_build.build_key)
         self.assertEqual(full_build.build_profile, "full")
         self.assertEqual(dev_build.build_profile, "dev")
+        self.assertEqual(test_build.build_profile, "test")
 
     def test_overture_dataset_signature_changes_invalidate_reach_hash(self) -> None:
         with mock.patch.object(config, "overture_dataset_signature", return_value="sig-a"), mock.patch.object(
@@ -194,6 +202,49 @@ class SurfaceResolutionTests(TestCase):
             [(10, 5000), (8, 10000), (0, 20000)],
         )
         self.assertFalse(dev_settings.fine_surface_enabled)
+
+    def test_test_profile_matches_full_surface_settings_and_uses_cork_city_bbox(self) -> None:
+        full_settings = config.build_profile_settings("full")
+        test_settings = config.build_profile_settings("test")
+
+        self.assertEqual(config.normalize_build_profile("test"), "test")
+        self.assertEqual(list(test_settings.coarse_vector_resolutions_m), list(full_settings.coarse_vector_resolutions_m))
+        self.assertEqual(list(test_settings.fine_resolutions_m), list(full_settings.fine_resolutions_m))
+        self.assertEqual(list(test_settings.surface_zoom_breaks), list(full_settings.surface_zoom_breaks))
+        self.assertTrue(test_settings.fine_surface_enabled)
+        self.assertEqual(test_settings.study_area_kind, "bbox")
+        self.assertIsNone(test_settings.study_area_county_name)
+        self.assertEqual(test_settings.study_area_bbox_wgs84, (-8.55, 51.87, -8.41, 51.93))
+        self.assertEqual(config.pmtiles_filename("test"), "livability-test.pmtiles")
+        self.assertEqual(config.precompute_flag_for_profile("test"), "--precompute-test")
+
+    def test_test_profile_bbox_changes_geo_hash_from_previous_county_setting(self) -> None:
+        bbox_hashes = config.build_config_hashes(profile="test")
+        legacy_test_settings = config.BuildProfileSettings(
+            name="test",
+            coarse_vector_resolutions_m=(20_000, 10_000, 5_000),
+            fine_resolutions_m=(2_500, 1_000, 500, 250, 100, 50),
+            surface_zoom_breaks=(
+                (18, 50),
+                (16, 100),
+                (15, 250),
+                (14, 500),
+                (13, 1_000),
+                (12, 2_500),
+                (10, 5_000),
+                (8, 10_000),
+                (0, 20_000),
+            ),
+            fine_surface_enabled=True,
+            study_area_kind="county",
+            study_area_county_name="CORK",
+        )
+
+        with mock.patch.dict(config._BUILD_PROFILE_SETTINGS, {"test": legacy_test_settings}):
+            legacy_hashes = config.build_config_hashes(profile="test")
+
+        self.assertNotEqual(bbox_hashes.geo_hash, legacy_hashes.geo_hash)
+        self.assertNotEqual(bbox_hashes.config_hash, legacy_hashes.config_hash)
 
     def test_resolution_for_zoom_uses_fixed_breaks(self) -> None:
         expectations = {
