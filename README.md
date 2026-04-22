@@ -381,13 +381,13 @@ The current model counts features by presence: a corner shop scores the same as 
 - [x] **Shops:** corner shop → regular shop → supermarket → mall / retail cluster.
 - [x] **Healthcare:** pharmacy / GP → clinic / health centre → hospital → major hospital with A&E.
 - [x] **Parks:** score by area, not count. Pocket park / playground (<0.5 ha) → neighbourhood park (0.5–5 ha) → district park (5–25 ha) → regional park / nature reserve (25+ ha).
-- [ ] **Variety signal** — count distinct clusters rather than distinct tags, so co-located services don't inflate the score.
+- [x] **Variety signal** — count distinct clusters rather than distinct tags, so co-located services don't inflate the score.
 
 ### Service reality check
 
 A prerequisite for any transport scoring work. Every stop the model counts is assumed to exist in practice, and that assumption currently holds across derelict stations, routes that were cancelled during COVID and never restored, school-only runs tagged as general transit, and rural services that run on an informal schedule. Filtering phantom stops is upstream of every transport-scoring improvement — there is no value in tiering a bus stop by frequency if its effective frequency is zero.
 
-- [x] Cross-reference OSM bus stops against live GTFS feeds (GTFS-first: stops sourced directly from NTA + Translink feeds, inherently excluding phantom and inactive stops); stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
+- [x] GTFS-first transport reality: stops are sourced directly from NTA + Translink feeds, and stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
 - [x] Separate public services from school-only routes so the latter don't count toward general transit access.
 - [x] Flag service deserts — grid cells with nominal transport features that resolve to zero real weekly departures — and expose them as a dedicated overlay.
 - [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL. Local export to `cache/exports/` is generated after each transit refresh; hosted publishing is pending Phase 8.
@@ -396,7 +396,7 @@ A prerequisite for any transport scoring work. Every stop the model counts is as
 
 Depends on the service reality check above — every item assumes phantom stops have already been filtered.
 
-- [x] Pull GTFS feeds (NTA + Translink) and compute departures per stop per day.
+- [ ] Pull GTFS feeds (NTA + Translink) and compute departures per stop per day.
 - [ ] Tier transport by mode: Luas → rail station → high-frequency bus → rural bus.
 - [ ] Rail proximity sweet spot: reward walking distance to a station, penalize immediate adjacency (noise, dust).
 - [ ] Cap rural bus stops so a single low-frequency stop cannot match urban transit access.
@@ -440,7 +440,7 @@ Depends on the service reality check above — every item assumes phantom stops 
 
 ### Infrastructure
 
-- [x] Clip grid cells to land so coastal cells aren't artificially sparse. Effective area stored per cell; amenity density and park scoring normalised by clipped land area. Full park size tiers (pocket → regional) are tracked separately as a Phase 2 item.
+- [x] Clip grid cells to land so coastal cells aren't artificially sparse. Effective area stored per cell; amenity density and park scoring normalised by clipped land area.
 - [x] Automated data refresh — scripted OSM re-import and precompute on a schedule.
 - [x] Remove Windows-specific assumptions from the code path (hardcoded `.exe` suffix, PowerShell-only setup commands) so the project can run on Linux/macOS in principle. Testing and documentation for those platforms is out of scope — PRs from Linux/macOS users welcome.
 - [x] Basic CI — run Python and Rust tests on push.

@@ -81,7 +81,7 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 - Park scoring now uses reachable polygon park area rather than raw reachable park-feature count, still normalized by the same clipped-area ratio floor of `0.25`.
 - Raw park counts remain raw feature counts for publishing/UI compatibility; only park scoring uses the interim reachable-area lookup.
 - `GRID_GEOMETRY_SCHEMA_VERSION` was bumped to reflect the new persisted grid metadata.
-- This phase item is still not fully done: park scoring is now area-based, but the broader Phase 2 park-size-tier redesign is still outstanding.
+- Park scoring now uses reachable polygon area, and the Phase 2 park-size tiering has since landed in `precompute/amenity_tiers.py`.
 
 ### ~~Remove Windows-only assumptions [independent]~~
 
@@ -233,7 +233,7 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
 - A cell close to a 100 ha park scores significantly higher on parks than a cell close to a playground, even though both are "one park".
 - Area thresholds calibrated against the sanity fixture — Phoenix Park should not dominate the entire model just because it's enormous.
 
-### Variety signal
+### ~~Variety signal~~
 
 **What:** Count distinct clusters, not distinct tags. "3 services in 3 buildings" beats "3 services behind one counter."
 
@@ -243,7 +243,7 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
 - Count distinct clusters per category within the walk radius.
 - A cell whose reachable amenities all fall into one cluster takes a variety penalty: the count is capped at the cluster count, not the feature count.
 
-### Distance-decay scoring
+### ~~Distance-decay scoring~~
 
 **What:** Replace the binary in-range / out-of-range cutoff with a smooth decay curve.
 
