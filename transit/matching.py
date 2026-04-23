@@ -43,7 +43,11 @@ def derive_gtfs_stop_reality(
         if stop_info.location_type == 1 and stop_key in summarized_parent_keys:
             continue
 
-        if summary.public_departures_30d > 0:
+        if summary.is_unscheduled_stop:
+            reality_status = "inactive_confirmed"
+            school_only_state = "no"
+            primary_reason = "unscheduled_stop"
+        elif summary.public_departures_30d > 0:
             reality_status = "active_confirmed"
             school_only_state = "no"
             primary_reason = "public_departures_present"
@@ -78,6 +82,12 @@ def derive_gtfs_stop_reality(
                 reality_reason_codes=reality_reason_codes,
                 lat=stop_info.stop_lat,
                 lon=stop_info.stop_lon,
+                bus_active_days_mask_7d=summary.bus_active_days_mask_7d,
+                bus_service_subtier=summary.bus_service_subtier,
+                is_unscheduled_stop=summary.is_unscheduled_stop,
+                has_exception_only_service=summary.has_exception_only_service,
+                has_any_bus_service=summary.has_any_bus_service,
+                has_daily_bus_service=summary.has_daily_bus_service,
             )
         )
 

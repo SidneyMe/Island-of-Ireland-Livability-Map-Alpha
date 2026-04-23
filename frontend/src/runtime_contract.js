@@ -313,12 +313,29 @@ function amenityCircleColorExpression(colors) {
 
 function transportRealityCircleColorExpression() {
   return [
-    "match",
-    ["get", "reality_status"],
-    "active_confirmed", "#1a9850",
-    "inactive_confirmed", "#d73027",
-    "school_only_confirmed", "#fdae61",
-    "#666666"
+    "case",
+    ["==", ["get", "is_unscheduled_stop"], 1], "#8c8778",
+    [
+      "match",
+      ["coalesce", ["get", "bus_service_subtier"], ""],
+      "mon_sun", "#1f7a4d",
+      "mon_sat", "#1d7874",
+      "tue_sun", "#3b6fb6",
+      "weekdays_only", "#c07a1c",
+      "weekends_only", "#b84b5e",
+      "single_day_only", "#c05621",
+      "partial_week", "#5f6b7a",
+      "#9aa1a6"
+    ]
+  ];
+}
+
+function transportRealityCircleOpacityExpression() {
+  return [
+    "case",
+    ["==", ["get", "is_unscheduled_stop"], 1], 0.8,
+    ["==", ["coalesce", ["get", "bus_service_subtier"], ""], ""], 0.42,
+    0.84
   ];
 }
 
@@ -399,7 +416,7 @@ function buildStyle(runtime, options = {}) {
         19, 8
       ],
       "circle-color": transportRealityCircleColorExpression(),
-      "circle-opacity": 0.82,
+      "circle-opacity": transportRealityCircleOpacityExpression(),
       "circle-stroke-color": transportRealityCircleStrokeColorExpression(),
       "circle-stroke-width": transportRealityCircleStrokeWidthExpression()
     }

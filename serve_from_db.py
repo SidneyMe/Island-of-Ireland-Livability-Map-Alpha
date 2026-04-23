@@ -74,6 +74,8 @@ class RuntimeState:
     surface_zoom_breaks: list[tuple[int, int]]
     amenity_counts: dict[str, int]
     amenity_tier_counts: dict[str, dict[str, int]]
+    transport_subtier_counts: dict[str, int]
+    transport_flag_counts: dict[str, int]
     fine_surface_enabled: bool
     surface_shell_dir: Path | None
     surface_score_dir: Path | None
@@ -167,6 +169,26 @@ class RuntimeService:
             }
             for category in sorted(CATEGORY_COLORS)
         }
+        raw_transport_subtier_counts = summary_json.get("transport_subtier_counts", {}) or {}
+        transport_subtier_counts = {
+            str(subtier): int(value)
+            for subtier, value in (
+                raw_transport_subtier_counts.items()
+                if isinstance(raw_transport_subtier_counts, dict)
+                else ()
+            )
+            if str(subtier)
+        }
+        raw_transport_flag_counts = summary_json.get("transport_flag_counts", {}) or {}
+        transport_flag_counts = {
+            str(flag_name): int(value)
+            for flag_name, value in (
+                raw_transport_flag_counts.items()
+                if isinstance(raw_transport_flag_counts, dict)
+                else ()
+            )
+            if str(flag_name)
+        }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -216,6 +238,8 @@ class RuntimeService:
             surface_zoom_breaks=surface_zoom_breaks,
             amenity_counts=amenity_counts,
             amenity_tier_counts=amenity_tier_counts,
+            transport_subtier_counts=transport_subtier_counts,
+            transport_flag_counts=transport_flag_counts,
             fine_surface_enabled=fine_surface_enabled,
             surface_shell_dir=surface_shell_dir,
             surface_score_dir=surface_score_dir,
@@ -276,6 +300,8 @@ class RuntimeService:
             ],
             "amenity_counts": state.amenity_counts,
             "amenity_tier_counts": state.amenity_tier_counts,
+            "transport_subtier_counts": state.transport_subtier_counts,
+            "transport_flag_counts": state.transport_flag_counts,
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,
             "max_zoom": SURFACE_MAX_ZOOM,

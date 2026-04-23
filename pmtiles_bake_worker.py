@@ -120,58 +120,39 @@ _TRANSPORT_REALITY_TILE_SQL = text(
             ST_TileEnvelope(:z, :x, :y) AS env_3857,
             ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
     ),
-    grouped AS (
-        SELECT
-            COALESCE(NULLIF(BTRIM(t.stop_name), ''), t.source_ref) AS stop_label,
-            ST_X(t.geom) AS lon,
-            ST_Y(t.geom) AS lat,
-            STRING_AGG(DISTINCT t.source_ref, ',' ORDER BY t.source_ref) AS source_ref,
-            STRING_AGG(DISTINCT t.feed_id, ',' ORDER BY t.feed_id) AS feed_id,
-            STRING_AGG(DISTINCT t.stop_id, ',' ORDER BY t.stop_id) AS stop_id,
-            MIN(t.source_status) AS source_status,
-            CASE
-                WHEN SUM(t.public_departures_30d) > 0 THEN 'active_confirmed'
-                WHEN SUM(t.school_only_departures_30d) > 0 THEN 'school_only_confirmed'
-                ELSE 'inactive_confirmed'
-            END AS reality_status,
-            CASE
-                WHEN SUM(t.public_departures_30d) > 0 THEN 'no'
-                WHEN SUM(t.school_only_departures_30d) > 0 THEN 'yes'
-                ELSE 'no'
-            END AS school_only_state,
-            SUM(t.public_departures_7d) AS public_departures_7d,
-            SUM(t.public_departures_30d) AS public_departures_30d,
-            SUM(t.school_only_departures_30d) AS school_only_departures_30d,
-            ST_SetSRID(ST_MakePoint(ST_X(t.geom), ST_Y(t.geom)), 4326) AS geom
-        FROM transport_reality AS t, tile
-        WHERE t.build_key = :build_key
-          AND t.geom && tile.env_4326
-          AND ST_Intersects(t.geom, tile.env_4326)
-        GROUP BY
-            COALESCE(NULLIF(BTRIM(t.stop_name), ''), t.source_ref),
-            ST_X(t.geom),
-            ST_Y(t.geom)
-    ),
     mvtgeom AS (
         SELECT
-            g.source_ref,
-            g.stop_label AS stop_name,
-            g.feed_id,
-            g.stop_id,
-            g.reality_status,
-            g.source_status,
-            g.school_only_state,
-            g.public_departures_7d,
-            g.public_departures_30d,
-            g.school_only_departures_30d,
+            t.source_ref,
+            COALESCE(NULLIF(BTRIM(t.stop_name), ''), t.source_ref) AS stop_name,
+            t.feed_id,
+            t.stop_id,
+            t.reality_status,
+            t.source_status,
+            t.school_only_state,
+            t.public_departures_7d,
+            t.public_departures_30d,
+            t.school_only_departures_30d,
+            COALESCE(t.bus_active_days_mask_7d, '') AS bus_active_days_mask_7d,
+            COALESCE(t.bus_service_subtier, '') AS bus_service_subtier,
+            COALESCE(
+                array_to_string(ARRAY(SELECT jsonb_array_elements_text(t.route_modes_json)), ','),
+                ''
+            ) AS route_modes,
+            CASE WHEN t.is_unscheduled_stop THEN 1 ELSE 0 END AS is_unscheduled_stop,
+            CASE WHEN t.has_exception_only_service THEN 1 ELSE 0 END AS has_exception_only_service,
+            CASE WHEN t.has_any_bus_service THEN 1 ELSE 0 END AS has_any_bus_service,
+            CASE WHEN t.has_daily_bus_service THEN 1 ELSE 0 END AS has_daily_bus_service,
             ST_AsMVTGeom(
-                ST_Transform(g.geom, 3857),
+                ST_Transform(t.geom, 3857),
                 tile.env_3857,
                 4096,
                 64,
                 true
             ) AS geom
-        FROM grouped AS g, tile
+        FROM transport_reality AS t, tile
+        WHERE t.build_key = :build_key
+          AND t.geom && tile.env_4326
+          AND ST_Intersects(t.geom, tile.env_4326)
     )
     SELECT ST_AsMVT(mvtgeom, 'transport_reality', 4096, 'geom') FROM mvtgeom
     """

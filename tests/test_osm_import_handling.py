@@ -216,6 +216,37 @@ class LocalOsmImportTests(TestCase):
             with self.assertRaisesRegex(RuntimeError, "requires a database password"):
                 local_osm_import._connection_arguments()
 
+    def test_resolve_source_state_reports_preflight_progress(self) -> None:
+        progress = mock.Mock()
+
+        with (
+            mock.patch.object(
+                local_osm_import,
+                "detect_importer_version",
+                return_value="osm2pgsql 2.1.0",
+            ) as detect_mock,
+            mock.patch.object(
+                local_osm_import,
+                "build_source_state",
+                return_value=self.source_state,
+            ) as build_source_state_mock,
+        ):
+            result = local_osm_import.resolve_source_state(progress_cb=progress)
+
+        self.assertIs(result, self.source_state)
+        detect_mock.assert_called_once_with()
+        build_source_state_mock.assert_called_once_with(
+            "osm2pgsql 2.1.0",
+            progress_cb=progress,
+        )
+        self.assertEqual(
+            detail_messages(progress),
+            [
+                "probing osm2pgsql --version",
+                "resolving OSM source state",
+            ],
+        )
+
     def test_run_osm2pgsql_import_uses_create_and_streams_output(self) -> None:
         progress = mock.Mock()
         process = FakeProcess(["reading input\n", "writing rows\n"])

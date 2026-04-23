@@ -77,6 +77,11 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(transport_layer["fields"]["public_departures_30d"], "Number")
         self.assertEqual(transport_layer["fields"]["source_status"], "String")
         self.assertEqual(transport_layer["fields"]["school_only_departures_30d"], "Number")
+        self.assertEqual(transport_layer["fields"]["bus_active_days_mask_7d"], "String")
+        self.assertEqual(transport_layer["fields"]["bus_service_subtier"], "String")
+        self.assertEqual(transport_layer["fields"]["route_modes"], "String")
+        self.assertEqual(transport_layer["fields"]["is_unscheduled_stop"], "Number")
+        self.assertEqual(transport_layer["fields"]["has_exception_only_service"], "Number")
         self.assertEqual(desert_layer["fields"]["baseline_reachable_stop_count"], "Number")
         self.assertEqual(desert_layer["fields"]["reachable_public_departures_7d"], "Number")
 
@@ -104,10 +109,13 @@ class PmtilesBakeContractTests(TestCase):
     def test_transport_reality_tile_sql_exports_gtfs_direct_fields(self) -> None:
         sql = str(bake_pmtiles._TRANSPORT_REALITY_TILE_SQL)
 
-        self.assertIn("STRING_AGG(DISTINCT t.source_ref", sql)
-        self.assertIn("SUM(t.school_only_departures_30d)", sql)
-        self.assertIn("WHEN SUM(t.public_departures_30d) > 0 THEN 'active_confirmed'", sql)
-        self.assertIn("GROUP BY", sql)
+        self.assertIn("t.source_ref", sql)
+        self.assertIn("t.bus_active_days_mask_7d", sql)
+        self.assertIn("t.bus_service_subtier", sql)
+        self.assertIn("jsonb_array_elements_text(t.route_modes_json)", sql)
+        self.assertIn("CASE WHEN t.is_unscheduled_stop THEN 1 ELSE 0 END", sql)
+        self.assertNotIn("STRING_AGG", sql)
+        self.assertNotIn("SUM(t.school_only_departures_30d)", sql)
 
     def test_amenity_tile_sql_exports_tier_name_and_conflict_class(self) -> None:
         sql = str(bake_pmtiles._AMENITY_TILE_SQL)

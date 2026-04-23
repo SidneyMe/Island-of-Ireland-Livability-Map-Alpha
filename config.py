@@ -10,7 +10,7 @@ from datetime import date, datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
-from urllib.parse import quote_plus
+from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from overture.loader import category_map_signature as overture_category_map_signature
@@ -115,7 +115,7 @@ def _osm2pgsql_number_processes() -> int | None:
 OSM2PGSQL_NUMBER_PROCESSES = _osm2pgsql_number_processes()
 GTFS_DIR = BASE_DIR / "gtfs"
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
-TRANSIT_REALITY_ALGO_VERSION = 5
+TRANSIT_REALITY_ALGO_VERSION = 6
 AMENITY_MERGE_ALGO_VERSION = 4
 
 
@@ -473,12 +473,14 @@ CATEGORY_COLORS = {
 
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
-PMTILES_SCHEMA_VERSION = 5
+OSM_EXTRACT_FINGERPRINT_CACHE_PATH = CACHE_DIR / "osm_extract_fingerprint_cache.json"
+PMTILES_SCHEMA_VERSION = 6
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 11
 FORCE_RECOMPUTE = False
 USE_COMPRESSED_CACHE = True
 MANIFEST_NAME = "manifest.json"
+DEFAULT_DATABASE_CONNECT_TIMEOUT_SECONDS = 15
 
 
 def profile_fine_surface_enabled(profile: str | None = None) -> bool:
@@ -558,6 +560,12 @@ def _file_meta(path: Path) -> dict[str, int]:
         return {"mtime_ns": 0, "size": 0}
 
 
+def _emit_progress_detail(progress_cb, detail: str) -> None:
+    if progress_cb is None:
+        return
+    progress_cb("detail", detail=detail, force_log=True)
+
+
 def _content_hash(path: Path) -> str:
     try:
         digest = hashlib.sha256()
@@ -575,6 +583,61 @@ def hash_dict(payload: dict[str, Any]) -> str:
     ).hexdigest()[:12]
 
 
+def _extract_fingerprint_cache_key(path: Path, meta: dict[str, int]) -> dict[str, Any]:
+    return {
+        "path": str(path.resolve()),
+        "size": int(meta.get("size", 0)),
+        "mtime_ns": int(meta.get("mtime_ns", 0)),
+    }
+
+
+def _load_extract_fingerprint_cache(
+    path: Path,
+    meta: dict[str, int],
+) -> tuple[str, str] | None:
+    try:
+        payload = json.loads(OSM_EXTRACT_FINGERPRINT_CACHE_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("cache_key") != _extract_fingerprint_cache_key(path, meta):
+        return None
+    content_hash = payload.get("content_hash")
+    extract_fingerprint = payload.get("extract_fingerprint")
+    if not isinstance(content_hash, str) or not content_hash:
+        return None
+    if not isinstance(extract_fingerprint, str) or not extract_fingerprint:
+        return None
+    return content_hash, extract_fingerprint
+
+
+def _store_extract_fingerprint_cache(
+    path: Path,
+    meta: dict[str, int],
+    *,
+    content_hash: str,
+    extract_fingerprint: str,
+) -> None:
+    payload = {
+        "cache_key": _extract_fingerprint_cache_key(path, meta),
+        "content_hash": content_hash,
+        "extract_fingerprint": extract_fingerprint,
+    }
+    try:
+        OSM_EXTRACT_FINGERPRINT_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = OSM_EXTRACT_FINGERPRINT_CACHE_PATH.with_suffix(
+            OSM_EXTRACT_FINGERPRINT_CACHE_PATH.suffix + ".tmp"
+        )
+        temp_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        temp_path.replace(OSM_EXTRACT_FINGERPRINT_CACHE_PATH)
+    except OSError:
+        return
+
+
 def transit_feed_configs() -> tuple[TransitFeedConfig, ...]:
     return (
         TransitFeedConfig(
@@ -588,13 +651,6 @@ def transit_feed_configs() -> tuple[TransitFeedConfig, ...]:
             label="Translink",
             zip_path=Path(os.getenv("GTFS_TRANSLINK_ZIP_PATH", GTFS_DIR / "translink_gtfs.zip")),
             url=(os.getenv("GTFS_TRANSLINK_URL") or "").strip() or None,
-        ),
-        TransitFeedConfig(
-            feed_id="locallink",
-            label="TFI Local Link",
-            zip_path=Path(os.getenv("GTFS_LOCALLINK_ZIP_PATH", GTFS_DIR / "locallink_gtfs.zip")),
-            url=(os.getenv("GTFS_LOCALLINK_URL") or "").strip()
-            or "https://www.transportforireland.ie/transitData/Data/GTFS_Local_Link.zip",
         ),
     )
 
@@ -890,15 +946,35 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     )
 
 
-def extract_fingerprint(path: Path) -> str:
+def extract_fingerprint(path: Path, *, progress_cb=None) -> str:
     validated_path = validate_local_osm_extract(path)
     extract_meta = _file_meta(validated_path)
-    return hash_dict(
+    cached = _load_extract_fingerprint_cache(validated_path, extract_meta)
+    if cached is not None:
+        _emit_progress_detail(
+            progress_cb,
+            f"reusing cached OSM extract fingerprint -> {validated_path.name}",
+        )
+        return cached[1]
+
+    _emit_progress_detail(
+        progress_cb,
+        f"hashing OSM extract -> {validated_path.name} ({extract_meta['size']:,} bytes)",
+    )
+    content_hash = _content_hash(validated_path)
+    fingerprint = hash_dict(
         {
             "extract_size": extract_meta["size"],
-            "extract_content_hash": _content_hash(validated_path),
+            "extract_content_hash": content_hash,
         }
     )
+    _store_extract_fingerprint_cache(
+        validated_path,
+        extract_meta,
+        content_hash=content_hash,
+        extract_fingerprint=fingerprint,
+    )
+    return fingerprint
 
 
 def importer_config_hash() -> str:
@@ -913,9 +989,14 @@ def importer_config_hash() -> str:
     )
 
 
-def build_source_state(importer_version: str, path: Path = OSM_EXTRACT_PATH) -> SourceState:
+def build_source_state(
+    importer_version: str,
+    path: Path = OSM_EXTRACT_PATH,
+    *,
+    progress_cb=None,
+) -> SourceState:
     validated_path = validate_local_osm_extract(path)
-    extract_hash = extract_fingerprint(validated_path)
+    extract_hash = extract_fingerprint(validated_path, progress_cb=progress_cb)
     importer_hash = importer_config_hash()
     import_hash = hash_dict(
         {
@@ -1063,14 +1144,37 @@ def python_version() -> str:
     return sys.version.split()[0]
 
 
+def _with_default_connect_timeout(url: str) -> str:
+    split_url = urlsplit(url)
+    query_items = parse_qsl(split_url.query, keep_blank_values=True)
+    if any(key == "connect_timeout" for key, _ in query_items):
+        return url
+    query_items.append(
+        ("connect_timeout", str(DEFAULT_DATABASE_CONNECT_TIMEOUT_SECONDS))
+    )
+    return urlunsplit(
+        (
+            split_url.scheme,
+            split_url.netloc,
+            split_url.path,
+            urlencode(query_items),
+            split_url.fragment,
+        )
+    )
+
+
 def database_url() -> str:
     raw_url = os.getenv("DATABASE_URL")
     if raw_url:
         if raw_url.startswith("postgres://"):
-            return "postgresql+psycopg://" + raw_url[len("postgres://"):]
+            return _with_default_connect_timeout(
+                "postgresql+psycopg://" + raw_url[len("postgres://"):]
+            )
         if raw_url.startswith("postgresql://"):
-            return "postgresql+psycopg://" + raw_url[len("postgresql://"):]
-        return raw_url
+            return _with_default_connect_timeout(
+                "postgresql+psycopg://" + raw_url[len("postgresql://"):]
+            )
+        return _with_default_connect_timeout(raw_url)
 
     host = os.getenv("POSTGRES_HOST")
     port = os.getenv("POSTGRES_PORT", "5432")
@@ -1095,7 +1199,7 @@ def database_url() -> str:
             + "."
         )
 
-    return (
+    return _with_default_connect_timeout(
         "postgresql+psycopg://"
         f"{quote_plus(user)}:{quote_plus(password)}@{host}:{port}/{quote_plus(database)}"
     )

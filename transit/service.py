@@ -3,7 +3,16 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, timedelta
 
-from .models import FeedDataset, ServiceClassification, StopServiceSummary
+from .models import CalendarService, FeedDataset, ServiceClassification, StopInfo, StopServiceSummary
+
+
+_BUS_SUBTIER_BY_MASK = {
+    "1111111": "mon_sun",
+    "1111110": "mon_sat",
+    "0111111": "tue_sun",
+    "1111100": "weekdays_only",
+    "0000011": "weekends_only",
+}
 
 
 def _exception_dates_by_service(dataset: FeedDataset) -> dict[str, dict[date, int]]:
@@ -11,6 +20,47 @@ def _exception_dates_by_service(dataset: FeedDataset) -> dict[str, dict[date, in
     for row in dataset.calendar_dates:
         exceptions[row.service_id][row.service_date] = row.exception_type
     return exceptions
+
+
+def _weekday_mask_for_weekdays(weekdays: set[int]) -> str:
+    return "".join("1" if weekday in weekdays else "0" for weekday in range(7))
+
+
+def _calendar_weekday_indexes(calendar: CalendarService) -> set[int]:
+    weekday_flags = (
+        calendar.monday,
+        calendar.tuesday,
+        calendar.wednesday,
+        calendar.thursday,
+        calendar.friday,
+        calendar.saturday,
+        calendar.sunday,
+    )
+    return {weekday for weekday, flag in enumerate(weekday_flags) if flag}
+
+
+def _exception_only_service_ids(dataset: FeedDataset) -> set[str]:
+    calendar_service_ids = set(dataset.calendar_services)
+    return {
+        row.service_id
+        for row in dataset.calendar_dates
+        if row.service_id not in calendar_service_ids
+    }
+
+
+def _is_boarding_stop(stop_info: StopInfo) -> bool:
+    return stop_info.location_type in {None, 0}
+
+
+def _bus_subtier_for_mask(mask: str | None) -> str | None:
+    if not mask or mask == "0000000":
+        return None
+    direct = _BUS_SUBTIER_BY_MASK.get(mask)
+    if direct is not None:
+        return direct
+    if mask.count("1") == 1:
+        return "single_day_only"
+    return "partial_week"
 
 
 def expand_service_windows(
@@ -89,6 +139,10 @@ def summarize_gtfs_stops(
     service_classifications: dict[str, ServiceClassification],
 ) -> list[StopServiceSummary]:
     per_stop: dict[str, dict[str, object]] = {}
+    exception_only_service_ids = _exception_only_service_ids(dataset)
+    stop_ids_with_stop_times = {
+        stop_id for stop_id, _, _, _ in dataset.stop_service_occurrences
+    }
 
     for (stop_id, service_id, route_id, mode), occurrences in dataset.stop_service_occurrences.items():
         window = service_windows.get(service_id) or {}
@@ -106,10 +160,24 @@ def summarize_gtfs_stops(
                 "route_modes": set(),
                 "route_ids": set(),
                 "reason_codes": set(),
+                "is_unscheduled_stop": False,
+                "has_exception_only_service": False,
+                "has_any_bus_service": False,
+                "has_daily_bus_service": False,
+                "base_weekly_bus_weekdays": set(),
             },
         )
         stop_payload["route_modes"].add(mode)
         stop_payload["route_ids"].add(route_id)
+        if mode == "bus":
+            stop_payload["has_any_bus_service"] = True
+            calendar = dataset.calendar_services.get(service_id)
+            if calendar is not None:
+                stop_payload["base_weekly_bus_weekdays"].update(
+                    _calendar_weekday_indexes(calendar)
+                )
+            if service_id in exception_only_service_ids:
+                stop_payload["has_exception_only_service"] = True
         if dates_30d:
             stop_payload["last_any_service_date"] = max(
                 filter(
@@ -141,8 +209,39 @@ def summarize_gtfs_stops(
                 default=None,
             )
 
+    unscheduled_stop_ids = {
+        stop_id
+        for stop_id, stop_info in dataset.stops.items()
+        if _is_boarding_stop(stop_info) and stop_id not in stop_ids_with_stop_times
+    }
+    for stop_id in sorted(unscheduled_stop_ids):
+        per_stop[stop_id] = {
+            "public_departures_7d": 0,
+            "public_departures_30d": 0,
+            "school_only_departures_30d": 0,
+            "last_public_service_date": None,
+            "last_any_service_date": None,
+            "route_modes": set(),
+            "route_ids": set(),
+            "reason_codes": {"unscheduled_stop"},
+            "is_unscheduled_stop": True,
+            "has_exception_only_service": False,
+            "has_any_bus_service": False,
+            "has_daily_bus_service": False,
+            "base_weekly_bus_weekdays": set(),
+        }
+
     summaries: list[StopServiceSummary] = []
     for stop_id, payload in sorted(per_stop.items()):
+        base_weekly_bus_mask = None
+        bus_service_subtier = None
+        has_daily_bus_service = False
+        if payload["has_any_bus_service"]:
+            base_weekly_bus_mask = _weekday_mask_for_weekdays(
+                set(payload["base_weekly_bus_weekdays"])
+            )
+            bus_service_subtier = _bus_subtier_for_mask(base_weekly_bus_mask)
+            has_daily_bus_service = base_weekly_bus_mask == "1111111"
         if payload["public_departures_30d"] > 0:
             payload["reason_codes"].add("public_service_present")
         if payload["school_only_departures_30d"] > 0:
@@ -162,6 +261,13 @@ def summarize_gtfs_stops(
                 route_modes=tuple(sorted(payload["route_modes"])),
                 route_ids=tuple(sorted(payload["route_ids"])),
                 reason_codes=tuple(sorted(payload["reason_codes"])),
+                # Legacy export field name; semantics are now the base weekly bus mask.
+                bus_active_days_mask_7d=base_weekly_bus_mask,
+                bus_service_subtier=bus_service_subtier,
+                is_unscheduled_stop=bool(payload["is_unscheduled_stop"]),
+                has_exception_only_service=bool(payload["has_exception_only_service"]),
+                has_any_bus_service=bool(payload["has_any_bus_service"]),
+                has_daily_bus_service=has_daily_bus_service,
             )
         )
 

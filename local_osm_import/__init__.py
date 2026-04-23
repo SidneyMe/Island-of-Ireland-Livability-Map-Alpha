@@ -54,10 +54,12 @@ def detect_importer_version() -> str:
     )
 
 
-def resolve_source_state() -> SourceState:
+def resolve_source_state(*, progress_cb=None) -> SourceState:
     return _osm2pgsql.resolve_source_state_impl(
         build_source_state_fn=build_source_state,
         detect_importer_version_fn=detect_importer_version,
+        progress_cb=progress_cb,
+        emit_detail_fn=_emit_detail if progress_cb is not None else None,
     )
 
 

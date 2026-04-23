@@ -176,6 +176,12 @@ struct StopServiceSummary {
     route_modes: Vec<String>,
     route_ids: Vec<String>,
     reason_codes: Vec<String>,
+    bus_active_days_mask_7d: Option<String>,
+    bus_service_subtier: Option<String>,
+    is_unscheduled_stop: bool,
+    has_exception_only_service: bool,
+    has_any_bus_service: bool,
+    has_daily_bus_service: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +203,12 @@ struct GtfsStopReality {
     reality_reason_codes: Vec<String>,
     lat: f64,
     lon: f64,
+    bus_active_days_mask_7d: Option<String>,
+    bus_service_subtier: Option<String>,
+    is_unscheduled_stop: bool,
+    has_exception_only_service: bool,
+    has_any_bus_service: bool,
+    has_daily_bus_service: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -542,6 +554,12 @@ impl DerivedWriters {
                     "school_only_departures_30d",
                     "last_public_service_date",
                     "last_any_service_date",
+                    "bus_active_days_mask_7d",
+                    "bus_service_subtier",
+                    "is_unscheduled_stop",
+                    "has_exception_only_service",
+                    "has_any_bus_service",
+                    "has_daily_bus_service",
                     "route_modes_json",
                     "route_ids_json",
                     "reason_codes_json",
@@ -565,6 +583,12 @@ impl DerivedWriters {
                     "school_only_departures_30d",
                     "last_public_service_date",
                     "last_any_service_date",
+                    "bus_active_days_mask_7d",
+                    "bus_service_subtier",
+                    "is_unscheduled_stop",
+                    "has_exception_only_service",
+                    "has_any_bus_service",
+                    "has_daily_bus_service",
                     "route_modes_json",
                     "source_reason_codes_json",
                     "reality_reason_codes_json",
@@ -622,6 +646,12 @@ impl DerivedWriters {
             &row.school_only_departures_30d.to_string(),
             &optional_date_string(row.last_public_service_date),
             &optional_date_string(row.last_any_service_date),
+            row.bus_active_days_mask_7d.as_deref().unwrap_or(""),
+            row.bus_service_subtier.as_deref().unwrap_or(""),
+            bool_string(row.is_unscheduled_stop),
+            bool_string(row.has_exception_only_service),
+            bool_string(row.has_any_bus_service),
+            bool_string(row.has_daily_bus_service),
             &json_string(&row.route_modes)?,
             &json_string(&row.route_ids)?,
             &json_string(&row.reason_codes)?,
@@ -651,6 +681,12 @@ impl DerivedWriters {
             &row.school_only_departures_30d.to_string(),
             &optional_date_string(row.last_public_service_date),
             &optional_date_string(row.last_any_service_date),
+            row.bus_active_days_mask_7d.as_deref().unwrap_or(""),
+            row.bus_service_subtier.as_deref().unwrap_or(""),
+            bool_string(row.is_unscheduled_stop),
+            bool_string(row.has_exception_only_service),
+            bool_string(row.has_any_bus_service),
+            bool_string(row.has_daily_bus_service),
             &json_string(&row.route_modes)?,
             &json_string(&row.source_reason_codes)?,
             &json_string(&row.reality_reason_codes)?,
@@ -695,6 +731,14 @@ fn float_string(value: f64) -> String {
         .trim_end_matches('0')
         .trim_end_matches('.')
         .to_string()
+}
+
+fn bool_string(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }
 
 fn optional_i32_string(value: Option<i32>) -> String {
@@ -751,6 +795,45 @@ fn route_mode(route_type: Option<i32>) -> &'static str {
         11 => "trolleybus",
         12 => "monorail",
         _ => "unknown",
+    }
+}
+
+fn weekday_mask_for_indexes(weekdays: &BTreeSet<u8>) -> String {
+    (0_u8..7)
+        .map(|weekday| if weekdays.contains(&weekday) { '1' } else { '0' })
+        .collect()
+}
+
+fn calendar_weekday_indexes(calendar: &CalendarService) -> BTreeSet<u8> {
+    [
+        calendar.monday,
+        calendar.tuesday,
+        calendar.wednesday,
+        calendar.thursday,
+        calendar.friday,
+        calendar.saturday,
+        calendar.sunday,
+    ]
+    .into_iter()
+    .enumerate()
+    .filter_map(|(weekday, flag)| if flag == 1 { Some(weekday as u8) } else { None })
+    .collect()
+}
+
+fn is_boarding_stop(stop_info: &StopInfo) -> bool {
+    matches!(stop_info.location_type, None | Some(0))
+}
+
+fn bus_subtier_for_mask(mask: &str) -> Option<&'static str> {
+    match mask {
+        "" | "0000000" => None,
+        "1111111" => Some("mon_sun"),
+        "1111110" => Some("mon_sat"),
+        "0111111" => Some("tue_sun"),
+        "1111100" => Some("weekdays_only"),
+        "0000011" => Some("weekends_only"),
+        _ if mask.chars().filter(|ch| *ch == '1').count() == 1 => Some("single_day_only"),
+        _ => Some("partial_week"),
     }
 }
 
@@ -1530,8 +1613,28 @@ fn summarize_gtfs_stops(
         route_modes: BTreeSet<String>,
         route_ids: BTreeSet<String>,
         reason_codes: BTreeSet<String>,
+        base_weekly_bus_weekdays: BTreeSet<u8>,
+        is_unscheduled_stop: bool,
+        has_exception_only_service: bool,
+        has_any_bus_service: bool,
     }
 
+    let exception_only_service_ids: BTreeSet<String> = dataset
+        .calendar_dates
+        .iter()
+        .filter_map(|row| {
+            if dataset.calendar_services.contains_key(&row.service_id) {
+                None
+            } else {
+                Some(row.service_id.clone())
+            }
+        })
+        .collect();
+    let stop_ids_with_stop_times: BTreeSet<String> = dataset
+        .stop_service_occurrences
+        .keys()
+        .map(|(stop_id, _, _, _)| stop_id.clone())
+        .collect();
     let mut per_stop: BTreeMap<String, StopPayload> = BTreeMap::new();
     for ((stop_id, service_id, route_id, mode), occurrences) in &dataset.stop_service_occurrences {
         let window = service_windows.get(service_id);
@@ -1541,6 +1644,16 @@ fn summarize_gtfs_stops(
         let payload = per_stop.entry(stop_id.clone()).or_default();
         payload.route_modes.insert(mode.clone());
         payload.route_ids.insert(route_id.clone());
+        if mode == "bus" {
+            payload.has_any_bus_service = true;
+            if let Some(calendar) = dataset.calendar_services.get(service_id) {
+                payload
+                    .base_weekly_bus_weekdays
+                    .extend(calendar_weekday_indexes(calendar));
+            }
+            payload.has_exception_only_service = payload.has_exception_only_service
+                || exception_only_service_ids.contains(service_id);
+        }
         if let Some(last_date) = dates_30d.last().copied() {
             payload.last_any_service_date =
                 max_optional_date(payload.last_any_service_date, Some(last_date));
@@ -1565,8 +1678,27 @@ fn summarize_gtfs_stops(
         }
     }
 
+    for (stop_id, stop_info) in &dataset.stops {
+        if !is_boarding_stop(stop_info) || stop_ids_with_stop_times.contains(stop_id) {
+            continue;
+        }
+        let payload = per_stop.entry(stop_id.clone()).or_default();
+        payload.is_unscheduled_stop = true;
+        payload.reason_codes.insert("unscheduled_stop".to_string());
+    }
+
     let mut summaries = Vec::new();
     for (stop_id, mut payload) in per_stop {
+        let base_weekly_bus_mask = if payload.has_any_bus_service {
+            Some(weekday_mask_for_indexes(&payload.base_weekly_bus_weekdays))
+        } else {
+            None
+        };
+        let bus_service_subtier = base_weekly_bus_mask
+            .as_deref()
+            .and_then(bus_subtier_for_mask)
+            .map(str::to_string);
+        let has_daily_bus_service = matches!(base_weekly_bus_mask.as_deref(), Some("1111111"));
         if payload.public_departures_30d > 0 {
             payload
                 .reason_codes
@@ -1591,6 +1723,13 @@ fn summarize_gtfs_stops(
             route_modes: payload.route_modes.into_iter().collect(),
             route_ids: payload.route_ids.into_iter().collect(),
             reason_codes: payload.reason_codes.into_iter().collect(),
+            // Legacy export field name; semantics are now the base weekly bus mask.
+            bus_active_days_mask_7d: base_weekly_bus_mask,
+            bus_service_subtier,
+            is_unscheduled_stop: payload.is_unscheduled_stop,
+            has_exception_only_service: payload.has_exception_only_service,
+            has_any_bus_service: payload.has_any_bus_service,
+            has_daily_bus_service,
         });
     }
     summaries
@@ -1635,7 +1774,13 @@ fn derive_gtfs_stop_reality(
             continue;
         }
 
-        let (reality_status, school_only_state, reason_code) = if summary.public_departures_30d > 0 {
+        let (reality_status, school_only_state, reason_code) = if summary.is_unscheduled_stop {
+            (
+                "inactive_confirmed",
+                "no",
+                "unscheduled_stop",
+            )
+        } else if summary.public_departures_30d > 0 {
             (
                 "active_confirmed",
                 "no",
@@ -1675,6 +1820,12 @@ fn derive_gtfs_stop_reality(
             reality_reason_codes: reality_reason_codes.into_iter().collect(),
             lat: stop_info.stop_lat,
             lon: stop_info.stop_lon,
+            bus_active_days_mask_7d: summary.bus_active_days_mask_7d.clone(),
+            bus_service_subtier: summary.bus_service_subtier.clone(),
+            is_unscheduled_stop: summary.is_unscheduled_stop,
+            has_exception_only_service: summary.has_exception_only_service,
+            has_any_bus_service: summary.has_any_bus_service,
+            has_daily_bus_service: summary.has_daily_bus_service,
         });
     }
 
@@ -1757,10 +1908,84 @@ mod tests {
             last_any_service_date: Some(
                 Date::from_calendar_date(2026, time::Month::April, 14).unwrap(),
             ),
+            bus_active_days_mask_7d: Some("1111111".to_string()),
+            bus_service_subtier: Some("mon_sun".to_string()),
+            is_unscheduled_stop: false,
+            has_exception_only_service: false,
+            has_any_bus_service: true,
+            has_daily_bus_service: true,
             route_modes: vec!["bus".to_string()],
             route_ids: vec!["R1".to_string()],
             reason_codes: vec!["public_service_present".to_string()],
         }
+    }
+
+    fn default_settings(analysis_date: Date) -> RunSettings {
+        RunSettings {
+            analysis_date,
+            analysis_window_days: 30,
+            service_desert_window_days: 7,
+            lookahead_days: 14,
+            school_keywords: BTreeSet::new(),
+            school_am_start_hour: 6,
+            school_am_end_hour: 10,
+            school_pm_start_hour: 13,
+            school_pm_end_hour: 17,
+            import_fingerprint: "import-123".to_string(),
+            reality_fingerprint: "reality-123".to_string(),
+            created_at: "2026-04-14T00:00:00+00:00".to_string(),
+        }
+    }
+
+    fn single_bus_dataset(
+        service_id: &str,
+        weekday_flags: [i32; 7],
+        location_type: Option<i32>,
+    ) -> FeedDataset {
+        let mut dataset = dataset_with_stops(vec![(
+            "S1",
+            stop_info("S1", "Main Street", 53.35, -6.26, None, location_type, None),
+        )]);
+        dataset.calendar_services.insert(
+            service_id.to_string(),
+            CalendarService {
+                monday: weekday_flags[0],
+                tuesday: weekday_flags[1],
+                wednesday: weekday_flags[2],
+                thursday: weekday_flags[3],
+                friday: weekday_flags[4],
+                saturday: weekday_flags[5],
+                sunday: weekday_flags[6],
+                start_date: Date::from_calendar_date(2026, time::Month::April, 1).unwrap(),
+                end_date: Date::from_calendar_date(2026, time::Month::April, 30).unwrap(),
+            },
+        );
+        dataset.stop_service_occurrences.insert(
+            (
+                "S1".to_string(),
+                service_id.to_string(),
+                "R1".to_string(),
+                "bus".to_string(),
+            ),
+            1,
+        );
+        dataset.service_time_buckets.insert(
+            service_id.to_string(),
+            TimeBucketCounts {
+                morning: 0,
+                afternoon: 0,
+                offpeak: 1,
+            },
+        );
+        dataset.service_route_ids.insert(
+            service_id.to_string(),
+            BTreeSet::from(["R1".to_string()]),
+        );
+        dataset.service_route_modes.insert(
+            service_id.to_string(),
+            BTreeSet::from(["bus".to_string()]),
+        );
+        dataset
     }
 
     #[test]
@@ -1865,5 +2090,115 @@ mod tests {
             rows[0].stop_name.as_deref(),
             Some("Central Station Platform 1")
         );
+    }
+
+    #[test]
+    fn summarize_gtfs_stops_keeps_tue_sun_when_exception_adds_monday() {
+        let analysis_date = Date::from_calendar_date(2026, time::Month::April, 14).unwrap();
+        let settings = default_settings(analysis_date);
+        let mut dataset = single_bus_dataset("TUESUN", [0, 1, 1, 1, 1, 1, 1], Some(0));
+        dataset.calendar_dates.push(CalendarDateException {
+            service_id: "TUESUN".to_string(),
+            service_date: Date::from_calendar_date(2026, time::Month::April, 13).unwrap(),
+            exception_type: 1,
+        });
+        let service_windows = expand_service_windows(&dataset, &settings);
+        let service_classifications =
+            classify_services(&dataset, "reality-123", &service_windows);
+        let summaries = summarize_gtfs_stops(
+            &dataset,
+            "reality-123",
+            &service_windows,
+            &service_classifications,
+        );
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].bus_active_days_mask_7d.as_deref(), Some("0111111"));
+        assert_eq!(summaries[0].bus_service_subtier.as_deref(), Some("tue_sun"));
+        assert!(!summaries[0].has_exception_only_service);
+    }
+
+    #[test]
+    fn summarize_gtfs_stops_marks_calendar_dates_only_bus_service() {
+        let analysis_date = Date::from_calendar_date(2026, time::Month::April, 14).unwrap();
+        let settings = default_settings(analysis_date);
+        let mut dataset = dataset_with_stops(vec![(
+            "S1",
+            stop_info("S1", "Main Street", 53.35, -6.26, None, Some(0), None),
+        )]);
+        dataset.calendar_dates.push(CalendarDateException {
+            service_id: "EXC_ONLY".to_string(),
+            service_date: analysis_date,
+            exception_type: 1,
+        });
+        dataset.stop_service_occurrences.insert(
+            (
+                "S1".to_string(),
+                "EXC_ONLY".to_string(),
+                "R1".to_string(),
+                "bus".to_string(),
+            ),
+            1,
+        );
+        dataset.service_time_buckets.insert(
+            "EXC_ONLY".to_string(),
+            TimeBucketCounts {
+                morning: 0,
+                afternoon: 0,
+                offpeak: 1,
+            },
+        );
+        dataset.service_route_ids.insert(
+            "EXC_ONLY".to_string(),
+            BTreeSet::from(["R1".to_string()]),
+        );
+        dataset.service_route_modes.insert(
+            "EXC_ONLY".to_string(),
+            BTreeSet::from(["bus".to_string()]),
+        );
+
+        let service_windows = expand_service_windows(&dataset, &settings);
+        let service_classifications =
+            classify_services(&dataset, "reality-123", &service_windows);
+        let summaries = summarize_gtfs_stops(
+            &dataset,
+            "reality-123",
+            &service_windows,
+            &service_classifications,
+        );
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].bus_active_days_mask_7d.as_deref(), Some("0000000"));
+        assert_eq!(summaries[0].bus_service_subtier, None);
+        assert!(summaries[0].has_exception_only_service);
+    }
+
+    #[test]
+    fn summarize_gtfs_stops_skips_unscheduled_for_non_boarding_stop() {
+        let analysis_date = Date::from_calendar_date(2026, time::Month::April, 14).unwrap();
+        let settings = default_settings(analysis_date);
+        let dataset = dataset_with_stops(vec![(
+            "PARENT",
+            stop_info(
+                "PARENT",
+                "Central Station",
+                53.35,
+                -6.26,
+                None,
+                Some(1),
+                None,
+            ),
+        )]);
+        let service_windows = expand_service_windows(&dataset, &settings);
+        let service_classifications =
+            classify_services(&dataset, "reality-123", &service_windows);
+        let summaries = summarize_gtfs_stops(
+            &dataset,
+            "reality-123",
+            &service_windows,
+            &service_classifications,
+        );
+
+        assert!(summaries.is_empty());
     }
 }

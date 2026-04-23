@@ -4,6 +4,42 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-04-22 - Transit bus subtiers, unscheduled stops, and exact transport PMTiles rows
+
+### Added
+
+- Migration `20260422_000009_add_transit_bus_subtiers.py`: adds `bus_active_days_mask_7d`, `bus_service_subtier`, `is_unscheduled_stop`, `has_exception_only_service`, `has_any_bus_service`, and `has_daily_bus_service` to `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, and public `transport_reality`
+- Weekly stop-level bus subtier derivation in the Python and Rust GTFS paths:
+  - `mon_sun`
+  - `mon_sat`
+  - `tue_sun`
+  - `weekdays_only`
+  - `weekends_only`
+  - `single_day_only`
+  - `partial_week`
+- Explicit unscheduled-stop emission for stops present in `stops.txt` but never referenced by `stop_times.txt`
+- Runtime summary counts for transport subtiers and transport flags (`transport_subtier_counts`, `transport_flag_counts`)
+- `frontend/src/transport_filters.js` + tests for the new weekly-tier / exception-only transport filter logic
+
+### Changed
+
+- `TRANSIT_REALITY_ALGO_VERSION = 6`
+- `PMTILES_SCHEMA_VERSION = 6`
+- Weekly bus tiering now uses the retrospective 7-day service-desert window only; the legacy departure counts and `reality_status` fields still keep the existing lookahead-aware snapshot behavior for compatibility
+- PMTiles `transport_reality` tiles now emit one feature per published stop row instead of grouping same-name same-coordinate rows
+- Transport popups now render all colocated transport features deterministically instead of taking the first rendered feature only
+- The frontend transport overlay now uses weekly-service colors and filters instead of the old green/red active-vs-inactive framing
+
+### Fixed
+
+- Colocated transport rows are no longer re-aggregated back into summed departure counts inside the PMTiles SQL layer
+- Truly unscheduled GTFS stops are no longer silently omitted from `gtfs_stop_reality`
+- Snapshot-based transport semantics are now clearer in the popup wording and runtime metadata
+
+### Scoring logic
+
+- No scoring logic change. `reality_status` remains the compatibility field for transport scoring and service-desert weighting.
+
 ## 2026-04-22 - Fine-vector PMTiles grid, Cork test profile, and grid diagnostics
 
 ### Added
@@ -134,6 +170,17 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-04-22 - Remove standalone Local Link from active GTFS inputs
+
+### Changed
+
+- Active GTFS feed selection now uses NTA + Translink only.
+- `config.py::transit_feed_configs()` no longer configures the standalone TFI Local Link feed, so `--refresh-transit` and `--precompute` ignore any leftover `locallink_gtfs.zip` artifact.
+- The rationale is feed selection, not cross-feed dedupe: current NTA GTFS is treated as the Republic-side source of truth and already covers the Local Link service set we want in the active pipeline.
+- Docs and examples now describe NTA + Translink as the active GTFS inputs.
+
+---
+
 ## 2026-04-18 - Phase 1 Complete: GTFS ingestion and transit reality pipeline
 
 ### Added
@@ -141,7 +188,7 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 #### GTFS ingestion
 
 - `transit/` module (11 files): feed downloading, ZIP parsing, service window expansion, school-run classification, departure summarisation, stop reality derivation, GeoJSON export, Rust subprocess bridge, workflow orchestration
-- Three feeds configured and ingested: NTA (Republic of Ireland), Translink (Northern Ireland), TFI Local Link (rural/regional)
+- Three feeds were initially configured and ingested: NTA (Republic of Ireland), Translink (Northern Ireland), TFI Local Link (rural/regional). This was later narrowed to NTA + Translink in the active pipeline on 2026-04-22.
 - Rust GTFS pipeline (`walkgraph/src/gtfs/`): processes all feeds, expands calendar windows, counts departures per stop per service, writes CSV artifacts consumed by the Python loader
 - `walkgraph/tests/gtfs_cli.rs`: integration test harness for the Rust GTFS CLI path
 - `walkgraph_support.py`: Python bridge that locates and invokes the walkgraph binary

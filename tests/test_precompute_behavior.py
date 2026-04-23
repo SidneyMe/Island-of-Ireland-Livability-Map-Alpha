@@ -902,6 +902,71 @@ class AmenityPhaseIntegrationTests(TestCase):
             },
         )
 
+    def test_summary_json_includes_transport_subtier_and_flag_counts(self) -> None:
+        summary = precompute._publish.summary_json_impl(
+            box(-10.0, 50.0, -5.0, 55.0),
+            {20_000: [_grid_cell("coarse-cell")]},
+            _empty_amenity_data(),
+            [],
+            transport_reality_rows=[
+                {
+                    "bus_service_subtier": "mon_sun",
+                    "is_unscheduled_stop": False,
+                    "has_exception_only_service": False,
+                    "has_any_bus_service": True,
+                    "has_daily_bus_service": True,
+                },
+                {
+                    "bus_service_subtier": "weekdays_only",
+                    "is_unscheduled_stop": False,
+                    "has_exception_only_service": True,
+                    "has_any_bus_service": True,
+                    "has_daily_bus_service": False,
+                },
+                {
+                    "bus_service_subtier": None,
+                    "is_unscheduled_stop": True,
+                    "has_exception_only_service": False,
+                    "has_any_bus_service": False,
+                    "has_daily_bus_service": False,
+                },
+            ],
+            hashes=SimpleNamespace(
+                build_key="build-key-dev",
+                config_hash="config-hash-dev",
+                import_fingerprint="import-fingerprint-dev",
+            ),
+            build_profile="dev",
+            source_state=SimpleNamespace(extract_path=Path("extract.osm.pbf")),
+            osm_extract_path=Path("extract.osm.pbf"),
+            grid_sizes_m=[20_000, 10_000, 5_000],
+            fine_resolutions_m=[],
+            output_html="index.html",
+            zoom_breaks=[(10, 5_000), (8, 10_000), (0, 20_000)],
+            transit_reality_state=SimpleNamespace(
+                analysis_date=date(2026, 4, 14),
+                reality_fingerprint="reality-123",
+            ),
+            transit_analysis_window_days=30,
+            transit_service_desert_window_days=7,
+            transport_reality_download_url="/exports/transport-reality.zip",
+            service_deserts_enabled=True,
+        )
+
+        self.assertEqual(
+            summary["transport_subtier_counts"],
+            {"mon_sun": 1, "weekdays_only": 1},
+        )
+        self.assertEqual(
+            summary["transport_flag_counts"],
+            {
+                "is_unscheduled_stop": 1,
+                "has_exception_only_service": 1,
+                "has_any_bus_service": 2,
+                "has_daily_bus_service": 1,
+            },
+        )
+
 
 class PrecomputeReachabilityTests(TestCase):
     def test_snap_amenities_uses_compact_vertex_ids(self) -> None:
@@ -2300,6 +2365,7 @@ class TransitRefreshPreflightTests(TestCase):
     def test_refresh_transit_reuses_cached_manifest_without_geometry(self) -> None:
         source_state = SimpleNamespace(import_fingerprint="import-fingerprint-123")
         reality_state = SimpleNamespace(reality_fingerprint="reality-123")
+        tracker = _tracker_mock()
 
         with (
             mock.patch.object(precompute, "build_engine", return_value=mock.sentinel.engine),
@@ -2317,6 +2383,7 @@ class TransitRefreshPreflightTests(TestCase):
                 return_value=reality_state,
             ) as ensure_transit_mock,
             mock.patch.object(precompute, "phase_geometry") as phase_geometry_mock,
+            mock.patch.object(precompute, "PrecomputeProgressTracker", return_value=tracker),
         ):
             result = precompute.refresh_transit()
 
@@ -2325,6 +2392,7 @@ class TransitRefreshPreflightTests(TestCase):
             mock.sentinel.engine,
             force_refresh=False,
             refresh_download=True,
+            progress_cb=tracker.phase_callback.return_value,
         )
         ensure_transit_mock.assert_called_once_with(
             mock.sentinel.engine,
@@ -2332,9 +2400,71 @@ class TransitRefreshPreflightTests(TestCase):
             study_area_wgs84=None,
             force_refresh=False,
             refresh_download=False,
+            progress_cb=tracker.phase_callback.return_value,
             reality_state=reality_state,
         )
+        tracker.start_phase.assert_called_once_with(
+            "transit",
+            detail="checking GTFS feed availability and cache state",
+        )
+        tracker.finish_phase.assert_called_once_with(
+            "transit",
+            "cached",
+            detail="transit reality ready (reality-123)",
+        )
         phase_geometry_mock.assert_not_called()
+
+    def test_refresh_transit_marks_transit_phase_completed_after_rebuild(self) -> None:
+        source_state = SimpleNamespace(import_fingerprint="import-fingerprint-123")
+        reality_state = SimpleNamespace(reality_fingerprint="reality-123")
+        tracker = _tracker_mock()
+
+        with (
+            mock.patch.object(precompute, "build_engine", return_value=mock.sentinel.engine),
+            mock.patch.object(precompute, "ensure_database_ready"),
+            mock.patch.object(precompute, "resolve_source_state", return_value=source_state),
+            mock.patch.object(precompute._STATE, "activate"),
+            mock.patch.object(
+                precompute,
+                "_preflight_transit_rebuild",
+                return_value=(reality_state, True),
+            ),
+            mock.patch.object(
+                precompute,
+                "phase_geometry",
+                return_value=(mock.sentinel.study_area_metric, mock.sentinel.study_area_wgs84),
+            ),
+            mock.patch.object(precompute, "current_normalization_scope_hash", return_value="norm-scope-123"),
+            mock.patch.object(precompute, "import_payload_ready", return_value=True),
+            mock.patch.object(precompute, "ensure_local_osm_import"),
+            mock.patch.object(
+                precompute,
+                "_ensure_transit_reality",
+                return_value=reality_state,
+            ) as ensure_transit_mock,
+            mock.patch.object(precompute, "PrecomputeProgressTracker", return_value=tracker),
+        ):
+            result = precompute.refresh_transit()
+
+        self.assertEqual(result, "reality-123")
+        ensure_transit_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            import_fingerprint="import-fingerprint-123",
+            study_area_wgs84=mock.sentinel.study_area_wgs84,
+            refresh_download=False,
+            force_refresh=False,
+            progress_cb=tracker.phase_callback.return_value,
+            reality_state=reality_state,
+        )
+        tracker.start_phase.assert_called_once_with(
+            "transit",
+            detail="checking GTFS feed availability and cache state",
+        )
+        tracker.finish_phase.assert_called_once_with(
+            "transit",
+            "completed",
+            detail="transit reality ready (reality-123)",
+        )
 
     def test_preflight_transit_rebuild_skips_walkgraph_when_transit_reality_is_cached(self) -> None:
         with (
@@ -2360,6 +2490,7 @@ class TransitRefreshPreflightTests(TestCase):
             import_fingerprint="import-fingerprint-123",
             refresh_download=False,
             force_refresh=False,
+            progress_cb=None,
         )
         self.assertIs(state, mock.sentinel.state)
         self.assertFalse(refresh_required)

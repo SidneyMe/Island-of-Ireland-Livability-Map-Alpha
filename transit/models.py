@@ -95,6 +95,12 @@ class StopServiceSummary:
     route_modes: tuple[str, ...]
     route_ids: tuple[str, ...]
     reason_codes: tuple[str, ...]
+    bus_active_days_mask_7d: str | None = None
+    bus_service_subtier: str | None = None
+    is_unscheduled_stop: bool = False
+    has_exception_only_service: bool = False
+    has_any_bus_service: bool = False
+    has_daily_bus_service: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +124,12 @@ class GtfsStopReality:
     reality_reason_codes: tuple[str, ...]
     lat: float
     lon: float
+    bus_active_days_mask_7d: str | None = None
+    bus_service_subtier: str | None = None
+    is_unscheduled_stop: bool = False
+    has_exception_only_service: bool = False
+    has_any_bus_service: bool = False
+    has_daily_bus_service: bool = False
 
 
 @dataclass(frozen=True, slots=True)

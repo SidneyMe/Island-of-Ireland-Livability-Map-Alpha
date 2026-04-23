@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import time
@@ -18,7 +19,7 @@ class DatabaseUrlTests(TestCase):
         ):
             self.assertEqual(
                 config.database_url(),
-                "postgresql+psycopg://user:secret@localhost:5432/gis",
+                "postgresql+psycopg://user:secret@localhost:5432/gis?connect_timeout=15",
             )
 
     def test_database_url_converts_postgresql_scheme(self) -> None:
@@ -29,7 +30,7 @@ class DatabaseUrlTests(TestCase):
         ):
             self.assertEqual(
                 config.database_url(),
-                "postgresql+psycopg://user:secret@localhost:5432/gis",
+                "postgresql+psycopg://user:secret@localhost:5432/gis?connect_timeout=15",
             )
 
     def test_database_url_builds_from_split_postgres_env(self) -> None:
@@ -46,7 +47,7 @@ class DatabaseUrlTests(TestCase):
         ):
             self.assertEqual(
                 config.database_url(),
-                "postgresql+psycopg://map+user:pa+ss%2Fword@db.local:6543/gis+database",
+                "postgresql+psycopg://map+user:pa+ss%2Fword@db.local:6543/gis+database?connect_timeout=15",
             )
 
     def test_database_url_reports_missing_split_env(self) -> None:
@@ -60,8 +61,63 @@ class DatabaseUrlTests(TestCase):
         self.assertIn("POSTGRES_USER", message)
         self.assertIn("POSTGRES_PASSWORD", message)
 
+    def test_database_url_preserves_explicit_connect_timeout(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": (
+                    "postgresql://user:secret@localhost:5432/gis"
+                    "?sslmode=require&connect_timeout=9"
+                )
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                config.database_url(),
+                (
+                    "postgresql+psycopg://user:secret@localhost:5432/gis"
+                    "?sslmode=require&connect_timeout=9"
+                ),
+            )
+
 
 class ConfigHashTests(TestCase):
+    def test_transit_feed_configs_only_include_nta_and_translink(self) -> None:
+        self.assertEqual(
+            [feed.feed_id for feed in config.transit_feed_configs()],
+            ["nta", "translink"],
+        )
+
+    def test_transit_config_hash_inputs_exclude_locallink(self) -> None:
+        with mock.patch.object(config, "hash_dict", return_value="transit-hash-123") as hash_mock:
+            transit_hash = config.transit_config_hash()
+
+        self.assertEqual(transit_hash, "transit-hash-123")
+        payload = hash_mock.call_args.args[0]
+        self.assertEqual(
+            [feed["feed_id"] for feed in payload["feeds"]],
+            ["nta", "translink"],
+        )
+
+    def test_build_transit_reality_state_excludes_locallink_feed(self) -> None:
+        def _fingerprint(path: Path) -> str:
+            return f"fp-{path.name}"
+
+        with mock.patch.object(config, "transit_feed_fingerprint", side_effect=_fingerprint):
+            state = config.build_transit_reality_state(analysis_date=date(2026, 4, 22))
+
+        self.assertEqual(
+            [feed.feed_id for feed in state.feed_states],
+            ["nta", "translink"],
+        )
+        self.assertEqual(
+            state.feed_fingerprints,
+            {
+                "nta": "fp-nta_gtfs.zip",
+                "translink": "fp-translink_gtfs.zip",
+            },
+        )
+
     def test_transit_reality_algorithm_version_changes_transit_config_hash(self) -> None:
         with mock.patch.object(config, "TRANSIT_REALITY_ALGO_VERSION", 1):
             previous_hash = config.transit_config_hash()
@@ -448,3 +504,75 @@ class ExtractFingerprintTests(TestCase):
                 config.extract_fingerprint(first),
                 config.extract_fingerprint(second),
             )
+
+    def test_extract_fingerprint_reuses_cached_hash_when_file_is_unchanged(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            temp_dir = Path(tmp_name)
+            cache_path = temp_dir / "osm_extract_fingerprint_cache.json"
+            extract = temp_dir / "sample.osm.pbf"
+            extract.write_bytes(b"stable extract bytes")
+
+            with mock.patch.object(
+                config,
+                "OSM_EXTRACT_FINGERPRINT_CACHE_PATH",
+                cache_path,
+            ):
+                first = config.extract_fingerprint(extract)
+                with mock.patch.object(
+                    config,
+                    "_content_hash",
+                    side_effect=AssertionError("cache should avoid rehashing"),
+                ):
+                    second = config.extract_fingerprint(extract)
+
+            self.assertEqual(first, second)
+            self.assertTrue(cache_path.exists())
+
+    def test_extract_fingerprint_recomputes_when_file_changes(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            temp_dir = Path(tmp_name)
+            cache_path = temp_dir / "osm_extract_fingerprint_cache.json"
+            extract = temp_dir / "sample.osm.pbf"
+            extract.write_bytes(b"extract version one")
+
+            with mock.patch.object(
+                config,
+                "OSM_EXTRACT_FINGERPRINT_CACHE_PATH",
+                cache_path,
+            ):
+                first = config.extract_fingerprint(extract)
+                time.sleep(0.01)
+                extract.write_bytes(b"extract version two with more bytes")
+                with mock.patch.object(
+                    config,
+                    "_content_hash",
+                    wraps=config._content_hash,
+                ) as content_hash_mock:
+                    second = config.extract_fingerprint(extract)
+
+            self.assertNotEqual(first, second)
+            content_hash_mock.assert_called_once_with(extract)
+
+    def test_extract_fingerprint_recomputes_when_cache_is_corrupt(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            temp_dir = Path(tmp_name)
+            cache_path = temp_dir / "osm_extract_fingerprint_cache.json"
+            extract = temp_dir / "sample.osm.pbf"
+            extract.write_bytes(b"stable extract bytes")
+
+            with mock.patch.object(
+                config,
+                "OSM_EXTRACT_FINGERPRINT_CACHE_PATH",
+                cache_path,
+            ):
+                first = config.extract_fingerprint(extract)
+                cache_path.write_text("{not-json", encoding="utf-8")
+                with mock.patch.object(
+                    config,
+                    "_content_hash",
+                    wraps=config._content_hash,
+                ) as content_hash_mock:
+                    second = config.extract_fingerprint(extract)
+
+            self.assertEqual(first, second)
+            content_hash_mock.assert_called_once_with(extract)

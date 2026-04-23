@@ -47,6 +47,13 @@ class _FakeService:
                 "healthcare": {"local": 1},
                 "parks": {"district": 3},
             },
+            "transport_subtier_counts": {"mon_sun": 2, "weekdays_only": 1},
+            "transport_flag_counts": {
+                "is_unscheduled_stop": 1,
+                "has_exception_only_service": 1,
+                "has_any_bus_service": 3,
+                "has_daily_bus_service": 2,
+            },
             "category_colors": config.CATEGORY_COLORS,
             "default_zoom": 6,
             "max_zoom": 19,
@@ -389,6 +396,13 @@ class RenderAndCliTests(TestCase):
                     "healthcare": {"local": 1},
                     "parks": {"district": 3},
                 },
+                "transport_subtier_counts": {"mon_sun": 2, "weekdays_only": 1},
+                "transport_flag_counts": {
+                    "is_unscheduled_stop": 1,
+                    "has_exception_only_service": 1,
+                    "has_any_bus_service": 3,
+                    "has_daily_bus_service": 2,
+                },
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "transport_reality_download_url": "/exports/transport-reality.zip",
@@ -438,6 +452,8 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["transit_analysis_date"], "2026-04-14")
         self.assertEqual(payload["overture_dataset"], {"last_release": "2026-04-15.0"})
         self.assertEqual(payload["amenity_tier_counts"]["shops"]["corner"], 3)
+        self.assertEqual(payload["transport_subtier_counts"]["mon_sun"], 2)
+        self.assertEqual(payload["transport_flag_counts"]["is_unscheduled_stop"], 1)
         self.assertNotIn("ov_shops", payload["category_colors"])
 
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
@@ -495,6 +511,13 @@ class RenderAndCliTests(TestCase):
                     "healthcare": {"local": 1},
                     "parks": {"district": 3},
                 },
+                "transport_subtier_counts": {"mon_sun": 2},
+                "transport_flag_counts": {
+                    "is_unscheduled_stop": 1,
+                    "has_exception_only_service": 0,
+                    "has_any_bus_service": 2,
+                    "has_daily_bus_service": 2,
+                },
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "fine_resolutions_m": [],
@@ -543,6 +566,13 @@ class RenderAndCliTests(TestCase):
                     "transport": {},
                     "healthcare": {"local": 1},
                     "parks": {"district": 3},
+                },
+                "transport_subtier_counts": {"mon_sun": 2},
+                "transport_flag_counts": {
+                    "is_unscheduled_stop": 1,
+                    "has_exception_only_service": 0,
+                    "has_any_bus_service": 2,
+                    "has_daily_bus_service": 2,
                 },
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,

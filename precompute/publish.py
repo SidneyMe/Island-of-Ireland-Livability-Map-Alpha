@@ -80,6 +80,35 @@ def _amenity_tier_counts(
     return counts
 
 
+def _transport_subtier_counts(
+    transport_reality_rows: list[dict[str, Any]] | None,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in transport_reality_rows or []:
+        subtier = str(row.get("bus_service_subtier") or "").strip()
+        if not subtier:
+            continue
+        counts[subtier] = int(counts.get(subtier, 0)) + 1
+    return counts
+
+
+def _transport_flag_counts(
+    transport_reality_rows: list[dict[str, Any]] | None,
+) -> dict[str, int]:
+    flag_names = (
+        "is_unscheduled_stop",
+        "has_exception_only_service",
+        "has_any_bus_service",
+        "has_daily_bus_service",
+    )
+    counts = {name: 0 for name in flag_names}
+    for row in transport_reality_rows or []:
+        for flag_name in flag_names:
+            if bool(row.get(flag_name, False)):
+                counts[flag_name] = int(counts.get(flag_name, 0)) + 1
+    return counts
+
+
 def iter_walk_rows_impl(
     walk_grids: dict[int, list[dict[str, Any]]],
     created_at: datetime,
@@ -237,6 +266,7 @@ def summary_json_impl(
     walk_grids: dict[int, list[dict[str, Any]]],
     amenity_data: dict[str, list[tuple[float, float]]],
     amenity_source_rows: list[dict[str, Any]] | None = None,
+    transport_reality_rows: list[dict[str, Any]] | None = None,
     *,
     hashes,
     build_profile: str,
@@ -286,6 +316,8 @@ def summary_json_impl(
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": bool(service_deserts_enabled),
                 "transport_reality_download_url": transport_reality_download_url,
+                "transport_subtier_counts": _transport_subtier_counts(transport_reality_rows),
+                "transport_flag_counts": _transport_flag_counts(transport_reality_rows),
             }
         )
     if overture_dataset:

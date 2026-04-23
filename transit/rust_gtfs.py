@@ -155,6 +155,12 @@ def load_gtfs_stop_reality_models(csv_path: Path) -> list[GtfsStopReality]:
                     reality_reason_codes=tuple(json.loads(row["reality_reason_codes_json"] or "[]")),
                     lat=float(row["lat"]),
                     lon=float(row["lon"]),
+                    bus_active_days_mask_7d=(row.get("bus_active_days_mask_7d") or None),
+                    bus_service_subtier=(row.get("bus_service_subtier") or None),
+                    is_unscheduled_stop=str(row.get("is_unscheduled_stop") or "").lower() in {"1", "true", "t", "yes"},
+                    has_exception_only_service=str(row.get("has_exception_only_service") or "").lower() in {"1", "true", "t", "yes"},
+                    has_any_bus_service=str(row.get("has_any_bus_service") or "").lower() in {"1", "true", "t", "yes"},
+                    has_daily_bus_service=str(row.get("has_daily_bus_service") or "").lower() in {"1", "true", "t", "yes"},
                 )
             )
     return rows

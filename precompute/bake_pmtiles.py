@@ -171,6 +171,13 @@ def _pmtiles_metadata(
                     "public_departures_7d": "Number",
                     "public_departures_30d": "Number",
                     "school_only_departures_30d": "Number",
+                    "bus_active_days_mask_7d": "String",
+                    "bus_service_subtier": "String",
+                    "route_modes": "String",
+                    "is_unscheduled_stop": "Number",
+                    "has_exception_only_service": "Number",
+                    "has_any_bus_service": "Number",
+                    "has_daily_bus_service": "Number",
                 },
             },
             {

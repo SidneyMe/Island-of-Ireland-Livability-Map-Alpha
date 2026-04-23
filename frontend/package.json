@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "test": "node src/runtime_contract.test.js && node src/grid_debug.test.js && node src/amenity_filters.test.js"
+    "test": "node src/runtime_contract.test.js && node src/grid_debug.test.js && node src/amenity_filters.test.js && node src/transport_filters.test.js && node src/transport_reality_popup.test.js"
   },
   "dependencies": {
     "maplibre-gl": "^4.7.1",

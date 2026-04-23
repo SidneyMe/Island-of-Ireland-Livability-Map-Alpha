@@ -36,10 +36,19 @@ def _emit(progress_cb: ProgressFn, detail: str) -> None:
     progress_cb("detail", detail=detail, force_log=True)
 
 
-def prepare_transit_reality_state(*, refresh_download: bool = False) -> TransitRealityState:
+def prepare_transit_reality_state(
+    *,
+    refresh_download: bool = False,
+    progress_cb: ProgressFn = None,
+) -> TransitRealityState:
     feed_configs = transit_feed_configs()
     for feed_config in feed_configs:
-        ensure_feed_zip(feed_config, refresh_download=refresh_download)
+        ensure_feed_zip(
+            feed_config,
+            refresh_download=refresh_download,
+            progress_cb=progress_cb,
+        )
+    _emit(progress_cb, "building GTFS transit reality state")
     return build_transit_reality_state(feed_configs=feed_configs)
 
 
@@ -50,9 +59,13 @@ def transit_reality_refresh_required(
     refresh_download: bool = False,
     force_refresh: bool = False,
     reality_state: TransitRealityState | None = None,
+    progress_cb: ProgressFn = None,
 ) -> tuple[TransitRealityState, bool]:
     prepared_state = (
-        prepare_transit_reality_state(refresh_download=refresh_download)
+        prepare_transit_reality_state(
+            refresh_download=refresh_download,
+            progress_cb=progress_cb,
+        )
         if reality_state is None
         else reality_state
     )
@@ -73,7 +86,10 @@ def ensure_transit_reality(
     reality_state: TransitRealityState | None = None,
 ) -> TransitRealityState:
     reality_state = (
-        prepare_transit_reality_state(refresh_download=refresh_download)
+        prepare_transit_reality_state(
+            refresh_download=refresh_download,
+            progress_cb=progress_cb,
+        )
         if reality_state is None
         else reality_state
     )
@@ -100,6 +116,12 @@ def ensure_transit_reality(
                     school_only_departures_30d=row["school_only_departures_30d"],
                     last_public_service_date=row["last_public_service_date"],
                     last_any_service_date=row["last_any_service_date"],
+                    bus_active_days_mask_7d=row.get("bus_active_days_mask_7d"),
+                    bus_service_subtier=row.get("bus_service_subtier"),
+                    is_unscheduled_stop=bool(row.get("is_unscheduled_stop", False)),
+                    has_exception_only_service=bool(row.get("has_exception_only_service", False)),
+                    has_any_bus_service=bool(row.get("has_any_bus_service", False)),
+                    has_daily_bus_service=bool(row.get("has_daily_bus_service", False)),
                     route_modes=tuple(row["route_modes_json"]),
                     source_reason_codes=tuple(row["source_reason_codes_json"]),
                     reality_reason_codes=tuple(row["reality_reason_codes_json"]),

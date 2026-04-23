@@ -45,6 +45,12 @@ def _feature_properties(row: GtfsStopReality) -> dict[str, object]:
             else None
         ),
         "route_modes": list(row.route_modes),
+        "bus_active_days_mask_7d": row.bus_active_days_mask_7d,
+        "bus_service_subtier": row.bus_service_subtier,
+        "is_unscheduled_stop": row.is_unscheduled_stop,
+        "has_exception_only_service": row.has_exception_only_service,
+        "has_any_bus_service": row.has_any_bus_service,
+        "has_daily_bus_service": row.has_daily_bus_service,
         "source_reason_codes": list(row.source_reason_codes),
         "reality_reason_codes": list(row.reality_reason_codes),
     }
@@ -73,21 +79,27 @@ def _readme_text() -> str:
             "Island of Ireland transport reality dataset",
             "",
             "This export is derived directly from configured GTFS feeds.",
-            "Each point represents a GTFS stop that appears in the current service analysis window.",
-            "It distinguishes confirmed active stops, confirmed inactive stops, and confirmed school-only stops.",
+            "Each point represents one published GTFS stop row from the current snapshot.",
+            (
+                "Weekly bus subtier fields use the stop-level union of base "
+                "calendar.txt weekday flags for bus trips only."
+            ),
+            "Exception-added dates do not alter the published weekly bus tier.",
+            "Legacy active/inactive/school-only status is still included for compatibility and scoring.",
             "",
             (
                 f"Activity window: retrospective {GTFS_ANALYSIS_WINDOW_DAYS}-day window "
                 f"plus a {GTFS_LOOKAHEAD_DAYS}-day upcoming-service lookahead."
             ),
             (
-                f"Service desert window: retrospective {GTFS_SERVICE_DESERT_WINDOW_DAYS}-day base window "
-                f"plus the same {GTFS_LOOKAHEAD_DAYS}-day upcoming-service lookahead."
+                f"Service desert window: retrospective {GTFS_SERVICE_DESERT_WINDOW_DAYS}-day base window. "
+                "Departure and activity counts use this window; weekly bus subtiers do not."
             ),
             "",
             "Caveats:",
             "- This is a conservative GTFS-direct availability view, not a full frequency-weighted model.",
             "- Stops omitted from GTFS feeds cannot appear in this dataset.",
+            "- This dataset is snapshot-based scheduled GTFS data, not live GTFS-RT.",
         )
     )
 

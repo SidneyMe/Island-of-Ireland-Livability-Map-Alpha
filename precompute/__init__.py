@@ -643,6 +643,12 @@ def _transport_reality_rows(engine, created_at, *, progress_cb=None):
             "school_only_departures_30d": row["school_only_departures_30d"],
             "last_public_service_date": row["last_public_service_date"],
             "last_any_service_date": row["last_any_service_date"],
+            "bus_active_days_mask_7d": row.get("bus_active_days_mask_7d"),
+            "bus_service_subtier": row.get("bus_service_subtier"),
+            "is_unscheduled_stop": bool(row.get("is_unscheduled_stop", False)),
+            "has_exception_only_service": bool(row.get("has_exception_only_service", False)),
+            "has_any_bus_service": bool(row.get("has_any_bus_service", False)),
+            "has_daily_bus_service": bool(row.get("has_daily_bus_service", False)),
             "route_modes_json": row["route_modes_json"],
             "source_reason_codes_json": row["source_reason_codes_json"],
             "reality_reason_codes_json": row["reality_reason_codes_json"],
@@ -792,12 +798,15 @@ def _summary_json(
     walk_grids: dict[int, list[dict[str, Any]]],
     amenity_data: dict[str, list[tuple[float, float]]],
     amenity_source_rows: list[dict[str, Any]],
+    *,
+    transport_reality_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return _publish.summary_json_impl(
         study_area_wgs84,
         walk_grids,
         amenity_data,
         amenity_source_rows,
+        transport_reality_rows=transport_reality_rows,
         hashes=_STATE.hashes,
         build_profile=_STATE.profile,
         source_state=_STATE.source_state,
@@ -848,6 +857,7 @@ def _preflight_transit_rebuild(
     *,
     force_refresh: bool = False,
     refresh_download: bool = False,
+    progress_cb=None,
 ) -> tuple[Any, bool]:
     import_fingerprint = None
     if _STATE.source_state is not None:
@@ -857,6 +867,7 @@ def _preflight_transit_rebuild(
         import_fingerprint=import_fingerprint,
         refresh_download=refresh_download,
         force_refresh=force_refresh,
+        progress_cb=progress_cb,
     )
     if refresh_required:
         ensure_walkgraph_subcommand_available(WALKGRAPH_BIN, "gtfs-refresh")
@@ -945,11 +956,18 @@ def refresh_transit(
     source_state = resolve_source_state()
     _STATE.source_state = source_state
     _STATE.activate(source_state.import_fingerprint, profile=normalized_profile)
+    tracker = PrecomputeProgressTracker(CACHE_DIR / "precompute_timing_stats.json")
+    tracker.start_phase(
+        "transit",
+        detail="checking GTFS feed availability and cache state",
+    )
+    transit_progress_cb = tracker.phase_callback("transit")
 
     reality_state, refresh_required = _preflight_transit_rebuild(
         engine,
         force_refresh=force_refresh,
         refresh_download=refresh_download,
+        progress_cb=transit_progress_cb,
     )
     if not refresh_required:
         transit_state = _ensure_transit_reality(
@@ -958,11 +976,17 @@ def refresh_transit(
             study_area_wgs84=None,
             force_refresh=False,
             refresh_download=False,
+            progress_cb=transit_progress_cb,
             reality_state=reality_state,
+        )
+        tracker.finish_phase(
+            "transit",
+            "cached",
+            detail=f"transit reality ready ({transit_state.reality_fingerprint})",
         )
         return transit_state.reality_fingerprint
 
-    tracker = PrecomputeProgressTracker(CACHE_DIR / "precompute_timing_stats.json")
+    tracker.set_phase_detail("transit", "GTFS feeds ready; loading geometry prerequisites")
     study_area_metric, study_area_wgs84 = phase_geometry(tracker)
     _STATE.study_area_metric = study_area_metric
     _STATE.study_area_wgs84 = study_area_wgs84
@@ -988,7 +1012,12 @@ def refresh_transit(
         study_area_wgs84=study_area_wgs84,
         refresh_download=False,
         force_refresh=force_refresh,
-        progress_cb=tracker.phase_callback("transit"),
+        progress_cb=transit_progress_cb,
         reality_state=reality_state,
+    )
+    tracker.finish_phase(
+        "transit",
+        "completed",
+        detail=f"transit reality ready ({transit_state.reality_fingerprint})",
     )
     return transit_state.reality_fingerprint

@@ -47,6 +47,7 @@ https://github.com/user-attachments/assets/e8f3717e-5948-49aa-a1cb-51490ca91f97
 - Builds a compact walk graph with the Rust `walkgraph` helper.
 - Computes livability scores across multiple grid resolutions.
 - Scores access to shops, public transport, healthcare, and parks.
+- Publishes GTFS transport stops with base-calendar weekly bus tiers, snapshot departure metrics, stricter unscheduled-stop detection, and a service-desert overlay.
 - Bakes grid and amenity layers into `.livability_cache/livability.pmtiles`.
 - Serves a local MapLibre app from `static/index.html`.
 
@@ -202,6 +203,8 @@ If your app `DATABASE_URL` uses the SQLAlchemy driver form `postgresql+psycopg:/
 ## GTFS Phase 1 Setup
 
 Phase 1 transport reality uses local GTFS zip files first and only downloads feeds when you explicitly configure feed URLs.
+The active pipeline ingests NTA and Translink only; the standalone TFI Local Link feed is intentionally not configured because current NTA GTFS is treated as the Republic-side source of truth.
+The transport overlay is snapshot-based scheduled GTFS, not live GTFS-RT. Legacy `active_confirmed` / `inactive_confirmed` status still exists for scoring, but the UI now centers on retrospective 7-day bus subtiers such as `Whole week`, `Mon-Sat`, `Weekdays only`, and `Unscheduled`.
 
 Default local zip paths:
 
@@ -242,6 +245,7 @@ python3 main.py --refresh-transit
 ```
 
 `--refresh-transit` now reuses the existing transit reality when the GTFS inputs and current OSM import fingerprint still match. Use `--force-transit-refresh` when you want a full rebuild anyway.
+The refreshed transport dataset now keeps one published stop row per GTFS stop, emits unscheduled boarding stops only when a `stops.txt` row has no `stop_times`, and carries weekly bus subtier fields into the export bundle, PMTiles layer, and runtime JSON.
 
 Run precompute using an existing raw import:
 
@@ -390,6 +394,7 @@ A prerequisite for any transport scoring work. Every stop the model counts is as
 - [x] GTFS-first transport reality: stops are sourced directly from NTA + Translink feeds, and stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
 - [x] Separate public services from school-only routes so the latter don't count toward general transit access.
 - [x] Flag service deserts — grid cells with nominal transport features that resolve to zero real weekly departures — and expose them as a dedicated overlay.
+- [x] Replace the old binary map view with weekly bus subtiers (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`) derived from retrospective 7-day stop-level bus coverage.
 - [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL. Local export to `cache/exports/` is generated after each transit refresh; hosted publishing is pending Phase 8.
 
 ### Transport scoring overhaul

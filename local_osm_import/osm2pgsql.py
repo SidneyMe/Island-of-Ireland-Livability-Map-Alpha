@@ -37,8 +37,19 @@ def detect_importer_version_impl(importer_bin: str, *, subprocess_module=subproc
     return version_line[0].strip()
 
 
-def resolve_source_state_impl(*, build_source_state_fn, detect_importer_version_fn):
-    return build_source_state_fn(detect_importer_version_fn())
+def resolve_source_state_impl(
+    *,
+    build_source_state_fn,
+    detect_importer_version_fn,
+    progress_cb=None,
+    emit_detail_fn=None,
+):
+    if emit_detail_fn is not None:
+        emit_detail_fn(progress_cb, "probing osm2pgsql --version")
+    importer_version = detect_importer_version_fn()
+    if emit_detail_fn is not None:
+        emit_detail_fn(progress_cb, "resolving OSM source state")
+    return build_source_state_fn(importer_version, progress_cb=progress_cb)
 
 
 def query_value_impl(url, key: str) -> str | None:

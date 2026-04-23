@@ -191,11 +191,12 @@ class MainCliTests(TestCase):
 
     def test_refresh_transit_dispatches_precompute_helper(self) -> None:
         refresh_transit_mock = mock.Mock(return_value="transit-reality-123")
-        fake_precompute_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
+        fake_runner_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
 
         with (
             mock.patch.object(sys, "argv", ["main.py", "--refresh-transit"]),
-            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+            mock.patch.dict(sys.modules, {"transit_refresh_runner": fake_runner_module}),
+            mock.patch("builtins.print") as print_mock,
         ):
             exit_code = main.main()
 
@@ -204,10 +205,17 @@ class MainCliTests(TestCase):
             force_refresh=False,
             refresh_download=True,
         )
+        self.assertEqual(
+            print_mock.call_args_list,
+            [
+                mock.call("Starting GTFS transit refresh...", flush=True),
+                mock.call("GTFS transit refresh complete -> transit-reality-123", flush=True),
+            ],
+        )
 
     def test_refresh_transit_passes_force_flag(self) -> None:
         refresh_transit_mock = mock.Mock(return_value="transit-reality-123")
-        fake_precompute_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
+        fake_runner_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
 
         with (
             mock.patch.object(
@@ -215,7 +223,8 @@ class MainCliTests(TestCase):
                 "argv",
                 ["main.py", "--refresh-transit", "--force-transit-refresh"],
             ),
-            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+            mock.patch.dict(sys.modules, {"transit_refresh_runner": fake_runner_module}),
+            mock.patch("builtins.print") as print_mock,
         ):
             exit_code = main.main()
 
@@ -223,6 +232,13 @@ class MainCliTests(TestCase):
         refresh_transit_mock.assert_called_once_with(
             force_refresh=True,
             refresh_download=True,
+        )
+        self.assertEqual(
+            print_mock.call_args_list,
+            [
+                mock.call("Starting GTFS transit refresh...", flush=True),
+                mock.call("GTFS transit refresh complete -> transit-reality-123", flush=True),
+            ],
         )
 
     def test_render_dev_alias_dispatches_dev_profile(self) -> None:

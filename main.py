@@ -133,9 +133,17 @@ def main() -> int:
 
             _refresh_local_import()
         if args.refresh_transit:
-            from precompute import refresh_transit as _refresh_transit
+            print("Starting GTFS transit refresh...", flush=True)
+            from transit_refresh_runner import refresh_transit as _refresh_transit
 
-            _refresh_transit(force_refresh=args.force_transit_refresh, refresh_download=True)
+            reality_fingerprint = _refresh_transit(
+                force_refresh=args.force_transit_refresh,
+                refresh_download=True,
+            )
+            print(
+                f"GTFS transit refresh complete -> {reality_fingerprint}",
+                flush=True,
+            )
         if precompute_requested:
             from precompute import run_precompute as _run_precompute
 

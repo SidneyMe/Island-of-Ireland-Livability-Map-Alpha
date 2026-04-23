@@ -321,6 +321,7 @@ def run_precompute_impl(
         walk_grids,
         amenity_data,
         amenity_source_rows,
+        transport_reality_rows=transport_reality_row_payload,
     )
     tracker.record_substep(
         "publish",

@@ -468,6 +468,16 @@ body.panel-hidden #panel-toggle {
     color: var(--muted);
 }
 
+.popup-stack {
+    display: grid;
+    gap: 10px;
+}
+
+.transport-popup-row + .transport-popup-row {
+    padding-top: 10px;
+    border-top: 1px solid rgba(24, 33, 38, 0.08);
+}
+
 .popup-content ul {
     margin: 10px 0 0;
     padding-left: 18px;
