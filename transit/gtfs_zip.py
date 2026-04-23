@@ -32,19 +32,25 @@ REQUIRED_GTFS_FILENAMES = (
     "stops.txt",
     "stop_times.txt",
     "trips.txt",
-    "calendar.txt",
-    "calendar_dates.txt",
     "routes.txt",
 )
+CALENDAR_GTFS_FILENAMES = ("calendar.txt", "calendar_dates.txt")
 
 
 def _member_name(zip_file: ZipFile, expected_name: str) -> str:
-    for member_name in zip_file.namelist():
-        if member_name.endswith(expected_name):
-            return member_name
+    member_name = _optional_member_name(zip_file, expected_name)
+    if member_name is not None:
+        return member_name
     raise RuntimeError(
         f"GTFS feed zip is missing required file '{expected_name}'."
     )
+
+
+def _optional_member_name(zip_file: ZipFile, expected_name: str) -> str | None:
+    for member_name in zip_file.namelist():
+        if member_name.endswith(expected_name):
+            return member_name
+    return None
 
 
 def _csv_rows(zip_file: ZipFile, expected_name: str):
@@ -165,6 +171,15 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
     with ZipFile(zip_path) as zip_file:
         for required_name in REQUIRED_GTFS_FILENAMES:
             _member_name(zip_file, required_name)
+        calendar_member_names = {
+            file_name: _optional_member_name(zip_file, file_name)
+            for file_name in CALENDAR_GTFS_FILENAMES
+        }
+        if not any(calendar_member_names.values()):
+            raise RuntimeError(
+                "GTFS feed zip is missing required service calendar file: "
+                "calendar.txt or calendar_dates.txt."
+            )
 
         for row in _csv_rows(zip_file, "stops.txt"):
             stop_id = _required_text(row, "stop_id", file_name="stops.txt")
@@ -295,58 +310,60 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
                 if keywords:
                     dataset.service_keywords.setdefault(service_id, set()).update(keywords)
 
-        for row in _csv_rows(zip_file, "calendar.txt"):
-            service_id = _required_text(row, "service_id", file_name="calendar.txt")
-            calendar_service = CalendarService(
-                feed_id=feed_state.feed_id,
-                service_id=service_id,
-                monday=int(_required_text(row, "monday", file_name="calendar.txt")),
-                tuesday=int(_required_text(row, "tuesday", file_name="calendar.txt")),
-                wednesday=int(_required_text(row, "wednesday", file_name="calendar.txt")),
-                thursday=int(_required_text(row, "thursday", file_name="calendar.txt")),
-                friday=int(_required_text(row, "friday", file_name="calendar.txt")),
-                saturday=int(_required_text(row, "saturday", file_name="calendar.txt")),
-                sunday=int(_required_text(row, "sunday", file_name="calendar.txt")),
-                start_date=_required_date(row, "start_date", file_name="calendar.txt"),
-                end_date=_required_date(row, "end_date", file_name="calendar.txt"),
-            )
-            dataset.calendar_services[service_id] = calendar_service
-            dataset.raw_calendar_rows.append(
-                {
-                    "feed_fingerprint": dataset.feed_fingerprint,
-                    "feed_id": dataset.feed_id,
-                    "service_id": service_id,
-                    "monday": calendar_service.monday,
-                    "tuesday": calendar_service.tuesday,
-                    "wednesday": calendar_service.wednesday,
-                    "thursday": calendar_service.thursday,
-                    "friday": calendar_service.friday,
-                    "saturday": calendar_service.saturday,
-                    "sunday": calendar_service.sunday,
-                    "start_date": calendar_service.start_date,
-                    "end_date": calendar_service.end_date,
-                    "created_at": created_at,
-                }
-            )
+        if calendar_member_names["calendar.txt"] is not None:
+            for row in _csv_rows(zip_file, "calendar.txt"):
+                service_id = _required_text(row, "service_id", file_name="calendar.txt")
+                calendar_service = CalendarService(
+                    feed_id=feed_state.feed_id,
+                    service_id=service_id,
+                    monday=int(_required_text(row, "monday", file_name="calendar.txt")),
+                    tuesday=int(_required_text(row, "tuesday", file_name="calendar.txt")),
+                    wednesday=int(_required_text(row, "wednesday", file_name="calendar.txt")),
+                    thursday=int(_required_text(row, "thursday", file_name="calendar.txt")),
+                    friday=int(_required_text(row, "friday", file_name="calendar.txt")),
+                    saturday=int(_required_text(row, "saturday", file_name="calendar.txt")),
+                    sunday=int(_required_text(row, "sunday", file_name="calendar.txt")),
+                    start_date=_required_date(row, "start_date", file_name="calendar.txt"),
+                    end_date=_required_date(row, "end_date", file_name="calendar.txt"),
+                )
+                dataset.calendar_services[service_id] = calendar_service
+                dataset.raw_calendar_rows.append(
+                    {
+                        "feed_fingerprint": dataset.feed_fingerprint,
+                        "feed_id": dataset.feed_id,
+                        "service_id": service_id,
+                        "monday": calendar_service.monday,
+                        "tuesday": calendar_service.tuesday,
+                        "wednesday": calendar_service.wednesday,
+                        "thursday": calendar_service.thursday,
+                        "friday": calendar_service.friday,
+                        "saturday": calendar_service.saturday,
+                        "sunday": calendar_service.sunday,
+                        "start_date": calendar_service.start_date,
+                        "end_date": calendar_service.end_date,
+                        "created_at": created_at,
+                    }
+                )
 
-        for row in _csv_rows(zip_file, "calendar_dates.txt"):
-            exception = CalendarDateException(
-                feed_id=feed_state.feed_id,
-                service_id=_required_text(row, "service_id", file_name="calendar_dates.txt"),
-                service_date=_required_date(row, "date", file_name="calendar_dates.txt"),
-                exception_type=int(_required_text(row, "exception_type", file_name="calendar_dates.txt")),
-            )
-            dataset.calendar_dates.append(exception)
-            dataset.raw_calendar_date_rows.append(
-                {
-                    "feed_fingerprint": dataset.feed_fingerprint,
-                    "feed_id": dataset.feed_id,
-                    "service_id": exception.service_id,
-                    "service_date": exception.service_date,
-                    "exception_type": exception.exception_type,
-                    "created_at": created_at,
-                }
-            )
+        if calendar_member_names["calendar_dates.txt"] is not None:
+            for row in _csv_rows(zip_file, "calendar_dates.txt"):
+                exception = CalendarDateException(
+                    feed_id=feed_state.feed_id,
+                    service_id=_required_text(row, "service_id", file_name="calendar_dates.txt"),
+                    service_date=_required_date(row, "date", file_name="calendar_dates.txt"),
+                    exception_type=int(_required_text(row, "exception_type", file_name="calendar_dates.txt")),
+                )
+                dataset.calendar_dates.append(exception)
+                dataset.raw_calendar_date_rows.append(
+                    {
+                        "feed_fingerprint": dataset.feed_fingerprint,
+                        "feed_id": dataset.feed_id,
+                        "service_id": exception.service_id,
+                        "service_date": exception.service_date,
+                        "exception_type": exception.exception_type,
+                        "created_at": created_at,
+                    }
+                )
 
         for row in _csv_rows(zip_file, "stop_times.txt"):
             trip_id = _required_text(row, "trip_id", file_name="stop_times.txt")

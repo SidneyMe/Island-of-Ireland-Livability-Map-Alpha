@@ -46,6 +46,27 @@ def _write_gtfs_zip(path: Path, files: dict[str, str]) -> None:
             archive.writestr(file_name, content)
 
 
+def _minimal_gtfs_files(
+    *,
+    include_calendar: bool = True,
+    include_calendar_dates: bool = True,
+) -> dict[str, str]:
+    files = {
+        "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nS1,Main Street,53.35,-6.26\n",
+        "routes.txt": "route_id,route_type\nR1,3\n",
+        "trips.txt": "route_id,service_id,trip_id\nR1,SVC1,T1\n",
+        "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:00:00,08:00:00,S1,1\n",
+    }
+    if include_calendar:
+        files["calendar.txt"] = (
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "SVC1,1,1,1,1,1,0,0,20260401,20260430\n"
+        )
+    if include_calendar_dates:
+        files["calendar_dates.txt"] = "service_id,date,exception_type\nSVC1,20260414,1\n"
+    return files
+
+
 def _feed_state(zip_path: Path) -> TransitFeedState:
     return TransitFeedState(
         feed_id="nta",
@@ -226,21 +247,42 @@ class _FakeProcess:
 
 
 class TransitGtfsParsingTests(TestCase):
-    def test_parse_gtfs_zip_requires_calendar_file(self) -> None:
+    def test_parse_gtfs_zip_accepts_calendar_dates_only_feed(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            zip_path = Path(tmp_name) / "calendar-dates-only.zip"
+            _write_gtfs_zip(
+                zip_path,
+                _minimal_gtfs_files(include_calendar=False, include_calendar_dates=True),
+            )
+
+            dataset = parse_gtfs_zip(_feed_state(zip_path))
+
+        self.assertEqual(dataset.calendar_services, {})
+        self.assertEqual(len(dataset.calendar_dates), 1)
+        self.assertEqual(dataset.calendar_dates[0].service_id, "SVC1")
+
+    def test_parse_gtfs_zip_accepts_calendar_only_feed(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            zip_path = Path(tmp_name) / "calendar-only.zip"
+            _write_gtfs_zip(
+                zip_path,
+                _minimal_gtfs_files(include_calendar=True, include_calendar_dates=False),
+            )
+
+            dataset = parse_gtfs_zip(_feed_state(zip_path))
+
+        self.assertIn("SVC1", dataset.calendar_services)
+        self.assertEqual(dataset.calendar_dates, [])
+
+    def test_parse_gtfs_zip_requires_at_least_one_calendar_file(self) -> None:
         with TemporaryDirectory() as tmp_name:
             zip_path = Path(tmp_name) / "missing-calendar.zip"
             _write_gtfs_zip(
                 zip_path,
-                {
-                    "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\nS1,Main Street,53.35,-6.26\n",
-                    "routes.txt": "route_id,route_type\nR1,3\n",
-                    "trips.txt": "route_id,service_id,trip_id\nR1,SVC1,T1\n",
-                    "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:00:00,08:00:00,S1,1\n",
-                    "calendar_dates.txt": "service_id,date,exception_type\nSVC1,20260414,1\n",
-                },
+                _minimal_gtfs_files(include_calendar=False, include_calendar_dates=False),
             )
 
-            with self.assertRaisesRegex(RuntimeError, "calendar.txt"):
+            with self.assertRaisesRegex(RuntimeError, "calendar.txt or calendar_dates.txt"):
                 parse_gtfs_zip(_feed_state(zip_path))
 
 

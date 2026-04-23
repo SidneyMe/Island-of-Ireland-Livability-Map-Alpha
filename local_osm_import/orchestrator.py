@@ -31,7 +31,6 @@ def ensure_local_osm_import_impl(
 
     raw_ready = raw_import_ready_fn(engine, source_state.import_fingerprint)
     has_osm2pgsql_metadata = osm2pgsql_properties_exists_fn(engine)
-    should_run_osm2pgsql = force_refresh or not raw_ready
 
     if force_refresh:
         emit_detail_fn(
@@ -57,11 +56,14 @@ def ensure_local_osm_import_impl(
     else:
         emit_detail_fn(
             progress_cb,
-            "Raw amenity payload is ready for this import_fingerprint; reusing osm2pgsql tables."
+            (
+                "Raw amenity payload exists but its manifest is missing, incomplete, or out of scope; "
+                "dropping importer-owned raw tables before refresh."
+            ),
         )
+        drop_importer_owned_raw_tables_fn(engine)
 
-    if should_run_osm2pgsql:
-        run_osm2pgsql_import_fn(source_state, progress_cb=progress_cb)
+    run_osm2pgsql_import_fn(source_state, progress_cb=progress_cb)
     ensure_managed_raw_support_tables_fn(engine)
     begin_import_manifest_fn(
         engine,

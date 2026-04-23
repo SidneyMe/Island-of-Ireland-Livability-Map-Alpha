@@ -465,7 +465,78 @@ class PmtilesBakeReliabilityTests(TestCase):
             [4, 2],
         )
 
-    def test_bake_pmtiles_failure_cleans_temp_output_and_leaves_final_missing(self) -> None:
+    def test_bake_pmtiles_retry_exhaustion_preserves_existing_archive(self) -> None:
+        class _FakeWriter:
+            def __init__(self, handle) -> None:
+                self.handle = handle
+
+            def write_tile(self, tile_id, payload) -> None:
+                del tile_id, payload
+
+            def finalize(self, header, metadata) -> None:
+                del header, metadata
+                self.handle.write(b"new-archive")
+
+        class _FakeConnection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb) -> None:
+                del exc_type, exc, tb
+
+        class _FakeEngine:
+            def connect(self):
+                return _FakeConnection()
+
+        with TemporaryDirectory() as tmp_name:
+            output_path = Path(tmp_name) / "livability.pmtiles"
+            output_path.write_bytes(b"old-archive")
+            temp_output_path = output_path.with_name(output_path.name + ".tmp")
+            first_error = bake_pmtiles.ParallelBakeWorkerFailure(
+                workers=4,
+                completed_specs=1,
+                total_tile_count=1,
+                has_fine_grid=True,
+                reason="worker crashed",
+            )
+            second_error = bake_pmtiles.ParallelBakeWorkerFailure(
+                workers=2,
+                completed_specs=1,
+                total_tile_count=1,
+                has_fine_grid=True,
+                reason="worker crashed again",
+            )
+            with (
+                mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
+                mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(
+                    bake_pmtiles,
+                    "fine_grid_tile_coordinates_by_zoom",
+                    return_value={12: [(0, 0)]},
+                ),
+                mock.patch.object(bake_pmtiles, "_fine_grid_shard_count", return_value=278),
+                mock.patch.object(
+                    bake_pmtiles,
+                    "_bake_parallel",
+                    side_effect=[first_error, second_error],
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "PMTiles bake failed after retry"):
+                    bake_pmtiles.bake_pmtiles(
+                        _FakeEngine(),
+                        "build-key-123",
+                        output_path,
+                        min_zoom=12,
+                        max_zoom=12,
+                        workers=8,
+                        fine_grid_config={"shell_dir": "shell", "score_dir": "scores"},
+                    )
+
+            self.assertEqual(output_path.read_bytes(), b"old-archive")
+            self.assertFalse(temp_output_path.exists())
+
+    def test_bake_pmtiles_failure_cleans_temp_output_and_preserves_final_archive(self) -> None:
         class _FakeWriter:
             def __init__(self, handle) -> None:
                 self.handle = handle
@@ -513,8 +584,8 @@ class PmtilesBakeReliabilityTests(TestCase):
                         fine_grid_config={},
                     )
 
-        self.assertFalse(output_path.exists())
-        self.assertFalse(temp_output_path.exists())
+            self.assertEqual(output_path.read_bytes(), b"old-archive")
+            self.assertFalse(temp_output_path.exists())
 
     def test_bake_pmtiles_success_replaces_temp_output_atomically(self) -> None:
         class _FakeWriter:

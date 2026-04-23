@@ -660,8 +660,6 @@ def bake_pmtiles(
         transport_reality_min_zoom=transport_reality_min_zoom,
     )
 
-    if output_path.exists():
-        output_path.unlink()
     if temp_output_path.exists():
         temp_output_path.unlink()
 

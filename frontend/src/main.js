@@ -15,6 +15,10 @@ import {
   transportTierOptions
 } from "./transport_filters.js";
 import {
+  CLICK_ACTIONS,
+  resolveMapClickAction
+} from "./click_priority.js";
+import {
   GRID_INSERT_BEFORE_LAYER_ID as runtimeGridInsertBeforeLayerId,
   activeGridLifecycle as runtimeActiveGridLifecycle,
   activeDebugGridLayerId as runtimeActiveDebugGridLayerId,
@@ -1137,10 +1141,17 @@ function initializeMap() {
   });
 
   state.map.on("click", async function (event) {
-    const transportRealityFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["transport-reality-circle"] });
-    if (transportRealityFeatures.length > 0) {
+    const clickAction = resolveMapClickAction({
+      map: state.map,
+      point: event.point,
+      fineSurfaceEnabled: fineSurfaceEnabled(),
+      gridVisible: state.gridVisible,
+      activeGridLayerId: activeGridLayerId()
+    });
+
+    if (clickAction.type === CLICK_ACTIONS.TRANSPORT) {
       const popupRows = Array.from(
-        transportRealityFeatures.reduce(function (rowsBySourceRef, feature) {
+        clickAction.features.reduce(function (rowsBySourceRef, feature) {
           const properties = feature && feature.properties ? feature.properties : {};
           const sourceRef = String(properties.source_ref || feature.id || rowsBySourceRef.size);
           if (!rowsBySourceRef.has(sourceRef)) {
@@ -1156,16 +1167,23 @@ function initializeMap() {
       return;
     }
 
-    const amenityFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["amenities-circle"] });
-    if (amenityFeatures.length > 0) {
+    if (clickAction.type === CLICK_ACTIONS.AMENITY) {
       state.popup
         .setLngLat(event.lngLat)
-        .setHTML(amenityPopupHtml(amenityFeatures[0].properties || {}))
+        .setHTML(amenityPopupHtml(clickAction.features[0].properties || {}))
         .addTo(state.map);
       return;
     }
 
-    if (fineSurfaceEnabled()) {
+    if (clickAction.type === CLICK_ACTIONS.SERVICE_DESERT) {
+      state.popup
+        .setLngLat(event.lngLat)
+        .setHTML(serviceDesertPopupHtml(clickAction.features[0].properties || {}))
+        .addTo(state.map);
+      return;
+    }
+
+    if (clickAction.type === CLICK_ACTIONS.FINE_INSPECT) {
       try {
         const payload = await fetchInspect(event.lngLat);
         state.popup
@@ -1182,25 +1200,10 @@ function initializeMap() {
       return;
     }
 
-    const desertFeatures = state.map.queryRenderedFeatures(event.point, { layers: ["service-deserts-fill"] });
-    if (desertFeatures.length > 0) {
+    if (clickAction.type === CLICK_ACTIONS.COARSE_GRID) {
       state.popup
         .setLngLat(event.lngLat)
-        .setHTML(serviceDesertPopupHtml(desertFeatures[0].properties || {}))
-        .addTo(state.map);
-      return;
-    }
-
-    const activeLayerId = state.gridVisible ? activeGridLayerId() : null;
-    const visibleGridLayers = activeLayerId ? [activeLayerId] : [];
-    if (visibleGridLayers.length === 0) {
-      return;
-    }
-    const gridFeatures = state.map.queryRenderedFeatures(event.point, { layers: visibleGridLayers });
-    if (gridFeatures.length > 0) {
-      state.popup
-        .setLngLat(event.lngLat)
-        .setHTML(coarseGridPopupHtml(gridFeatures[0].properties || {}))
+        .setHTML(coarseGridPopupHtml(clickAction.features[0].properties || {}))
         .addTo(state.map);
     }
   });

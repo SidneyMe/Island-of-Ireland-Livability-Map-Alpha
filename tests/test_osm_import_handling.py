@@ -403,15 +403,23 @@ class LocalOsmImportTests(TestCase):
         run_import_mock.assert_not_called()
         begin_mock.assert_not_called()
 
-    def test_ensure_local_osm_import_reuses_raw_payload_without_rerunning_osm2pgsql(self) -> None:
+    def test_ensure_local_osm_import_rebuilds_raw_payload_without_matching_manifest(self) -> None:
         tracker = mock.Mock()
 
         with (
             mock.patch.object(local_osm_import, "import_payload_ready", return_value=False),
             mock.patch.object(local_osm_import, "raw_import_ready", return_value=True),
             mock.patch.object(local_osm_import, "osm2pgsql_properties_exists", return_value=True),
-            mock.patch.object(local_osm_import, "drop_importer_owned_raw_tables") as drop_mock,
-            mock.patch.object(local_osm_import, "_run_osm2pgsql_import") as run_import_mock,
+            mock.patch.object(
+                local_osm_import,
+                "drop_importer_owned_raw_tables",
+                side_effect=lambda engine: tracker.drop_tables(),
+            ) as drop_mock,
+            mock.patch.object(
+                local_osm_import,
+                "_run_osm2pgsql_import",
+                side_effect=lambda source_state, progress_cb=None: tracker.run_import(),
+            ) as run_import_mock,
             mock.patch.object(
                 local_osm_import,
                 "ensure_managed_raw_support_tables",
@@ -436,8 +444,10 @@ class LocalOsmImportTests(TestCase):
                 progress_cb=tracker,
             )
 
-        drop_mock.assert_not_called()
-        run_import_mock.assert_not_called()
+        drop_mock.assert_called_once_with(mock.sentinel.engine)
+        run_import_mock.assert_called_once()
+        self.assertIn(mock.call.drop_tables(), tracker.mock_calls)
+        self.assertIn(mock.call.run_import(), tracker.mock_calls)
         self.assertIn(mock.call.ensure_support_tables(), tracker.mock_calls)
         self.assertIn(mock.call.begin_manifest(), tracker.mock_calls)
         self.assertIn(mock.call.complete_manifest(), tracker.mock_calls)
@@ -476,7 +486,7 @@ class DbPostgisImportStateTests(TestCase):
         self.assertFalse(ready)
         table_exists_mock.assert_not_called()
 
-    def test_import_payload_ready_returns_true_with_features(self) -> None:
+    def test_import_payload_ready_returns_true_with_features_and_matching_manifest(self) -> None:
         engine = mock.MagicMock()
         connection = engine.connect.return_value.__enter__.return_value
 
@@ -484,11 +494,46 @@ class DbPostgisImportStateTests(TestCase):
             mock.patch.object(db_postgis, "osm2pgsql_properties_exists", return_value=True),
             mock.patch.object(db_postgis, "table_exists", return_value=True),
             mock.patch.object(db_schema, "_count_import_rows", return_value=3),
+            mock.patch.object(
+                db_postgis,
+                "load_import_manifest",
+                return_value={
+                    "status": "complete",
+                    "normalization_scope_hash": "scope-hash",
+                },
+            ),
         ):
             ready = db_postgis.import_payload_ready(engine, "import-fingerprint", "scope-hash")
 
         self.assertTrue(ready)
         connection.execute.assert_not_called()
+
+    def test_import_payload_ready_returns_false_without_complete_matching_manifest(self) -> None:
+        cases = [
+            None,
+            {"status": "building", "normalization_scope_hash": "scope-hash"},
+            {"status": "complete", "normalization_scope_hash": "other-scope"},
+        ]
+        for manifest in cases:
+            with self.subTest(manifest=manifest):
+                engine = mock.MagicMock()
+                with (
+                    mock.patch.object(db_postgis, "osm2pgsql_properties_exists", return_value=True),
+                    mock.patch.object(db_postgis, "table_exists", return_value=True),
+                    mock.patch.object(db_schema, "_count_import_rows", return_value=3),
+                    mock.patch.object(
+                        db_postgis,
+                        "load_import_manifest",
+                        return_value=manifest,
+                    ),
+                ):
+                    ready = db_postgis.import_payload_ready(
+                        engine,
+                        "import-fingerprint",
+                        "scope-hash",
+                    )
+
+                self.assertFalse(ready)
 
     def test_clear_normalized_import_artifacts_deletes_features_and_manifest_rows_only(self) -> None:
         engine = mock.MagicMock()

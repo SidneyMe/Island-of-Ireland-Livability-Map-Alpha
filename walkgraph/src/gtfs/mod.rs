@@ -11,14 +11,8 @@ use time::macros::format_description;
 use time::{Date, Duration, OffsetDateTime};
 use zip::ZipArchive;
 
-const REQUIRED_GTFS_FILENAMES: [&str; 6] = [
-    "stops.txt",
-    "stop_times.txt",
-    "trips.txt",
-    "calendar.txt",
-    "calendar_dates.txt",
-    "routes.txt",
-];
+const REQUIRED_GTFS_FILENAMES: [&str; 4] =
+    ["stops.txt", "stop_times.txt", "trips.txt", "routes.txt"];
 const GTFS_DATE_FORMAT: &[time::format_description::FormatItem<'static>] =
     format_description!("[year][month][day]");
 const ISO_DATE_FORMAT: &[time::format_description::FormatItem<'static>] =
@@ -986,6 +980,12 @@ fn required_member_map<R: Read + Seek>(
             return Err(format!("missing required GTFS file: {required}").into());
         }
     }
+    if !members.contains_key("calendar.txt") && !members.contains_key("calendar_dates.txt") {
+        return Err(
+            "missing required GTFS service calendar file: calendar.txt or calendar_dates.txt"
+                .into(),
+        );
+    }
     Ok(members)
 }
 
@@ -1292,10 +1292,10 @@ fn parse_gtfs_feed(
         )?;
     }
 
-    {
+    if let Some(calendar_member_index) = members.get("calendar.txt") {
         for_each_zip_csv_row(
             &mut archive,
-            members.get("calendar.txt").unwrap(),
+            calendar_member_index,
             |headers, record| {
                 let service_id = required_text(&record, &headers, "service_id", "calendar.txt")?;
                 let calendar = CalendarService {
@@ -1338,10 +1338,10 @@ fn parse_gtfs_feed(
         )?;
     }
 
-    {
+    if let Some(calendar_dates_member_index) = members.get("calendar_dates.txt") {
         for_each_zip_csv_row(
             &mut archive,
-            members.get("calendar_dates.txt").unwrap(),
+            calendar_dates_member_index,
             |headers, record| {
                 let exception = CalendarDateException {
                     service_id: required_text(

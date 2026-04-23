@@ -4,6 +4,32 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-04-24 - Reliability fixes for bake, imports, GTFS calendars, and click priority
+
+### Added
+
+- Root `pytest.ini` constrains pytest collection to `tests/` and excludes generated or local-heavy paths such as cache directories, virtualenvs, frontend dependencies, and Rust build outputs.
+- `frontend/src/click_priority.js` centralizes map-click action resolution with regression tests for transport, amenities, service deserts, fine-surface inspect, and coarse-grid fallback.
+- Python and Rust GTFS tests now cover `calendar.txt`-only feeds, `calendar_dates.txt`-only feeds, and feeds missing both service-calendar files.
+
+### Changed
+
+- PMTiles baking now writes and finalizes the sibling temp archive first, then atomically replaces the final `.pmtiles` only after a successful bake.
+- Raw OSM import reuse is now manifest-aware and normalization-scope-aware. Existing raw rows are reused only when the import manifest is complete and matches the active scope.
+- GTFS parsers in Python and Rust now require `stops.txt`, `stop_times.txt`, `trips.txt`, and `routes.txt`, plus at least one of `calendar.txt` or `calendar_dates.txt`.
+- Frontend click handling now resolves actions in a fixed priority order: transport, amenity, service desert, fine inspect, coarse grid, none.
+
+### Fixed
+
+- Failed PMTiles bakes and retry exhaustion no longer delete or corrupt the previous final archive; stale temp outputs are still cleaned up.
+- Raw OSM rows with a missing, incomplete, or out-of-scope import manifest are dropped and rebuilt instead of being silently reused.
+- Calendar-optional GTFS feeds that rely only on `calendar_dates.txt` are accepted by both ingestion paths.
+- Service-desert popups now win over `/api/inspect` when the service-desert overlay is visible on fine-surface builds.
+
+### Scoring logic
+
+- No scoring logic change. This pass hardens build safety, input validation, test discovery, and frontend popup priority without changing score weights or category math.
+
 ## 2026-04-23 - Transport frequency scoring and commute-window metrics
 
 ### Added

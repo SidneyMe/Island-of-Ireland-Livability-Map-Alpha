@@ -474,8 +474,11 @@ def find_missing_serve_indexes(engine: Engine) -> list[str]:
 
 
 def import_payload_ready(engine: Engine, import_fingerprint: str, normalization_scope_hash: str) -> bool:
-    del normalization_scope_hash
-    return raw_import_ready(engine, import_fingerprint)
+    root = root_module()
+    if not raw_import_ready(engine, import_fingerprint):
+        return False
+    manifest = root.load_import_manifest(engine, import_fingerprint)
+    return root._manifest_matches_scope(manifest, normalization_scope_hash)
 
 
 def raw_import_ready(engine: Engine, import_fingerprint: str) -> bool:
@@ -490,7 +493,6 @@ def raw_import_ready(engine: Engine, import_fingerprint: str) -> bool:
 
 
 def assert_import_payload_ready(engine: Engine, import_fingerprint: str, normalization_scope_hash: str) -> None:
-    del normalization_scope_hash
     root = root_module()
     if not root.osm2pgsql_properties_exists(engine):
         raise RuntimeError(
@@ -508,7 +510,13 @@ def assert_import_payload_ready(engine: Engine, import_fingerprint: str, normali
             f"Expected raw table {OSM_IMPORT_SCHEMA}.features is missing for "
             f"import_fingerprint={import_fingerprint}."
         )
-    if not root.import_payload_ready(engine, import_fingerprint, ""):
+    if not root._manifest_matches_scope(manifest, normalization_scope_hash):
+        raise RuntimeError(
+            "The raw OSM import manifest does not match the current normalization scope "
+            f"for import_fingerprint={import_fingerprint}. Re-run --precompute with "
+            "--auto-refresh-import or refresh the import explicitly."
+        )
+    if not root.import_payload_ready(engine, import_fingerprint, normalization_scope_hash):
         raise RuntimeError(
             "The raw OSM import exists but amenity features are missing or empty "
             f"for import_fingerprint={import_fingerprint}. Re-run --precompute with "
