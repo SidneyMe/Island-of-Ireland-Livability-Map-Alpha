@@ -15,6 +15,12 @@ from config import (
     GTFS_SCHOOL_KEYWORDS,
     GTFS_SCHOOL_PM_END_HOUR,
     GTFS_SCHOOL_PM_START_HOUR,
+    GTFS_COMMUTE_AM_END_HOUR,
+    GTFS_COMMUTE_AM_START_HOUR,
+    GTFS_COMMUTE_PM_END_HOUR,
+    GTFS_COMMUTE_PM_START_HOUR,
+    GTFS_FRIDAY_EVENING_END_HOUR,
+    GTFS_FRIDAY_EVENING_START_HOUR,
     GTFS_SERVICE_DESERT_WINDOW_DAYS,
     TRANSIT_REALITY_ALGO_VERSION,
     WALKGRAPH_BIN,
@@ -70,6 +76,12 @@ def run_walkgraph_gtfs_refresh(
                 "school_am_end_hour": GTFS_SCHOOL_AM_END_HOUR,
                 "school_pm_start_hour": GTFS_SCHOOL_PM_START_HOUR,
                 "school_pm_end_hour": GTFS_SCHOOL_PM_END_HOUR,
+                "commute_am_start_hour": GTFS_COMMUTE_AM_START_HOUR,
+                "commute_am_end_hour": GTFS_COMMUTE_AM_END_HOUR,
+                "commute_pm_start_hour": GTFS_COMMUTE_PM_START_HOUR,
+                "commute_pm_end_hour": GTFS_COMMUTE_PM_END_HOUR,
+                "friday_evening_start_hour": GTFS_FRIDAY_EVENING_START_HOUR,
+                "friday_evening_end_hour": GTFS_FRIDAY_EVENING_END_HOUR,
                 "feeds": [
                     {
                         "feed_id": feed_state.feed_id,
@@ -140,6 +152,13 @@ def load_gtfs_stop_reality_models(csv_path: Path) -> list[GtfsStopReality]:
                     public_departures_7d=int(row["public_departures_7d"] or 0),
                     public_departures_30d=int(row["public_departures_30d"] or 0),
                     school_only_departures_30d=int(row["school_only_departures_30d"] or 0),
+                    weekday_morning_peak_deps=float(row.get("weekday_morning_peak_deps") or 0.0),
+                    weekday_evening_peak_deps=float(row.get("weekday_evening_peak_deps") or 0.0),
+                    weekday_offpeak_deps=float(row.get("weekday_offpeak_deps") or 0.0),
+                    saturday_deps=float(row.get("saturday_deps") or 0.0),
+                    sunday_deps=float(row.get("sunday_deps") or 0.0),
+                    friday_evening_deps=float(row.get("friday_evening_deps") or 0.0),
+                    transport_score_units=int(row.get("transport_score_units") or 0),
                     last_public_service_date=(
                         None
                         if not row["last_public_service_date"]

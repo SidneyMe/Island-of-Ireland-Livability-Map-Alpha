@@ -371,7 +371,18 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
             dataset.stop_service_occurrences[occurrence_key] = (
                 dataset.stop_service_occurrences.get(occurrence_key, 0) + 1
             )
-            bucket = _time_bucket(departure_seconds if departure_seconds is not None else arrival_seconds)
+            event_seconds = departure_seconds if departure_seconds is not None else arrival_seconds
+            timed_occurrence_key = (
+                stop_id,
+                trip_info.service_id,
+                trip_info.route_id,
+                mode,
+                event_seconds,
+            )
+            dataset.stop_service_time_occurrences[timed_occurrence_key] = (
+                dataset.stop_service_time_occurrences.get(timed_occurrence_key, 0) + 1
+            )
+            bucket = _time_bucket(event_seconds)
             bucket_counts = dataset.service_time_buckets.setdefault(
                 trip_info.service_id,
                 {"morning": 0, "afternoon": 0, "offpeak": 0},

@@ -115,7 +115,7 @@ def _osm2pgsql_number_processes() -> int | None:
 OSM2PGSQL_NUMBER_PROCESSES = _osm2pgsql_number_processes()
 GTFS_DIR = BASE_DIR / "gtfs"
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
-TRANSIT_REALITY_ALGO_VERSION = 6
+TRANSIT_REALITY_ALGO_VERSION = 7
 AMENITY_MERGE_ALGO_VERSION = 4
 
 
@@ -197,6 +197,12 @@ GTFS_SCHOOL_AM_START_HOUR = 6
 GTFS_SCHOOL_AM_END_HOUR = 10
 GTFS_SCHOOL_PM_START_HOUR = 13
 GTFS_SCHOOL_PM_END_HOUR = 17
+GTFS_COMMUTE_AM_START_HOUR = 4
+GTFS_COMMUTE_AM_END_HOUR = 8
+GTFS_COMMUTE_PM_START_HOUR = 16
+GTFS_COMMUTE_PM_END_HOUR = 20
+GTFS_FRIDAY_EVENING_START_HOUR = 16
+GTFS_FRIDAY_EVENING_END_HOUR = 2
 
 
 TARGET_CRS = "EPSG:2157"
@@ -474,7 +480,7 @@ CATEGORY_COLORS = {
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
 OSM_EXTRACT_FINGERPRINT_CACHE_PATH = CACHE_DIR / "osm_extract_fingerprint_cache.json"
-PMTILES_SCHEMA_VERSION = 6
+PMTILES_SCHEMA_VERSION = 7
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 11
 FORCE_RECOMPUTE = False
@@ -691,6 +697,12 @@ def transit_config_hash() -> str:
             "school_am_end_hour": GTFS_SCHOOL_AM_END_HOUR,
             "school_pm_start_hour": GTFS_SCHOOL_PM_START_HOUR,
             "school_pm_end_hour": GTFS_SCHOOL_PM_END_HOUR,
+            "commute_am_start_hour": GTFS_COMMUTE_AM_START_HOUR,
+            "commute_am_end_hour": GTFS_COMMUTE_AM_END_HOUR,
+            "commute_pm_start_hour": GTFS_COMMUTE_PM_START_HOUR,
+            "commute_pm_end_hour": GTFS_COMMUTE_PM_END_HOUR,
+            "friday_evening_start_hour": GTFS_FRIDAY_EVENING_START_HOUR,
+            "friday_evening_end_hour": GTFS_FRIDAY_EVENING_END_HOUR,
         }
     )
 

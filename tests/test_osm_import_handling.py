@@ -730,6 +730,13 @@ class DbReadTests(TestCase):
             {
                 "source_ref": "gtfs/nta/S1",
                 "geom": "gtfs-point",
+                "weekday_morning_peak_deps": 4.0,
+                "weekday_evening_peak_deps": 5.0,
+                "weekday_offpeak_deps": 6.0,
+                "saturday_deps": 7.0,
+                "sunday_deps": 8.0,
+                "friday_evening_deps": 9.0,
+                "transport_score_units": 3,
             }
         ]
         root = SimpleNamespace(
@@ -755,6 +762,13 @@ class DbReadTests(TestCase):
                     "conflict_class": "gtfs_direct",
                     "geom": "gtfs-point",
                     "park_area_m2": 0.0,
+                    "weekday_morning_peak_deps": 4.0,
+                    "weekday_evening_peak_deps": 5.0,
+                    "weekday_offpeak_deps": 6.0,
+                    "saturday_deps": 7.0,
+                    "sunday_deps": 8.0,
+                    "friday_evening_deps": 9.0,
+                    "transport_score_units": 3,
                 }
             ],
         )

@@ -95,6 +95,13 @@ class StopServiceSummary:
     route_modes: tuple[str, ...]
     route_ids: tuple[str, ...]
     reason_codes: tuple[str, ...]
+    weekday_morning_peak_deps: float = 0.0
+    weekday_evening_peak_deps: float = 0.0
+    weekday_offpeak_deps: float = 0.0
+    saturday_deps: float = 0.0
+    sunday_deps: float = 0.0
+    friday_evening_deps: float = 0.0
+    transport_score_units: int = 0
     bus_active_days_mask_7d: str | None = None
     bus_service_subtier: str | None = None
     is_unscheduled_stop: bool = False
@@ -124,6 +131,13 @@ class GtfsStopReality:
     reality_reason_codes: tuple[str, ...]
     lat: float
     lon: float
+    weekday_morning_peak_deps: float = 0.0
+    weekday_evening_peak_deps: float = 0.0
+    weekday_offpeak_deps: float = 0.0
+    saturday_deps: float = 0.0
+    sunday_deps: float = 0.0
+    friday_evening_deps: float = 0.0
+    transport_score_units: int = 0
     bus_active_days_mask_7d: str | None = None
     bus_service_subtier: str | None = None
     is_unscheduled_stop: bool = False
@@ -160,6 +174,7 @@ class FeedDataset:
     calendar_services: dict[str, CalendarService] = field(default_factory=dict)
     calendar_dates: list[CalendarDateException] = field(default_factory=list)
     stop_service_occurrences: dict[tuple[str, str, str, str], int] = field(default_factory=dict)
+    stop_service_time_occurrences: dict[tuple[str, str, str, str, int | None], int] = field(default_factory=dict)
     service_time_buckets: dict[str, dict[str, int]] = field(default_factory=dict)
     service_route_ids: dict[str, set[str]] = field(default_factory=dict)
     service_route_modes: dict[str, set[str]] = field(default_factory=dict)

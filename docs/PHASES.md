@@ -121,9 +121,9 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 
 ## Phase 1 — Service reality check
 
-Every stop the model counts is assumed to exist in practice. Right now that assumption is wrong: derelict stations, routes cancelled during COVID that were never restored, school-only runs tagged as general transit, rural services that run on an informal schedule. Filtering phantom stops is a prerequisite for any transport scoring improvement, because there is no point tiering a bus stop by frequency if its effective frequency is zero.
+This phase is implemented as the GTFS-first transport reality layer. It replaced raw transport-stop presence with scheduled NTA and Translink stop reality, excludes school-only public scoring, preserves diagnostic stop states, and gives the scorer a defensible baseline before frequency weighting.
 
-Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
+Phase 1's outputs are now used directly by the frequency-based transport scorer.
 
 ### ~~GTFS ingestion~~ [blocker]
 
@@ -153,10 +153,11 @@ Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 - Binary flag: zero scheduled departures in the window → inactive.
 - Store the flag on the GTFS stop in the derived transport layer.
 
-**Open questions:**
+**Done so far:**
 
-- How strict is "zero"? A stop with one departure a month is technically active but practically not. The binary active/inactive call is enough for this phase; frequency-weighting is Phase 3's job.
-- How to handle the cross-border case — a stop in NI matched against a Republic feed, or vice versa.
+- Stops with zero public departures in the analysis window receive zero transport score units.
+- Stops with rare but real public service are handled by the Phase 3 frequency scorer rather than a binary active/inactive distinction.
+- Cross-border handling follows the configured feed identity; NTA and Translink are treated as separate GTFS sources.
 
 ### ~~School-only route filtering~~
 
@@ -170,12 +171,12 @@ Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 
 ### ~~Service desert overlay~~
 
-**What:** Grid cells where nominal OSM transport features resolve to zero real weekly departures. Exposed as a dedicated map layer.
+**What:** Grid cells where reachable GTFS baseline stops resolve to zero public departures. Exposed as a dedicated map layer.
 
 **How:**
 
-- After phantom-stop detection, compute per-cell real-departure totals.
-- Cells with at least one OSM stop but zero real departures get the service-desert flag.
+- After GTFS reality refresh, compute per-cell reachable public-departure totals.
+- Cells with at least one reachable GTFS baseline stop but zero reachable public departures get the service-desert flag.
 - Render as a distinct overlay layer in the UI.
 
 ### Standalone reality dataset [hosted publishing pending Phase 8]
@@ -188,13 +189,13 @@ Phase 1's outputs are used directly by Phase 3's transport scoring overhaul.
 - Publish on the hosted site as a download — blocked on Phase 8 hosting.
 - Include a short README in the archive explaining the methodology and caveats. The caveats matter — the dataset should be defensible to journalists, researchers, and transport authorities, not just useful for scoring.
 
-**Done so far:** ZIP export (GeoJSON + manifest + README) is generated locally to `cache/exports/` after each transit reality refresh. Publishing to the hosted site is Phase 8.
+**Done so far:** ZIP export (GeoJSON + manifest + README) is generated locally to `.livability_cache/exports/` after each transit reality refresh. Publishing to the hosted site is Phase 8.
 
 ---
 
 ## Phase 2 — Scoring model v2
 
-The v1 model counts features by presence. A corner shop scores the same as a supermarket, a 7 m² pocket park the same as Phoenix Park, a rural GP the same as a major hospital. v2 introduces sub-tiering, variety, distance decay, mode awareness, and land-use context.
+The original v1 model counted features by presence. A corner shop scored the same as a supermarket, a tiny pocket park the same as Phoenix Park, and a rural GP the same as a major hospital. The current model has landed tiered units, variety clustering, and distance decay. Remaining v2-style work is mostly mode-aware reach and land-use context.
 
 ### ~~Sub-tier shops~~
 
@@ -208,7 +209,7 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
   - `shop=supermarket` with a large footprint or `shop=wholesale` → supermarket.
   - `shop=mall`, or a dense retail cluster in a single building → mall / retail cluster.
 - Footprint thresholds need calibration against the sanity fixture.
-- The existing `CAPS = {"shops": 5, ...}` in `config.py` becomes a per-tier table rather than a single cap.
+- The active cap is now `shops=6`, with shop tiers converted into weighted score units before category saturation.
 
 ### ~~Sub-tier healthcare~~
 
@@ -228,7 +229,8 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
 
 **How:**
 
-- Compute polygon area for each `leisure=park`, `leisure=nature_reserve`, `leisure=garden`, `leisure=playground`.
+- Compute polygon area for each supported park source: `leisure=park`, `leisure=nature_reserve`, and `leisure=playground`.
+- `leisure=garden` is deliberately excluded from scoring.
 - Tier by area; score accordingly.
 - A cell close to a 100 ha park scores significantly higher on parks than a cell close to a playground, even though both are "one park".
 - Area thresholds calibrated against the sanity fixture — Phoenix Park should not dominate the entire model just because it's enormous.
@@ -262,7 +264,7 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
 
 - Extend the Rust walkgraph helper to emit per-mode reach polygons (walk at 500 m / 1 km / 1.5 km, cycle at 3 km / 5 km).
 - Score each mode separately and combine with weighted blending.
-- Transit-chained reach requires Phase 1 + Phase 3 transit data before it's feasible.
+- Transit-chained reach requires the current GTFS frequency data plus a mode-tiering design before it is feasible.
 
 **Open questions:**
 
@@ -288,17 +290,31 @@ The v1 model counts features by presence. A corner shop scores the same as a sup
 
 ## Phase 3 — Transport scoring overhaul
 
-Depends entirely on Phase 1. Every bullet assumes phantom stops are filtered and GTFS departures are loaded.
+Builds on Phase 1. Public GTFS departures are loaded, school-only service is excluded, and the active scorer now consumes `transport_score_units`.
 
-### Departures per stop per day
+### ~~Departures per stop per day~~
 
 **What:** Replace presence-of-stop with scheduled-departures-per-day as the transport feature weight.
 
 **How:**
 
-- Compute from `stop_times.txt` × `calendar.txt` for a representative weekday, Saturday, and Sunday.
-- Store per-stop `(weekday_deps, saturday_deps, sunday_deps)`.
-- Use the average as the primary signal and the minimum (usually Sunday) as a floor — a stop that only runs weekdays is worth less than one that runs every day.
+- Compute public departures from `stop_times.txt` × `calendar.txt` / `calendar_dates.txt`.
+- Store per-stop commute and day-type frequency fields:
+  - `weekday_morning_peak_deps` for 04:00–08:00.
+  - `weekday_evening_peak_deps` for 16:00–20:00.
+  - `weekday_offpeak_deps` for weekday service outside those commute windows.
+  - `saturday_deps` and `sunday_deps`.
+  - `friday_evening_deps` for Friday 16:00 through Saturday 02:00 am.
+- Compute `transport_score_units` from those fields. Commute windows dominate; Friday evening adds useful nightlife-era coverage; off-peak and weekend service are secondary.
+- School-only service is excluded from all public frequency metrics.
+- Friday evening is stored as a future hook for nightlife/noise calibration, but this phase does not subtract any nightlife penalty.
+
+**Done so far:**
+
+- Python and Rust GTFS refresh paths now preserve stop-time event seconds and emit the frequency columns into derived CSV artifacts.
+- Migration `20260423_000010_transport_frequency_scoring.py` persists the frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
+- `transport_score_units` now flows through DB reads, scoring amenity rows, PMTiles metadata, the standalone export bundle, and transport popups.
+- `TRANSIT_REALITY_ALGO_VERSION = 7` and `PMTILES_SCHEMA_VERSION = 7` invalidate stale transport and tile outputs.
 
 ### Mode tiering
 
@@ -330,6 +346,12 @@ Depends entirely on Phase 1. Every bullet assumes phantom stops are filtered and
 - Keep surviving rural stops in the scoring model to not completely zero out rural areas.
 - Hard cap on their contribution, enforced at the category level.
 - The filtering in Phase 1 already removes the ghost stops; this cap handles the ones that are real but infrequent.
+
+**Done so far:**
+
+- `transport_score_units` compresses each stop into a capped 1-5 score-unit scale.
+- Very low-frequency public service survives as a small contribution instead of matching frequent urban corridors.
+- A fuller rural-vs-urban bus distinction remains part of mode tiering.
 
 ---
 

@@ -92,6 +92,13 @@ def load_transport_reality_rows_for_scoring(
             select(
                 transit_gtfs_stop_reality.c.source_ref,
                 transit_gtfs_stop_reality.c.geom,
+                transit_gtfs_stop_reality.c.weekday_morning_peak_deps,
+                transit_gtfs_stop_reality.c.weekday_evening_peak_deps,
+                transit_gtfs_stop_reality.c.weekday_offpeak_deps,
+                transit_gtfs_stop_reality.c.saturday_deps,
+                transit_gtfs_stop_reality.c.sunday_deps,
+                transit_gtfs_stop_reality.c.friday_evening_deps,
+                transit_gtfs_stop_reality.c.transport_score_units,
             )
             .where(transit_gtfs_stop_reality.c.reality_fingerprint == reality_fingerprint)
             .where(
@@ -112,6 +119,13 @@ def load_transport_reality_rows_for_scoring(
             "conflict_class": "gtfs_direct",
             "geom": root.to_shape(row["geom"]),
             "park_area_m2": 0.0,
+            "weekday_morning_peak_deps": float(row["weekday_morning_peak_deps"] or 0.0),
+            "weekday_evening_peak_deps": float(row["weekday_evening_peak_deps"] or 0.0),
+            "weekday_offpeak_deps": float(row["weekday_offpeak_deps"] or 0.0),
+            "saturday_deps": float(row["saturday_deps"] or 0.0),
+            "sunday_deps": float(row["sunday_deps"] or 0.0),
+            "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
+            "transport_score_units": int(row["transport_score_units"] or 0),
         }
         for row in rows
     ]
@@ -143,6 +157,13 @@ def load_transport_reality_points(
                 "public_departures_7d": int(row["public_departures_7d"] or 0),
                 "public_departures_30d": int(row["public_departures_30d"] or 0),
                 "school_only_departures_30d": int(row["school_only_departures_30d"] or 0),
+                "weekday_morning_peak_deps": float(row["weekday_morning_peak_deps"] or 0.0),
+                "weekday_evening_peak_deps": float(row["weekday_evening_peak_deps"] or 0.0),
+                "weekday_offpeak_deps": float(row["weekday_offpeak_deps"] or 0.0),
+                "saturday_deps": float(row["saturday_deps"] or 0.0),
+                "sunday_deps": float(row["sunday_deps"] or 0.0),
+                "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
+                "transport_score_units": int(row["transport_score_units"] or 0),
                 "last_public_service_date": row["last_public_service_date"],
                 "last_any_service_date": row["last_any_service_date"],
                 "bus_active_days_mask_7d": row.get("bus_active_days_mask_7d"),

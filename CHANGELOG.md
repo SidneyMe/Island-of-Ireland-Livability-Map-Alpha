@@ -4,6 +4,33 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-04-23 - Transport frequency scoring and commute-window metrics
+
+### Added
+
+- Migration `20260423_000010_transport_frequency_scoring.py`: adds `weekday_morning_peak_deps`, `weekday_evening_peak_deps`, `weekday_offpeak_deps`, `saturday_deps`, `sunday_deps`, `friday_evening_deps`, and `transport_score_units` to `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, and public `transport_reality`
+- Python and Rust GTFS refresh paths now retain stop-time event seconds so stop summaries can compute service-day frequency averages instead of only total activity-window counts
+- Configurable transport frequency windows:
+  - weekday morning peak: 04:00-08:00
+  - weekday evening peak: 16:00-20:00
+  - Friday evening: Friday 16:00 through Saturday 02:00 am
+- Standalone `transport-reality.zip`, PMTiles metadata, runtime transport reads, and transport popups now expose the new frequency fields and `transport_score_units`
+
+### Changed
+
+- `TRANSIT_REALITY_ALGO_VERSION = 7`
+- `PMTILES_SCHEMA_VERSION = 7`
+- Transport amenity scoring now consumes GTFS-derived `transport_score_units` when present instead of treating every reachable public stop as one equal scoring unit
+- `transport_score_units` is computed from public scheduled service only; school-only service remains excluded from all public frequency windows
+- The frequency score weights commute service most heavily, then Friday evening, then weekday off-peak and weekend service
+- Transport popups now show score units, commute departures, and Friday-evening departures alongside the existing weekly bus tier and snapshot departure counts
+
+### Scoring logic
+
+- Transport is no longer flat stop-count scoring. Reachability still finds active GTFS stops, but each reachable transport row contributes `0-5` score units from scheduled public frequency.
+- Commute coverage dominates the score: both AM and PM peak service matter, so a stop with only heavy off-peak volume cannot outscore a balanced commute stop.
+- Friday evening, off-peak, and weekend service add secondary value. A low-frequency public stop still contributes at least one unit, while zero-public-service and school-only stops contribute zero.
+
 ## 2026-04-22 - Transit bus subtiers, unscheduled stops, and exact transport PMTiles rows
 
 ### Added

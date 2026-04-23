@@ -7,10 +7,17 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
     stop_name: "Main Street",
     bus_service_subtier: "mon_sun",
     public_departures_30d: 21,
+    weekday_morning_peak_deps: 4,
+    weekday_evening_peak_deps: 5,
+    friday_evening_deps: 6,
+    transport_score_units: 3,
     route_modes: "bus"
   });
 
   assert.match(html, /Public transport tier:<\/strong> Whole week/);
+  assert.match(html, /Transport score units: 3 \/ 5/);
+  assert.match(html, /Weekday commute departures: 4 morning \/ 5 evening/);
+  assert.match(html, /Friday evening departures: 6 \(Friday 16:00 through Saturday 02:00 am\)/);
   assert.match(html, /Scheduled snapshot departures in current activity window: 21/);
   assert.match(html, /Modes: bus/);
 }

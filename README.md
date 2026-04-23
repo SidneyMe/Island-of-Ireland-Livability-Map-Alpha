@@ -46,9 +46,9 @@ https://github.com/user-attachments/assets/e8f3717e-5948-49aa-a1cb-51490ca91f97
 - Uses PostGIS as the durable store for raw imports, manifests, grid scores, and runtime data.
 - Builds a compact walk graph with the Rust `walkgraph` helper.
 - Computes livability scores across multiple grid resolutions.
-- Scores access to shops, public transport, healthcare, and parks.
-- Publishes GTFS transport stops with base-calendar weekly bus tiers, snapshot departure metrics, stricter unscheduled-stop detection, and a service-desert overlay.
-- Bakes grid and amenity layers into `.livability_cache/livability.pmtiles`.
+- Scores access to shops, public transport, healthcare, and parks using tiered units, amenity clustering, and distance decay.
+- Publishes GTFS transport stops with base-calendar weekly bus tiers, commute/off-peak/weekend departure metrics, frequency-derived score units, stricter unscheduled-stop detection, and a service-desert overlay.
+- Bakes grid, amenity, transport reality, and service-desert layers into `.livability_cache/livability.pmtiles`.
 - Serves a local MapLibre app from `static/index.html`.
 
 ## Architecture Overview
@@ -200,28 +200,27 @@ psql "postgresql://user:password@localhost:5432/database_name" -f schema.sql
 
 If your app `DATABASE_URL` uses the SQLAlchemy driver form `postgresql+psycopg://`, remove `+psycopg` for the `psql` command. If you use split `POSTGRES_*` variables instead, run the schema command with the matching `psql` connection arguments for your database. Existing databases should be upgraded through Alembic on startup rather than by reapplying `schema.sql`.
 
-## GTFS Phase 1 Setup
+## GTFS And Transport Scoring Setup
 
-Phase 1 transport reality uses local GTFS zip files first and only downloads feeds when you explicitly configure feed URLs.
+The transport reality and scoring pipeline uses local GTFS zip files first and only downloads feeds when you explicitly configure feed URLs.
 The active pipeline ingests NTA and Translink only; the standalone TFI Local Link feed is intentionally not configured because current NTA GTFS is treated as the Republic-side source of truth.
-The transport overlay is snapshot-based scheduled GTFS, not live GTFS-RT. Legacy `active_confirmed` / `inactive_confirmed` status still exists for scoring, but the UI now centers on retrospective 7-day bus subtiers such as `Whole week`, `Mon-Sat`, `Weekdays only`, and `Unscheduled`.
+The transport overlay is snapshot-based scheduled GTFS, not live GTFS-RT. Legacy `active_confirmed` / `inactive_confirmed` status still exists for compatibility, while scoring now uses frequency-derived `transport_score_units`. The UI centers on retrospective 7-day bus subtiers such as `Whole week`, `Mon-Sat`, `Weekdays only`, and `Unscheduled`, and popups expose commute, Friday-evening, and score-unit fields.
 
 Default local zip paths:
 
 ```text
-transit/nta_gtfs.zip
-transit/translink_gtfs.zip
+gtfs/nta_gtfs.zip
+gtfs/translink_gtfs.zip
 ```
 
 Useful environment overrides:
 
 ```text
-GTFS_NTA_ZIP_PATH=transit/nta_gtfs.zip
-GTFS_TRANSLINK_ZIP_PATH=transit/translink_gtfs.zip
+GTFS_NTA_ZIP_PATH=gtfs/nta_gtfs.zip
+GTFS_TRANSLINK_ZIP_PATH=gtfs/translink_gtfs.zip
 GTFS_AS_OF_DATE=2026-04-14
 GTFS_ANALYSIS_WINDOW_DAYS=30
 GTFS_SERVICE_DESERT_WINDOW_DAYS=7
-GTFS_MATCH_RADIUS_M=40
 ```
 
 Optional `GTFS_NTA_URL` and `GTFS_TRANSLINK_URL` values can be set when you want `--refresh-transit` to refresh those local zip files before parsing.
@@ -245,7 +244,7 @@ python3 main.py --refresh-transit
 ```
 
 `--refresh-transit` now reuses the existing transit reality when the GTFS inputs and current OSM import fingerprint still match. Use `--force-transit-refresh` when you want a full rebuild anyway.
-The refreshed transport dataset now keeps one published stop row per GTFS stop, emits unscheduled boarding stops only when a `stops.txt` row has no `stop_times`, and carries weekly bus subtier fields into the export bundle, PMTiles layer, and runtime JSON.
+The refreshed transport dataset now keeps one published stop row per GTFS stop, emits unscheduled boarding stops only when a `stops.txt` row has no `stop_times`, and carries weekly bus subtier plus frequency fields into the export bundle, PMTiles layer, and runtime JSON.
 
 Run precompute using an existing raw import:
 
@@ -254,7 +253,7 @@ python main.py --precompute
 python3 main.py --precompute
 ```
 
-`--precompute` now ensures Phase 1 transit reality exists before transport scoring runs. The publish step also writes:
+`--precompute` now ensures GTFS transit reality exists before transport scoring runs. The publish step also writes:
 
 - `transport_reality` PMTiles/runtime layer
 - `service_deserts` PMTiles/runtime layer
@@ -361,8 +360,9 @@ boundaries/*.geojson
 
 - Scoring weights and caps are hand-picked, not calibrated against any ground-truth livability index.
 - The 500 m walk radius is a single fixed value — no mode-aware scoring (cycling, transit-chained trips).
-- Healthcare scoring treats a rural GP the same as a major hospital; there's no capacity or quality weighting.
-- Parks are counted by presence, not area — a pocket playground scores the same as a regional park.
+- Healthcare has type tiers, but not capacity, catchment, waiting-time, or quality weighting.
+- Park scoring uses size tiers, but not park quality, entrance accessibility, lighting, or facility condition.
+- Transport scoring uses scheduled GTFS frequency, not live reliability, cancellations, crowding, or fares.
 - Grid cells straddling the coast can still look artificially sparse.
 - Linux/macOS should work in principle now that the active runtime path no longer assumes Windows-only executable names, but those platforms are still not fully tested. Contributions welcome.
 - CI currently validates Python tests, Rust tests, and sanity-fixture structure. End-to-end sanity score assertions still require a completed local build.
@@ -380,7 +380,7 @@ Implementation detail, phase ordering, and open design questions for every item 
 
 ### Sub-tier every category
 
-The current model counts features by presence: a corner shop scores the same as a supermarket, a pocket playground the same as a regional park, a rural GP the same as a major hospital. The next iteration tiers each category by type and, where relevant, by physical size.
+The current model now tiers shops, healthcare, and parks by type or size, then counts distinct nearby clusters so co-located services do not inflate the score.
 
 - [x] **Shops:** corner shop → regular shop → supermarket → mall / retail cluster.
 - [x] **Healthcare:** pharmacy / GP → clinic / health centre → hospital → major hospital with A&E.
@@ -389,22 +389,23 @@ The current model counts features by presence: a corner shop scores the same as 
 
 ### Service reality check
 
-A prerequisite for any transport scoring work. Every stop the model counts is assumed to exist in practice, and that assumption currently holds across derelict stations, routes that were cancelled during COVID and never restored, school-only runs tagged as general transit, and rural services that run on an informal schedule. Filtering phantom stops is upstream of every transport-scoring improvement — there is no value in tiering a bus stop by frequency if its effective frequency is zero.
+Implemented as the GTFS-first transport reality layer. Stops are sourced from scheduled NTA and Translink feeds, school-only service is excluded from public scoring, and transport scoring now consumes frequency-derived `transport_score_units` rather than flat stop presence.
 
 - [x] GTFS-first transport reality: stops are sourced directly from NTA + Translink feeds, and stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
 - [x] Separate public services from school-only routes so the latter don't count toward general transit access.
-- [x] Flag service deserts — grid cells with nominal transport features that resolve to zero real weekly departures — and expose them as a dedicated overlay.
-- [x] Replace the old binary map view with weekly bus subtiers (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`) derived from retrospective 7-day stop-level bus coverage.
-- [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL. Local export to `cache/exports/` is generated after each transit refresh; hosted publishing is pending Phase 8.
+- [x] Flag service deserts — grid cells with reachable GTFS baseline stops but zero reachable public departures — and expose them as a dedicated overlay.
+- [x] Replace the old binary map view with weekly bus subtiers (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`) derived from base GTFS calendar patterns.
+- [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL. Local export to `.livability_cache/exports/` is generated after each transit refresh; hosted publishing is pending Phase 8.
 
 ### Transport scoring overhaul
 
-Depends on the service reality check above — every item assumes phantom stops have already been filtered.
+Builds on the service reality layer above. Transport scoring now uses scheduled public frequency, with remaining work focused on mode-specific interpretation and nuisance tradeoffs.
 
-- [ ] Pull GTFS feeds (NTA + Translink) and compute departures per stop per day.
-- [ ] Tier transport by mode: Luas → rail station → high-frequency bus → rural bus.
+- [x] Pull GTFS feeds (NTA + Translink) and compute commute, off-peak, weekend, and Friday-evening departures per stop.
+- [x] Replace flat stop-count scoring with frequency-derived `transport_score_units`.
+- [x] Cap low-frequency stops through the 1-5 `transport_score_units` scale so a single rare-service stop cannot match frequent urban transit access.
+- [ ] Tier transport scoring by mode: Luas → rail station → high-frequency bus → rural bus.
 - [ ] Rail proximity sweet spot: reward walking distance to a station, penalize immediate adjacency (noise, dust).
-- [ ] Cap rural bus stops so a single low-frequency stop cannot match urban transit access.
 
 ### Noise and nuisance penalty layer
 
@@ -460,6 +461,7 @@ The hosted demo is the project's public moment, and it deliberately sits at the 
 ## Attribution And Data Sources
 
 - **OpenStreetMap** — amenity, network, and POI data. © OpenStreetMap contributors, available under the [Open Database License (ODbL)](https://www.openstreetmap.org/copyright). Any derived tiles or screenshots must preserve this attribution.
+- **Overture Maps Foundation** — optional Places data used to rescue missing shop, healthcare, and park POIs before canonical amenity scoring. See [Overture Maps](https://overturemaps.org/) and preserve any release-specific attribution required by the dataset.
 - **Republic of Ireland county boundaries** — Tailte Éireann (formerly Ordnance Survey Ireland), National Statutory Boundaries 2024.
 - **Northern Ireland outline** — OSNI Open Data, Largescale Boundaries.
 - **Basemap rendering** — [MapLibre GL](https://maplibre.org/) on the frontend; tiles are served locally from the generated PMTiles archive.
@@ -475,6 +477,7 @@ Architecture and system design are mine — deciding what the pieces should be, 
 This project stands on a stack of excellent open-source tools:
 
 - [OpenStreetMap](https://www.openstreetmap.org/) ❤️ — the data that makes any of this possible.
+- [Overture Maps Foundation](https://overturemaps.org/) — supplemental Places data that helps fill open-POI gaps while preserving provenance.
 - [osm2pgsql](https://osm2pgsql.org/) — OSM → PostGIS import.
 - [PostGIS](https://postgis.net/) — durable geospatial storage and query.
 - [MapLibre GL](https://maplibre.org/) — the browser map renderer.

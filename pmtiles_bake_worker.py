@@ -132,6 +132,13 @@ _TRANSPORT_REALITY_TILE_SQL = text(
             t.public_departures_7d,
             t.public_departures_30d,
             t.school_only_departures_30d,
+            t.weekday_morning_peak_deps,
+            t.weekday_evening_peak_deps,
+            t.weekday_offpeak_deps,
+            t.saturday_deps,
+            t.sunday_deps,
+            t.friday_evening_deps,
+            t.transport_score_units,
             COALESCE(t.bus_active_days_mask_7d, '') AS bus_active_days_mask_7d,
             COALESCE(t.bus_service_subtier, '') AS bus_service_subtier,
             COALESCE(

@@ -37,6 +37,12 @@ struct GtfsRefreshConfig {
     school_am_end_hour: u8,
     school_pm_start_hour: u8,
     school_pm_end_hour: u8,
+    commute_am_start_hour: u8,
+    commute_am_end_hour: u8,
+    commute_pm_start_hour: u8,
+    commute_pm_end_hour: u8,
+    friday_evening_start_hour: u8,
+    friday_evening_end_hour: u8,
     feeds: Vec<FeedInput>,
 }
 
@@ -60,6 +66,12 @@ struct RunSettings {
     school_am_end_hour: u8,
     school_pm_start_hour: u8,
     school_pm_end_hour: u8,
+    commute_am_start_hour: u8,
+    commute_am_end_hour: u8,
+    commute_pm_start_hour: u8,
+    commute_pm_end_hour: u8,
+    friday_evening_start_hour: u8,
+    friday_evening_end_hour: u8,
     import_fingerprint: String,
     reality_fingerprint: String,
     created_at: String,
@@ -139,6 +151,7 @@ struct FeedDataset {
     calendar_services: BTreeMap<String, CalendarService>,
     calendar_dates: Vec<CalendarDateException>,
     stop_service_occurrences: HashMap<(String, String, String, String), u32>,
+    stop_service_time_occurrences: HashMap<(String, String, String, String, Option<i32>), u32>,
     service_time_buckets: HashMap<String, TimeBucketCounts>,
     service_route_ids: HashMap<String, BTreeSet<String>>,
     service_route_modes: HashMap<String, BTreeSet<String>>,
@@ -171,6 +184,13 @@ struct StopServiceSummary {
     public_departures_7d: u32,
     public_departures_30d: u32,
     school_only_departures_30d: u32,
+    weekday_morning_peak_deps: f64,
+    weekday_evening_peak_deps: f64,
+    weekday_offpeak_deps: f64,
+    saturday_deps: f64,
+    sunday_deps: f64,
+    friday_evening_deps: f64,
+    transport_score_units: u32,
     last_public_service_date: Option<Date>,
     last_any_service_date: Option<Date>,
     route_modes: Vec<String>,
@@ -196,6 +216,13 @@ struct GtfsStopReality {
     public_departures_7d: u32,
     public_departures_30d: u32,
     school_only_departures_30d: u32,
+    weekday_morning_peak_deps: f64,
+    weekday_evening_peak_deps: f64,
+    weekday_offpeak_deps: f64,
+    saturday_deps: f64,
+    sunday_deps: f64,
+    friday_evening_deps: f64,
+    transport_score_units: u32,
     last_public_service_date: Option<Date>,
     last_any_service_date: Option<Date>,
     route_modes: Vec<String>,
@@ -316,6 +343,12 @@ pub fn run_gtfs_refresh(config_json: &Path, out_dir: &Path) -> Result<(), Box<dy
         school_am_end_hour: config.school_am_end_hour,
         school_pm_start_hour: config.school_pm_start_hour,
         school_pm_end_hour: config.school_pm_end_hour,
+        commute_am_start_hour: config.commute_am_start_hour,
+        commute_am_end_hour: config.commute_am_end_hour,
+        commute_pm_start_hour: config.commute_pm_start_hour,
+        commute_pm_end_hour: config.commute_pm_end_hour,
+        friday_evening_start_hour: config.friday_evening_start_hour,
+        friday_evening_end_hour: config.friday_evening_end_hour,
         import_fingerprint: config.import_fingerprint.clone(),
         reality_fingerprint: config.reality_fingerprint.clone(),
         created_at: OffsetDateTime::now_utc().format(&Rfc3339)?,
@@ -351,6 +384,7 @@ pub fn run_gtfs_refresh(config_json: &Path, out_dir: &Path) -> Result<(), Box<dy
             classify_services(dataset, &settings.reality_fingerprint, &service_windows);
         let stop_summaries = summarize_gtfs_stops(
             dataset,
+            &settings,
             &settings.reality_fingerprint,
             &service_windows,
             &dataset_classifications,
@@ -552,6 +586,13 @@ impl DerivedWriters {
                     "public_departures_7d",
                     "public_departures_30d",
                     "school_only_departures_30d",
+                    "weekday_morning_peak_deps",
+                    "weekday_evening_peak_deps",
+                    "weekday_offpeak_deps",
+                    "saturday_deps",
+                    "sunday_deps",
+                    "friday_evening_deps",
+                    "transport_score_units",
                     "last_public_service_date",
                     "last_any_service_date",
                     "bus_active_days_mask_7d",
@@ -581,6 +622,13 @@ impl DerivedWriters {
                     "public_departures_7d",
                     "public_departures_30d",
                     "school_only_departures_30d",
+                    "weekday_morning_peak_deps",
+                    "weekday_evening_peak_deps",
+                    "weekday_offpeak_deps",
+                    "saturday_deps",
+                    "sunday_deps",
+                    "friday_evening_deps",
+                    "transport_score_units",
                     "last_public_service_date",
                     "last_any_service_date",
                     "bus_active_days_mask_7d",
@@ -644,6 +692,13 @@ impl DerivedWriters {
             &row.public_departures_7d.to_string(),
             &row.public_departures_30d.to_string(),
             &row.school_only_departures_30d.to_string(),
+            &float_string(row.weekday_morning_peak_deps),
+            &float_string(row.weekday_evening_peak_deps),
+            &float_string(row.weekday_offpeak_deps),
+            &float_string(row.saturday_deps),
+            &float_string(row.sunday_deps),
+            &float_string(row.friday_evening_deps),
+            &row.transport_score_units.to_string(),
             &optional_date_string(row.last_public_service_date),
             &optional_date_string(row.last_any_service_date),
             row.bus_active_days_mask_7d.as_deref().unwrap_or(""),
@@ -679,6 +734,13 @@ impl DerivedWriters {
             &row.public_departures_7d.to_string(),
             &row.public_departures_30d.to_string(),
             &row.school_only_departures_30d.to_string(),
+            &float_string(row.weekday_morning_peak_deps),
+            &float_string(row.weekday_evening_peak_deps),
+            &float_string(row.weekday_offpeak_deps),
+            &float_string(row.saturday_deps),
+            &float_string(row.sunday_deps),
+            &float_string(row.friday_evening_deps),
+            &row.transport_score_units.to_string(),
             &optional_date_string(row.last_public_service_date),
             &optional_date_string(row.last_any_service_date),
             row.bus_active_days_mask_7d.as_deref().unwrap_or(""),
@@ -1066,6 +1128,7 @@ fn parse_gtfs_feed(
         calendar_services: BTreeMap::new(),
         calendar_dates: Vec::new(),
         stop_service_occurrences: HashMap::new(),
+        stop_service_time_occurrences: HashMap::new(),
         service_time_buckets: HashMap::new(),
         service_route_ids: HashMap::new(),
         service_route_modes: HashMap::new(),
@@ -1359,7 +1422,20 @@ fn parse_gtfs_feed(
                     .entry(occurrence_key)
                     .or_insert(0) += 1;
 
-                let bucket = time_bucket(departure_seconds.or(arrival_seconds), settings);
+                let event_seconds = departure_seconds.or(arrival_seconds);
+                let timed_occurrence_key = (
+                    stop_id.clone(),
+                    trip_info.service_id.clone(),
+                    trip_info.route_id.clone(),
+                    trip_info.mode.clone(),
+                    event_seconds,
+                );
+                *dataset
+                    .stop_service_time_occurrences
+                    .entry(timed_occurrence_key)
+                    .or_insert(0) += 1;
+
+                let bucket = time_bucket(event_seconds, settings);
                 let bucket_counts = dataset
                     .service_time_buckets
                     .entry(trip_info.service_id.clone())
@@ -1597,8 +1673,110 @@ fn classify_services(
     classifications
 }
 
+fn hour_window_contains(seconds: Option<i32>, start_hour: u8, end_hour: u8) -> bool {
+    let Some(seconds) = seconds else {
+        return false;
+    };
+    let start_seconds = i32::from(start_hour) * 3600;
+    let mut end_seconds = i32::from(end_hour) * 3600;
+    if end_seconds <= start_seconds {
+        end_seconds += 24 * 3600;
+    }
+    seconds >= start_seconds && seconds < end_seconds
+}
+
+fn is_weekday_morning_peak(seconds: Option<i32>, settings: &RunSettings) -> bool {
+    hour_window_contains(
+        seconds,
+        settings.commute_am_start_hour,
+        settings.commute_am_end_hour,
+    )
+}
+
+fn is_weekday_evening_peak(seconds: Option<i32>, settings: &RunSettings) -> bool {
+    hour_window_contains(
+        seconds,
+        settings.commute_pm_start_hour,
+        settings.commute_pm_end_hour,
+    )
+}
+
+fn is_friday_evening(seconds: Option<i32>, settings: &RunSettings) -> bool {
+    hour_window_contains(
+        seconds,
+        settings.friday_evening_start_hour,
+        settings.friday_evening_end_hour,
+    )
+}
+
+fn average_departures(total: u32, dates: &BTreeSet<Date>) -> f64 {
+    if dates.is_empty() {
+        0.0
+    } else {
+        (total as f64) / (dates.len() as f64)
+    }
+}
+
+fn transport_score_units_from_frequency(
+    weekday_morning_peak_deps: f64,
+    weekday_evening_peak_deps: f64,
+    weekday_offpeak_deps: f64,
+    saturday_deps: f64,
+    sunday_deps: f64,
+    friday_evening_deps: f64,
+    public_departures_30d: u32,
+) -> u32 {
+    if public_departures_30d == 0 {
+        return 0;
+    }
+    let peak_am = (weekday_morning_peak_deps.max(0.0) / 16.0).min(1.0);
+    let peak_pm = (weekday_evening_peak_deps.max(0.0) / 16.0).min(1.0);
+    let commute = 0.6 * peak_am.min(peak_pm) + 0.4 * ((peak_am + peak_pm) / 2.0);
+    let friday = (friday_evening_deps.max(0.0) / 24.0).min(1.0);
+    let offpeak = (weekday_offpeak_deps.max(0.0) / 32.0).min(1.0);
+    let weekend = (((saturday_deps.max(0.0) + sunday_deps.max(0.0)) / 2.0) / 24.0).min(1.0);
+    let frequency = 0.60 * commute + 0.20 * friday + 0.10 * offpeak + 0.10 * weekend;
+    ((frequency * 5.0).ceil() as u32).clamp(1, 5)
+}
+
+fn stop_service_time_occurrences(
+    dataset: &FeedDataset,
+) -> Vec<(String, String, String, String, Option<i32>, u32)> {
+    if !dataset.stop_service_time_occurrences.is_empty() {
+        return dataset
+            .stop_service_time_occurrences
+            .iter()
+            .map(|((stop_id, service_id, route_id, mode, seconds), occurrences)| {
+                (
+                    stop_id.clone(),
+                    service_id.clone(),
+                    route_id.clone(),
+                    mode.clone(),
+                    *seconds,
+                    *occurrences,
+                )
+            })
+            .collect();
+    }
+    dataset
+        .stop_service_occurrences
+        .iter()
+        .map(|((stop_id, service_id, route_id, mode), occurrences)| {
+            (
+                stop_id.clone(),
+                service_id.clone(),
+                route_id.clone(),
+                mode.clone(),
+                None,
+                *occurrences,
+            )
+        })
+        .collect()
+}
+
 fn summarize_gtfs_stops(
     dataset: &FeedDataset,
+    settings: &RunSettings,
     _reality_fingerprint: &str,
     service_windows: &BTreeMap<String, ServiceWindow>,
     service_classifications: &BTreeMap<String, ServiceClassification>,
@@ -1617,6 +1795,16 @@ fn summarize_gtfs_stops(
         is_unscheduled_stop: bool,
         has_exception_only_service: bool,
         has_any_bus_service: bool,
+        weekday_morning_peak_total: u32,
+        weekday_evening_peak_total: u32,
+        weekday_offpeak_total: u32,
+        saturday_total: u32,
+        sunday_total: u32,
+        friday_evening_total: u32,
+        weekday_dates: BTreeSet<Date>,
+        saturday_dates: BTreeSet<Date>,
+        sunday_dates: BTreeSet<Date>,
+        friday_dates: BTreeSet<Date>,
     }
 
     let exception_only_service_ids: BTreeSet<String> = dataset
@@ -1636,23 +1824,25 @@ fn summarize_gtfs_stops(
         .map(|(stop_id, _, _, _)| stop_id.clone())
         .collect();
     let mut per_stop: BTreeMap<String, StopPayload> = BTreeMap::new();
-    for ((stop_id, service_id, route_id, mode), occurrences) in &dataset.stop_service_occurrences {
-        let window = service_windows.get(service_id);
+    for (stop_id, service_id, route_id, mode, event_seconds, occurrences) in
+        stop_service_time_occurrences(dataset)
+    {
+        let window = service_windows.get(&service_id);
         let dates_30d = window.map(|row| row.dates_30d.as_slice()).unwrap_or(&[]);
         let dates_7d = window.map(|row| row.dates_7d.as_slice()).unwrap_or(&[]);
-        let classification = service_classifications.get(service_id);
+        let classification = service_classifications.get(&service_id);
         let payload = per_stop.entry(stop_id.clone()).or_default();
         payload.route_modes.insert(mode.clone());
         payload.route_ids.insert(route_id.clone());
         if mode == "bus" {
             payload.has_any_bus_service = true;
-            if let Some(calendar) = dataset.calendar_services.get(service_id) {
+            if let Some(calendar) = dataset.calendar_services.get(&service_id) {
                 payload
                     .base_weekly_bus_weekdays
                     .extend(calendar_weekday_indexes(calendar));
             }
             payload.has_exception_only_service = payload.has_exception_only_service
-                || exception_only_service_ids.contains(service_id);
+                || exception_only_service_ids.contains(&service_id);
         }
         if let Some(last_date) = dates_30d.last().copied() {
             payload.last_any_service_date =
@@ -1663,15 +1853,41 @@ fn summarize_gtfs_stops(
             .map(|row| row.school_only_state.as_str() == "yes")
             .unwrap_or(false)
         {
-            payload.school_only_departures_30d += (*occurrences) * (dates_30d.len() as u32);
+            payload.school_only_departures_30d += occurrences * (dates_30d.len() as u32);
             payload
                 .reason_codes
                 .insert("school_only_service_present".to_string());
             continue;
         }
 
-        payload.public_departures_7d += (*occurrences) * (dates_7d.len() as u32);
-        payload.public_departures_30d += (*occurrences) * (dates_30d.len() as u32);
+        payload.public_departures_7d += occurrences * (dates_7d.len() as u32);
+        payload.public_departures_30d += occurrences * (dates_30d.len() as u32);
+        for active_date in dates_30d {
+            let weekday = active_date.weekday().number_days_from_monday();
+            if weekday < 5 {
+                payload.weekday_dates.insert(*active_date);
+                if is_weekday_morning_peak(event_seconds, settings) {
+                    payload.weekday_morning_peak_total += occurrences;
+                } else if is_weekday_evening_peak(event_seconds, settings) {
+                    payload.weekday_evening_peak_total += occurrences;
+                } else {
+                    payload.weekday_offpeak_total += occurrences;
+                }
+            }
+            if weekday == 5 {
+                payload.saturday_dates.insert(*active_date);
+                payload.saturday_total += occurrences;
+            } else if weekday == 6 {
+                payload.sunday_dates.insert(*active_date);
+                payload.sunday_total += occurrences;
+            }
+            if weekday == 4 {
+                payload.friday_dates.insert(*active_date);
+                if is_friday_evening(event_seconds, settings) {
+                    payload.friday_evening_total += occurrences;
+                }
+            }
+        }
         if let Some(last_date) = dates_30d.last().copied() {
             payload.last_public_service_date =
                 max_optional_date(payload.last_public_service_date, Some(last_date));
@@ -1712,12 +1928,38 @@ fn summarize_gtfs_stops(
         if payload.last_any_service_date.is_none() {
             payload.reason_codes.insert("no_service_window".to_string());
         }
+        let weekday_morning_peak_deps =
+            average_departures(payload.weekday_morning_peak_total, &payload.weekday_dates);
+        let weekday_evening_peak_deps =
+            average_departures(payload.weekday_evening_peak_total, &payload.weekday_dates);
+        let weekday_offpeak_deps =
+            average_departures(payload.weekday_offpeak_total, &payload.weekday_dates);
+        let saturday_deps = average_departures(payload.saturday_total, &payload.saturday_dates);
+        let sunday_deps = average_departures(payload.sunday_total, &payload.sunday_dates);
+        let friday_evening_deps =
+            average_departures(payload.friday_evening_total, &payload.friday_dates);
+        let transport_score_units = transport_score_units_from_frequency(
+            weekday_morning_peak_deps,
+            weekday_evening_peak_deps,
+            weekday_offpeak_deps,
+            saturday_deps,
+            sunday_deps,
+            friday_evening_deps,
+            payload.public_departures_30d,
+        );
         summaries.push(StopServiceSummary {
             feed_id: dataset.feed_id.clone(),
             stop_id,
             public_departures_7d: payload.public_departures_7d,
             public_departures_30d: payload.public_departures_30d,
             school_only_departures_30d: payload.school_only_departures_30d,
+            weekday_morning_peak_deps,
+            weekday_evening_peak_deps,
+            weekday_offpeak_deps,
+            saturday_deps,
+            sunday_deps,
+            friday_evening_deps,
+            transport_score_units,
             last_public_service_date: payload.last_public_service_date,
             last_any_service_date: payload.last_any_service_date,
             route_modes: payload.route_modes.into_iter().collect(),
@@ -1813,6 +2055,13 @@ fn derive_gtfs_stop_reality(
             public_departures_7d: summary.public_departures_7d,
             public_departures_30d: summary.public_departures_30d,
             school_only_departures_30d: summary.school_only_departures_30d,
+            weekday_morning_peak_deps: summary.weekday_morning_peak_deps,
+            weekday_evening_peak_deps: summary.weekday_evening_peak_deps,
+            weekday_offpeak_deps: summary.weekday_offpeak_deps,
+            saturday_deps: summary.saturday_deps,
+            sunday_deps: summary.sunday_deps,
+            friday_evening_deps: summary.friday_evening_deps,
+            transport_score_units: summary.transport_score_units,
             last_public_service_date: summary.last_public_service_date,
             last_any_service_date: summary.last_any_service_date,
             route_modes: summary.route_modes.clone(),
@@ -1860,6 +2109,7 @@ mod tests {
             calendar_services: BTreeMap::new(),
             calendar_dates: Vec::new(),
             stop_service_occurrences: HashMap::new(),
+            stop_service_time_occurrences: HashMap::new(),
             service_time_buckets: HashMap::new(),
             service_route_ids: HashMap::new(),
             service_route_modes: HashMap::new(),
@@ -1902,6 +2152,13 @@ mod tests {
             public_departures_7d,
             public_departures_30d,
             school_only_departures_30d,
+            weekday_morning_peak_deps: 0.0,
+            weekday_evening_peak_deps: 0.0,
+            weekday_offpeak_deps: 0.0,
+            saturday_deps: 0.0,
+            sunday_deps: 0.0,
+            friday_evening_deps: 0.0,
+            transport_score_units: if public_departures_30d > 0 { 1 } else { 0 },
             last_public_service_date: Some(
                 Date::from_calendar_date(2026, time::Month::April, 14).unwrap(),
             ),
@@ -1931,6 +2188,12 @@ mod tests {
             school_am_end_hour: 10,
             school_pm_start_hour: 13,
             school_pm_end_hour: 17,
+            commute_am_start_hour: 4,
+            commute_am_end_hour: 8,
+            commute_pm_start_hour: 16,
+            commute_pm_end_hour: 20,
+            friday_evening_start_hour: 16,
+            friday_evening_end_hour: 2,
             import_fingerprint: "import-123".to_string(),
             reality_fingerprint: "reality-123".to_string(),
             created_at: "2026-04-14T00:00:00+00:00".to_string(),
@@ -2107,6 +2370,7 @@ mod tests {
             classify_services(&dataset, "reality-123", &service_windows);
         let summaries = summarize_gtfs_stops(
             &dataset,
+            &settings,
             "reality-123",
             &service_windows,
             &service_classifications,
@@ -2162,6 +2426,7 @@ mod tests {
             classify_services(&dataset, "reality-123", &service_windows);
         let summaries = summarize_gtfs_stops(
             &dataset,
+            &settings,
             "reality-123",
             &service_windows,
             &service_classifications,
@@ -2194,6 +2459,7 @@ mod tests {
             classify_services(&dataset, "reality-123", &service_windows);
         let summaries = summarize_gtfs_stops(
             &dataset,
+            &settings,
             "reality-123",
             &service_windows,
             &service_classifications,

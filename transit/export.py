@@ -34,6 +34,13 @@ def _feature_properties(row: GtfsStopReality) -> dict[str, object]:
         "public_departures_7d": row.public_departures_7d,
         "public_departures_30d": row.public_departures_30d,
         "school_only_departures_30d": row.school_only_departures_30d,
+        "weekday_morning_peak_deps": row.weekday_morning_peak_deps,
+        "weekday_evening_peak_deps": row.weekday_evening_peak_deps,
+        "weekday_offpeak_deps": row.weekday_offpeak_deps,
+        "saturday_deps": row.saturday_deps,
+        "sunday_deps": row.sunday_deps,
+        "friday_evening_deps": row.friday_evening_deps,
+        "transport_score_units": row.transport_score_units,
         "last_public_service_date": (
             row.last_public_service_date.isoformat()
             if row.last_public_service_date is not None
@@ -97,7 +104,10 @@ def _readme_text() -> str:
             ),
             "",
             "Caveats:",
-            "- This is a conservative GTFS-direct availability view, not a full frequency-weighted model.",
+            (
+                "- Frequency fields are scheduled public departures averaged by service-day type; "
+                "Friday evening covers Friday 16:00 through Saturday 02:00 am."
+            ),
             "- Stops omitted from GTFS feeds cannot appear in this dataset.",
             "- This dataset is snapshot-based scheduled GTFS data, not live GTFS-RT.",
         )

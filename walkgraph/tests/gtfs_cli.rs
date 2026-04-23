@@ -70,6 +70,12 @@ fn gtfs_refresh_command_writes_expected_artifacts() {
             "school_am_end_hour": 10,
             "school_pm_start_hour": 13,
             "school_pm_end_hour": 17,
+            "commute_am_start_hour": 4,
+            "commute_am_end_hour": 8,
+            "commute_pm_start_hour": 16,
+            "commute_pm_end_hour": 20,
+            "friday_evening_start_hour": 16,
+            "friday_evening_end_hour": 2,
             "feeds": [{
                 "feed_id": "nta",
                 "label": "NTA",

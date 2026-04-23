@@ -204,3 +204,14 @@ class AmenityTierClassificationTests(TestCase):
         for row, expected in cases:
             with self.subTest(row=row):
                 self.assertEqual(classify_amenity_row(row), expected)
+
+    def test_transport_tier_uses_gtfs_frequency_score_units(self) -> None:
+        self.assertEqual(
+            classify_amenity_row({"category": "transport", "transport_score_units": 4}),
+            ("stop", 4),
+        )
+        self.assertEqual(
+            classify_amenity_row({"category": "transport", "transport_score_units": 0}),
+            ("stop", 0),
+        )
+        self.assertEqual(classify_amenity_row({"category": "transport"}), ("stop", 1))

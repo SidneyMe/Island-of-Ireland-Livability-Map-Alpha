@@ -67,6 +67,7 @@ def _single_stop_dataset(
     school_keywords: set[str] | None = None,
     time_bucket_counts: dict[str, int] | None = None,
     location_type: int | None = None,
+    event_seconds: int | None = None,
 ) -> FeedDataset:
     return FeedDataset(
         feed_id="nta",
@@ -108,6 +109,9 @@ def _single_stop_dataset(
         },
         calendar_dates=list(calendar_dates or []),
         stop_service_occurrences={("S1", service_id, "R1", "bus"): 1},
+        stop_service_time_occurrences={
+            ("S1", service_id, "R1", "bus", event_seconds): 1
+        } if event_seconds is not None else {},
         service_time_buckets={
             service_id: dict(time_bucket_counts or {"morning": 0, "afternoon": 0, "offpeak": 1})
         },
@@ -268,6 +272,142 @@ class TransitRealityRewriteTests(TestCase):
         self.assertTrue(row.has_any_bus_service)
         self.assertFalse(row.has_daily_bus_service)
         self.assertEqual(row.source_reason_codes, ("gtfs_direct_source",))
+
+    def test_frequency_windows_drive_transport_score_units(self) -> None:
+        dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+        )
+        dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 5 * 3600): 16,
+            ("S1", "SVC1", "R1", "bus", 17 * 3600): 16,
+            ("S1", "SVC1", "R1", "bus", 12 * 3600): 80,
+        }
+
+        rows = derive_gtfs_stop_reality(
+            [dataset],
+            _summaries_for_dataset(dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )
+
+        row = rows[0]
+        self.assertEqual(row.weekday_morning_peak_deps, 16)
+        self.assertEqual(row.weekday_evening_peak_deps, 16)
+        self.assertEqual(row.weekday_offpeak_deps, 80)
+        self.assertEqual(row.transport_score_units, 5)
+
+    def test_offpeak_volume_cannot_outscore_commute_service(self) -> None:
+        commute_dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+        )
+        commute_dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 5 * 3600): 16,
+            ("S1", "SVC1", "R1", "bus", 17 * 3600): 16,
+        }
+        offpeak_dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+        )
+        offpeak_dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 12 * 3600): 200,
+        }
+
+        commute_row = derive_gtfs_stop_reality(
+            [commute_dataset],
+            _summaries_for_dataset(commute_dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+        offpeak_row = derive_gtfs_stop_reality(
+            [offpeak_dataset],
+            _summaries_for_dataset(offpeak_dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+
+        self.assertGreater(commute_row.transport_score_units, offpeak_row.transport_score_units)
+        self.assertEqual(offpeak_row.transport_score_units, 1)
+
+    def test_friday_evening_counts_through_saturday_2am_without_dominating(self) -> None:
+        friday_dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+            weekday_flags=(0, 0, 0, 0, 1, 0, 0),
+        )
+        friday_dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 16 * 3600): 12,
+            ("S1", "SVC1", "R1", "bus", 25 * 3600 + 30 * 60): 12,
+        }
+        commute_dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+        )
+        commute_dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 5 * 3600): 16,
+            ("S1", "SVC1", "R1", "bus", 17 * 3600): 16,
+        }
+
+        friday_row = derive_gtfs_stop_reality(
+            [friday_dataset],
+            _summaries_for_dataset(friday_dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+        commute_row = derive_gtfs_stop_reality(
+            [commute_dataset],
+            _summaries_for_dataset(commute_dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+
+        self.assertEqual(friday_row.friday_evening_deps, 24)
+        self.assertLess(friday_row.transport_score_units, commute_row.transport_score_units)
+
+    def test_weekend_day_type_departure_averages_are_exposed(self) -> None:
+        dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+            weekday_flags=(0, 0, 0, 0, 0, 1, 1),
+        )
+        dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 11 * 3600): 3,
+        }
+
+        row = derive_gtfs_stop_reality(
+            [dataset],
+            _summaries_for_dataset(dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+
+        self.assertEqual(row.saturday_deps, 3)
+        self.assertEqual(row.sunday_deps, 3)
+
+    def test_school_only_departures_do_not_contribute_frequency_score(self) -> None:
+        dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+            school_keywords={"school"},
+            time_bucket_counts={"morning": 10, "afternoon": 10, "offpeak": 0},
+        )
+        dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 7 * 3600): 10,
+            ("S1", "SVC1", "R1", "bus", 15 * 3600): 10,
+        }
+
+        row = derive_gtfs_stop_reality(
+            [dataset],
+            _summaries_for_dataset(dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+
+        self.assertEqual(row.reality_status, "school_only_confirmed")
+        self.assertEqual(row.weekday_morning_peak_deps, 0)
+        self.assertEqual(row.weekday_evening_peak_deps, 0)
+        self.assertEqual(row.transport_score_units, 0)
 
     def test_derive_gtfs_stop_reality_marks_beyond_lookahead_service_inactive(self) -> None:
         dataset = _single_stop_dataset(
@@ -555,6 +695,9 @@ class TransitExportAndLoaderTests(TestCase):
         self.assertEqual(properties["source_ref"], "gtfs/nta/S1")
         self.assertEqual(properties["stop_name"], "Main Street")
         self.assertEqual(properties["source_status"], "gtfs_direct")
+        self.assertIn("weekday_morning_peak_deps", properties)
+        self.assertIn("friday_evening_deps", properties)
+        self.assertIn("transport_score_units", properties)
         self.assertNotIn("osm_source_ref", properties)
         self.assertNotIn("match_status", properties)
         self.assertIn("bus_service_subtier", properties)
@@ -568,8 +711,8 @@ class TransitExportAndLoaderTests(TestCase):
             csv_path.write_text(
                 "\n".join(
                     (
-                        "reality_fingerprint,import_fingerprint,source_ref,stop_name,feed_id,stop_id,source_status,reality_status,school_only_state,public_departures_7d,public_departures_30d,school_only_departures_30d,last_public_service_date,last_any_service_date,bus_active_days_mask_7d,bus_service_subtier,is_unscheduled_stop,has_exception_only_service,has_any_bus_service,has_daily_bus_service,route_modes_json,source_reason_codes_json,reality_reason_codes_json,lat,lon,created_at",
-                        'reality-123,import-123,gtfs/nta/S1,Main Street,nta,S1,gtfs_direct,active_confirmed,no,7,21,0,2026-04-14,2026-04-14,1111111,mon_sun,false,false,true,true,"[""bus""]","[""gtfs_direct_source""]","[""public_service_present""]",53.35,-6.26,2026-04-14T00:00:00+00:00',
+                        "reality_fingerprint,import_fingerprint,source_ref,stop_name,feed_id,stop_id,source_status,reality_status,school_only_state,public_departures_7d,public_departures_30d,school_only_departures_30d,weekday_morning_peak_deps,weekday_evening_peak_deps,weekday_offpeak_deps,saturday_deps,sunday_deps,friday_evening_deps,transport_score_units,last_public_service_date,last_any_service_date,bus_active_days_mask_7d,bus_service_subtier,is_unscheduled_stop,has_exception_only_service,has_any_bus_service,has_daily_bus_service,route_modes_json,source_reason_codes_json,reality_reason_codes_json,lat,lon,created_at",
+                        'reality-123,import-123,gtfs/nta/S1,Main Street,nta,S1,gtfs_direct,active_confirmed,no,7,21,0,4,5,6,7,8,9,3,2026-04-14,2026-04-14,1111111,mon_sun,false,false,true,true,"[""bus""]","[""gtfs_direct_source""]","[""public_service_present""]",53.35,-6.26,2026-04-14T00:00:00+00:00',
                     )
                 ),
                 encoding="utf-8",
@@ -585,6 +728,9 @@ class TransitExportAndLoaderTests(TestCase):
         self.assertEqual(rows[0].bus_active_days_mask_7d, "1111111")
         self.assertEqual(rows[0].bus_service_subtier, "mon_sun")
         self.assertTrue(rows[0].has_any_bus_service)
+        self.assertEqual(rows[0].weekday_morning_peak_deps, 4)
+        self.assertEqual(rows[0].friday_evening_deps, 9)
+        self.assertEqual(rows[0].transport_score_units, 3)
 
 
 class TransitRustRefreshTests(TestCase):
@@ -608,6 +754,8 @@ class TransitRustRefreshTests(TestCase):
             config_payload = json.loads((output_dir.parent / "gtfs_refresh_config.json").read_text(encoding="utf-8"))
 
         self.assertEqual(config_payload["matcher_version"], TRANSIT_REALITY_ALGO_VERSION)
+        self.assertEqual(config_payload["commute_am_start_hour"], 4)
+        self.assertEqual(config_payload["friday_evening_end_hour"], 2)
         self.assertNotIn("osm_features_path", config_payload)
         self.assertNotIn("match_radius_m", config_payload)
 

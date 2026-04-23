@@ -73,9 +73,29 @@ function _tierText(properties) {
   return transportSubtierLabel(properties.bus_service_subtier);
 }
 
+function _numberText(value) {
+  const numberValue = Number(value || 0);
+  if (!Number.isFinite(numberValue)) {
+    return "0";
+  }
+  if (Math.abs(numberValue - Math.round(numberValue)) < 0.05) {
+    return String(Math.round(numberValue));
+  }
+  return numberValue.toFixed(1);
+}
+
 function _rowHtml(properties) {
   const detailLines = [
     "<p><strong>Public transport tier:</strong> " + escapeHtml(_tierText(properties)) + "</p>",
+    "<p>Transport score units: " + escapeHtml(String(properties.transport_score_units || 0)) + " / 5</p>",
+    "<p>Weekday commute departures: " +
+      escapeHtml(_numberText(properties.weekday_morning_peak_deps)) +
+      " morning / " +
+      escapeHtml(_numberText(properties.weekday_evening_peak_deps)) +
+      " evening</p>",
+    "<p>Friday evening departures: " +
+      escapeHtml(_numberText(properties.friday_evening_deps)) +
+      " (Friday 16:00 through Saturday 02:00 am)</p>",
     "<p>Scheduled snapshot departures in current activity window: " +
       escapeHtml(String(properties.public_departures_30d || 0)) +
       "</p>"

@@ -73,6 +73,14 @@ def _numeric_value(value: Any) -> float:
     return max(numeric, 0.0)
 
 
+def _integer_units(value: Any) -> int:
+    try:
+        numeric = int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+    return max(numeric, 0)
+
+
 def _tokenized_text_values(row: dict[str, Any]) -> set[str]:
     values: list[str] = []
     tags_json = row.get("tags_json") or {}
@@ -207,6 +215,8 @@ def classify_amenity_row(row: dict[str, Any]) -> tuple[str | None, int]:
         tier = _classify_park_tier(row)
         return tier, int(PARK_TIER_UNITS[tier])
     if category == "transport":
+        if "transport_score_units" in row:
+            return "stop", _integer_units(row.get("transport_score_units"))
         return "stop", 1
     return None, 0
 
