@@ -54,6 +54,7 @@ class _FakeService:
                 "has_any_bus_service": 3,
                 "has_daily_bus_service": 2,
             },
+            "transport_mode_counts": {"tram": 1, "rail": 1},
             "category_colors": config.CATEGORY_COLORS,
             "default_zoom": 6,
             "max_zoom": 19,
@@ -403,6 +404,7 @@ class RenderAndCliTests(TestCase):
                     "has_any_bus_service": 3,
                     "has_daily_bus_service": 2,
                 },
+                "transport_mode_counts": {"tram": 4, "rail": 6},
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "transport_reality_download_url": "/exports/transport-reality.zip",
@@ -454,6 +456,7 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["amenity_tier_counts"]["shops"]["corner"], 3)
         self.assertEqual(payload["transport_subtier_counts"]["mon_sun"], 2)
         self.assertEqual(payload["transport_flag_counts"]["is_unscheduled_stop"], 1)
+        self.assertEqual(payload["transport_mode_counts"], {"tram": 4, "rail": 6})
         self.assertNotIn("ov_shops", payload["category_colors"])
 
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
@@ -494,6 +497,7 @@ class RenderAndCliTests(TestCase):
         self.assertNotIn("inspect_url", payload)
         self.assertFalse(payload["transport_reality_enabled"])
         self.assertFalse(payload["service_deserts_enabled"])
+        self.assertEqual(payload["transport_mode_counts"], {})
 
     def test_runtime_service_uses_dev_config_hash_and_coarse_only_payload(self) -> None:
         manifest = {

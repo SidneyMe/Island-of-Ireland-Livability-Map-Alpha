@@ -311,10 +311,20 @@ function amenityCircleColorExpression(colors) {
   return expr;
 }
 
+function transportRouteModeTokenExpression(mode) {
+  return [
+    "in",
+    "," + String(mode || "").trim() + ",",
+    ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]
+  ];
+}
+
 function transportRealityCircleColorExpression() {
   return [
     "case",
     ["==", ["get", "is_unscheduled_stop"], 1], "#8c8778",
+    transportRouteModeTokenExpression("tram"), "#8f4bb8",
+    transportRouteModeTokenExpression("rail"), "#2f6fb6",
     [
       "match",
       ["coalesce", ["get", "bus_service_subtier"], ""],
@@ -334,6 +344,8 @@ function transportRealityCircleOpacityExpression() {
   return [
     "case",
     ["==", ["get", "is_unscheduled_stop"], 1], 0.8,
+    transportRouteModeTokenExpression("tram"), 0.84,
+    transportRouteModeTokenExpression("rail"), 0.84,
     ["==", ["coalesce", ["get", "bus_service_subtier"], ""], ""], 0.42,
     0.84
   ];

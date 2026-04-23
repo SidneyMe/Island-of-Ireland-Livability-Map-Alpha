@@ -250,6 +250,8 @@ const devRuntime = {
   assert.deepEqual(transportRealityLayer.paint["circle-color"], [
     "case",
     ["==", ["get", "is_unscheduled_stop"], 1], "#8c8778",
+    ["in", ",tram,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]], "#8f4bb8",
+    ["in", ",rail,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]], "#2f6fb6",
     [
       "match",
       ["coalesce", ["get", "bus_service_subtier"], ""],
@@ -266,6 +268,8 @@ const devRuntime = {
   assert.deepEqual(transportRealityLayer.paint["circle-opacity"], [
     "case",
     ["==", ["get", "is_unscheduled_stop"], 1], 0.8,
+    ["in", ",tram,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]], 0.84,
+    ["in", ",rail,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]], 0.84,
     ["==", ["coalesce", ["get", "bus_service_subtier"], ""], ""], 0.42,
     0.84
   ]);

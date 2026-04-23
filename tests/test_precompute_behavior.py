@@ -915,6 +915,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                     "has_exception_only_service": False,
                     "has_any_bus_service": True,
                     "has_daily_bus_service": True,
+                    "route_modes_json": ["bus"],
                 },
                 {
                     "bus_service_subtier": "weekdays_only",
@@ -922,6 +923,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                     "has_exception_only_service": True,
                     "has_any_bus_service": True,
                     "has_daily_bus_service": False,
+                    "route_modes_json": ["bus", "rail", "tram", "tram"],
                 },
                 {
                     "bus_service_subtier": None,
@@ -929,6 +931,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                     "has_exception_only_service": False,
                     "has_any_bus_service": False,
                     "has_daily_bus_service": False,
+                    "route_modes_json": [],
                 },
             ],
             hashes=SimpleNamespace(
@@ -965,6 +968,10 @@ class AmenityPhaseIntegrationTests(TestCase):
                 "has_any_bus_service": 2,
                 "has_daily_bus_service": 1,
             },
+        )
+        self.assertEqual(
+            summary["transport_mode_counts"],
+            {"bus": 2, "rail": 1, "tram": 1},
         )
 
 

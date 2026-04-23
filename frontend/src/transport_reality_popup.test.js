@@ -10,7 +10,7 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
     route_modes: "bus"
   });
 
-  assert.match(html, /Weekly service:<\/strong> Whole week/);
+  assert.match(html, /Public transport tier:<\/strong> Whole week/);
   assert.match(html, /Scheduled snapshot departures in current activity window: 21/);
   assert.match(html, /Modes: bus/);
 }
@@ -24,6 +24,46 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
 
   assert.match(html, /Unscheduled/);
   assert.match(html, /gtfs\/nta\/S1/);
+}
+
+{
+  const html = transportRealityPopupHtml({
+    stop_name: "Heuston",
+    bus_service_subtier: null,
+    public_departures_30d: 6150,
+    route_modes: "tram",
+    source_ref: "gtfs/nta/8220GA00387"
+  });
+
+  assert.match(html, /Public transport tier:<\/strong> Tram/);
+  assert.doesNotMatch(html, /No recent bus tier/);
+  assert.match(html, /Modes: tram/);
+}
+
+{
+  const html = transportRealityPopupHtml({
+    stop_name: "Dublin Heuston",
+    bus_service_subtier: null,
+    public_departures_30d: 3196,
+    route_modes: "rail",
+    source_ref: "gtfs/nta/8220IR0132"
+  });
+
+  assert.match(html, /Public transport tier:<\/strong> Rail/);
+  assert.doesNotMatch(html, /No recent bus tier/);
+  assert.match(html, /Modes: rail/);
+}
+
+{
+  const html = transportRealityPopupHtml({
+    stop_name: "Mixed interchange",
+    bus_service_subtier: "mon_sun",
+    public_departures_30d: 120,
+    route_modes: "bus,rail,tram"
+  });
+
+  assert.match(html, /Public transport tier:<\/strong> Tram/);
+  assert.doesNotMatch(html, /Public transport tier:<\/strong> Whole week/);
 }
 
 {

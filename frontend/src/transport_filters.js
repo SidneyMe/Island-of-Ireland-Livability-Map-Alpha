@@ -19,6 +19,13 @@ const TRANSPORT_SUBTIER_LABELS = {
   unscheduled: "Unscheduled"
 };
 
+const TRANSPORT_MODE_ORDER = ["tram", "rail"];
+
+const TRANSPORT_MODE_LABELS = {
+  tram: "Tram",
+  rail: "Rail"
+};
+
 function _normalizedCounts(rawCounts) {
   const normalized = {};
   if (!rawCounts || typeof rawCounts !== "object" || Array.isArray(rawCounts)) {
@@ -33,7 +40,7 @@ function _normalizedCounts(rawCounts) {
 }
 
 function transportSubtierLabel(value) {
-  return TRANSPORT_SUBTIER_LABELS[String(value || "").trim()] || "No recent bus tier";
+  return TRANSPORT_SUBTIER_LABELS[String(value || "").trim()] || "No recent public transport tier";
 }
 
 function transportTierOptions(runtime) {
@@ -47,12 +54,37 @@ function transportTierOptions(runtime) {
   });
 }
 
+function transportModeLabel(value) {
+  return TRANSPORT_MODE_LABELS[String(value || "").trim()] || String(value || "").trim();
+}
+
+function transportModeOptions(runtime) {
+  const counts = _normalizedCounts(runtime && runtime.transport_mode_counts);
+  return TRANSPORT_MODE_ORDER.map(function (mode) {
+    return {
+      value: mode,
+      label: transportModeLabel(mode),
+      count: Number(counts[mode] || 0)
+    };
+  });
+}
+
 function transportFlagCounts(runtime) {
   return _normalizedCounts(runtime && runtime.transport_flag_counts);
 }
 
+function routeModeTokenFilter(mode) {
+  const token = String(mode || "").trim();
+  return [
+    "in",
+    "," + token + ",",
+    ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]
+  ];
+}
+
 function buildTransportLayerFilter(options = {}) {
   const selectedSubtiers = Array.from(options.selectedSubtiers || []);
+  const selectedModes = Array.from(options.selectedModes || []);
   const includeUnscheduled = Boolean(options.includeUnscheduled);
   const requireExceptionOnly = Boolean(options.requireExceptionOnly);
   const clauses = [];
@@ -65,6 +97,10 @@ function buildTransportLayerFilter(options = {}) {
       ["literal", selectedSubtiers]
     ]);
   }
+  selectedModes.forEach(function (mode) {
+    if (!String(mode || "").trim()) return;
+    selectedClauses.push(routeModeTokenFilter(mode));
+  });
   if (includeUnscheduled) {
     selectedClauses.push(["==", ["get", "is_unscheduled_stop"], 1]);
   }
@@ -86,10 +122,15 @@ function buildTransportLayerFilter(options = {}) {
 }
 
 export {
+  TRANSPORT_MODE_LABELS,
+  TRANSPORT_MODE_ORDER,
   TRANSPORT_SUBTIER_LABELS,
   TRANSPORT_SUBTIER_ORDER,
   buildTransportLayerFilter,
+  routeModeTokenFilter,
   transportFlagCounts,
+  transportModeLabel,
+  transportModeOptions,
   transportSubtierLabel,
   transportTierOptions
 };

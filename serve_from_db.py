@@ -76,6 +76,7 @@ class RuntimeState:
     amenity_tier_counts: dict[str, dict[str, int]]
     transport_subtier_counts: dict[str, int]
     transport_flag_counts: dict[str, int]
+    transport_mode_counts: dict[str, int]
     fine_surface_enabled: bool
     surface_shell_dir: Path | None
     surface_score_dir: Path | None
@@ -189,6 +190,16 @@ class RuntimeService:
             )
             if str(flag_name)
         }
+        raw_transport_mode_counts = summary_json.get("transport_mode_counts", {}) or {}
+        transport_mode_counts = {
+            str(mode): int(value)
+            for mode, value in (
+                raw_transport_mode_counts.items()
+                if isinstance(raw_transport_mode_counts, dict)
+                else ()
+            )
+            if str(mode)
+        }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -240,6 +251,7 @@ class RuntimeService:
             amenity_tier_counts=amenity_tier_counts,
             transport_subtier_counts=transport_subtier_counts,
             transport_flag_counts=transport_flag_counts,
+            transport_mode_counts=transport_mode_counts,
             fine_surface_enabled=fine_surface_enabled,
             surface_shell_dir=surface_shell_dir,
             surface_score_dir=surface_score_dir,
@@ -302,6 +314,7 @@ class RuntimeService:
             "amenity_tier_counts": state.amenity_tier_counts,
             "transport_subtier_counts": state.transport_subtier_counts,
             "transport_flag_counts": state.transport_flag_counts,
+            "transport_mode_counts": state.transport_mode_counts,
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,
             "max_zoom": SURFACE_MAX_ZOOM,

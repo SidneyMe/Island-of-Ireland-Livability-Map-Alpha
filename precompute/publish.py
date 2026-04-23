@@ -109,6 +109,24 @@ def _transport_flag_counts(
     return counts
 
 
+def _transport_mode_counts(
+    transport_reality_rows: list[dict[str, Any]] | None,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in transport_reality_rows or []:
+        modes = row.get("route_modes_json") or row.get("route_modes") or []
+        if isinstance(modes, str):
+            modes = [value.strip() for value in modes.split(",")]
+        seen = {
+            str(mode).strip()
+            for mode in modes
+            if str(mode).strip()
+        }
+        for mode in seen:
+            counts[mode] = int(counts.get(mode, 0)) + 1
+    return counts
+
+
 def iter_walk_rows_impl(
     walk_grids: dict[int, list[dict[str, Any]]],
     created_at: datetime,
@@ -318,6 +336,7 @@ def summary_json_impl(
                 "transport_reality_download_url": transport_reality_download_url,
                 "transport_subtier_counts": _transport_subtier_counts(transport_reality_rows),
                 "transport_flag_counts": _transport_flag_counts(transport_reality_rows),
+                "transport_mode_counts": _transport_mode_counts(transport_reality_rows),
             }
         )
     if overture_dataset:

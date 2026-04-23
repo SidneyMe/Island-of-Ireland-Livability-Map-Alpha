@@ -11,6 +11,7 @@ import {
 import {
   buildTransportLayerFilter,
   transportFlagCounts,
+  transportModeOptions,
   transportTierOptions
 } from "./transport_filters.js";
 import {
@@ -126,6 +127,7 @@ const state = {
   gridDebugSnapshotFallbackText: "",
   transportRealityVisible: false,
   selectedTransportSubtiers: new Set(),
+  selectedTransportModes: new Set(),
   transportIncludeUnscheduled: false,
   transportRequireExceptionOnly: false,
   serviceDesertsVisible: false,
@@ -410,11 +412,19 @@ function applyAmenityFilter() {
 }
 
 function transportFilterSummary() {
-  const selectedCount = state.selectedTransportSubtiers.size + (state.transportIncludeUnscheduled ? 1 : 0);
+  const selectedCount = (
+    state.selectedTransportSubtiers.size +
+    state.selectedTransportModes.size +
+    (state.transportIncludeUnscheduled ? 1 : 0)
+  );
   if (!selectedCount) {
     return state.transportRequireExceptionOnly ? "All tiers + holiday filter" : "All tiers";
   }
-  const totalCount = transportTierOptions(state.runtime).length + 1;
+  const totalCount = (
+    transportTierOptions(state.runtime).length +
+    transportModeOptions(state.runtime).length +
+    1
+  );
   const suffix = state.transportRequireExceptionOnly ? " + holiday filter" : "";
   return selectedCount + " of " + totalCount + " selected" + suffix;
 }
@@ -425,6 +435,7 @@ function applyTransportRealityFilter() {
     "transport-reality-circle",
     buildTransportLayerFilter({
       selectedSubtiers: state.selectedTransportSubtiers,
+      selectedModes: state.selectedTransportModes,
       includeUnscheduled: state.transportIncludeUnscheduled,
       requireExceptionOnly: state.transportRequireExceptionOnly
     })
@@ -605,10 +616,10 @@ function buildTransitControls() {
     overlayTextWrap.className = "toggle-label";
 
     const overlayTitle = document.createElement("strong");
-    overlayTitle.textContent = "Show weekly bus service tiers";
+    overlayTitle.textContent = "Show public transport tiers";
 
     const overlaySubtitle = document.createElement("span");
-    overlaySubtitle.textContent = "Base GTFS weekly calendar view";
+    overlaySubtitle.textContent = "GTFS weekly service and mode view";
 
     const overlayInput = document.createElement("input");
     overlayInput.type = "checkbox";
@@ -628,7 +639,7 @@ function buildTransitControls() {
     tierSummary.className = "amenity-tier-summary";
 
     const tierSummaryLabel = document.createElement("span");
-    tierSummaryLabel.textContent = "Weekly service filters";
+    tierSummaryLabel.textContent = "Public transport filters";
 
     const tierMeta = document.createElement("span");
     tierMeta.className = "amenity-tier-meta";
@@ -646,11 +657,16 @@ function buildTransitControls() {
 
     function syncTransportInputs() {
       tierRows.forEach(function (entry) {
-        const isChecked = entry.type === "subtier"
-          ? state.selectedTransportSubtiers.has(entry.value)
-          : (entry.value === "unscheduled"
-              ? state.transportIncludeUnscheduled
-              : state.transportRequireExceptionOnly);
+        let isChecked = false;
+        if (entry.type === "subtier") {
+          isChecked = state.selectedTransportSubtiers.has(entry.value);
+        } else if (entry.type === "mode") {
+          isChecked = state.selectedTransportModes.has(entry.value);
+        } else {
+          isChecked = entry.value === "unscheduled"
+            ? state.transportIncludeUnscheduled
+            : state.transportRequireExceptionOnly;
+        }
         entry.input.checked = isChecked;
         entry.input.disabled = !state.transportRealityVisible;
       });
@@ -690,6 +706,42 @@ function buildTransitControls() {
       });
 
       tierRows.push({ type: "subtier", value: option.value, input: input });
+      textWrap.appendChild(title);
+      textWrap.appendChild(subtitle);
+      row.appendChild(textWrap);
+      row.appendChild(input);
+      tierList.appendChild(row);
+    });
+
+    transportModeOptions(state.runtime).forEach(function (option) {
+      const row = document.createElement("label");
+      row.className = "amenity-tier-row";
+      row.htmlFor = "transport-mode-" + option.value;
+
+      const textWrap = document.createElement("span");
+      textWrap.className = "toggle-label";
+
+      const title = document.createElement("strong");
+      title.textContent = option.label;
+
+      const subtitle = document.createElement("span");
+      subtitle.textContent = String(option.count || 0) + " mapped";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = "transport-mode-" + option.value;
+      input.checked = state.selectedTransportModes.has(option.value);
+      input.addEventListener("change", function () {
+        if (input.checked) {
+          state.selectedTransportModes.add(option.value);
+        } else {
+          state.selectedTransportModes.delete(option.value);
+        }
+        syncTransportInputs();
+        applyTransportRealityFilter();
+      });
+
+      tierRows.push({ type: "mode", value: option.value, input: input });
       textWrap.appendChild(title);
       textWrap.appendChild(subtitle);
       row.appendChild(textWrap);
@@ -1196,6 +1248,7 @@ function initializeApp(runtime) {
     })
   );
   state.selectedTransportSubtiers = new Set();
+  state.selectedTransportModes = new Set();
   state.transportIncludeUnscheduled = false;
   state.transportRequireExceptionOnly = false;
   buildAmenityControls();
