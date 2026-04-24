@@ -911,6 +911,7 @@ class AmenityPhaseIntegrationTests(TestCase):
             transport_reality_rows=[
                 {
                     "bus_service_subtier": "mon_sun",
+                    "bus_frequency_tier": "frequent",
                     "is_unscheduled_stop": False,
                     "has_exception_only_service": False,
                     "has_any_bus_service": True,
@@ -919,6 +920,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                 },
                 {
                     "bus_service_subtier": "weekdays_only",
+                    "bus_frequency_tier": "moderate",
                     "is_unscheduled_stop": False,
                     "has_exception_only_service": True,
                     "has_any_bus_service": True,
@@ -927,6 +929,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                 },
                 {
                     "bus_service_subtier": None,
+                    "bus_frequency_tier": None,
                     "is_unscheduled_stop": True,
                     "has_exception_only_service": False,
                     "has_any_bus_service": False,
@@ -959,6 +962,10 @@ class AmenityPhaseIntegrationTests(TestCase):
         self.assertEqual(
             summary["transport_subtier_counts"],
             {"mon_sun": 1, "weekdays_only": 1},
+        )
+        self.assertEqual(
+            summary["transport_bus_frequency_counts"],
+            {"frequent": 1, "moderate": 1},
         )
         self.assertEqual(
             summary["transport_flag_counts"],

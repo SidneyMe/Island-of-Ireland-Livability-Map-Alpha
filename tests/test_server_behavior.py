@@ -48,6 +48,7 @@ class _FakeService:
                 "parks": {"district": 3},
             },
             "transport_subtier_counts": {"mon_sun": 2, "weekdays_only": 1},
+            "transport_bus_frequency_counts": {"frequent": 2, "moderate": 1},
             "transport_flag_counts": {
                 "is_unscheduled_stop": 1,
                 "has_exception_only_service": 1,
@@ -398,6 +399,7 @@ class RenderAndCliTests(TestCase):
                     "parks": {"district": 3},
                 },
                 "transport_subtier_counts": {"mon_sun": 2, "weekdays_only": 1},
+                "transport_bus_frequency_counts": {"frequent": 2, "moderate": 1},
                 "transport_flag_counts": {
                     "is_unscheduled_stop": 1,
                     "has_exception_only_service": 1,
@@ -455,6 +457,7 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["overture_dataset"], {"last_release": "2026-04-15.0"})
         self.assertEqual(payload["amenity_tier_counts"]["shops"]["corner"], 3)
         self.assertEqual(payload["transport_subtier_counts"]["mon_sun"], 2)
+        self.assertEqual(payload["transport_bus_frequency_counts"], {"frequent": 2, "moderate": 1})
         self.assertEqual(payload["transport_flag_counts"]["is_unscheduled_stop"], 1)
         self.assertEqual(payload["transport_mode_counts"], {"tram": 4, "rail": 6})
         self.assertNotIn("ov_shops", payload["category_colors"])
@@ -498,6 +501,7 @@ class RenderAndCliTests(TestCase):
         self.assertFalse(payload["transport_reality_enabled"])
         self.assertFalse(payload["service_deserts_enabled"])
         self.assertEqual(payload["transport_mode_counts"], {})
+        self.assertEqual(payload["transport_bus_frequency_counts"], {})
 
     def test_runtime_service_uses_dev_config_hash_and_coarse_only_payload(self) -> None:
         manifest = {
@@ -516,6 +520,7 @@ class RenderAndCliTests(TestCase):
                     "parks": {"district": 3},
                 },
                 "transport_subtier_counts": {"mon_sun": 2},
+                "transport_bus_frequency_counts": {"frequent": 2},
                 "transport_flag_counts": {
                     "is_unscheduled_stop": 1,
                     "has_exception_only_service": 0,
@@ -572,6 +577,7 @@ class RenderAndCliTests(TestCase):
                     "parks": {"district": 3},
                 },
                 "transport_subtier_counts": {"mon_sun": 2},
+                "transport_bus_frequency_counts": {"frequent": 2},
                 "transport_flag_counts": {
                     "is_unscheduled_stop": 1,
                     "has_exception_only_service": 0,

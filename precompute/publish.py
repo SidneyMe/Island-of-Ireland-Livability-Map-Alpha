@@ -92,6 +92,18 @@ def _transport_subtier_counts(
     return counts
 
 
+def _transport_bus_frequency_counts(
+    transport_reality_rows: list[dict[str, Any]] | None,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in transport_reality_rows or []:
+        tier = str(row.get("bus_frequency_tier") or "").strip()
+        if not tier:
+            continue
+        counts[tier] = int(counts.get(tier, 0)) + 1
+    return counts
+
+
 def _transport_flag_counts(
     transport_reality_rows: list[dict[str, Any]] | None,
 ) -> dict[str, int]:
@@ -335,6 +347,9 @@ def summary_json_impl(
                 "service_deserts_enabled": bool(service_deserts_enabled),
                 "transport_reality_download_url": transport_reality_download_url,
                 "transport_subtier_counts": _transport_subtier_counts(transport_reality_rows),
+                "transport_bus_frequency_counts": _transport_bus_frequency_counts(
+                    transport_reality_rows
+                ),
                 "transport_flag_counts": _transport_flag_counts(transport_reality_rows),
                 "transport_mode_counts": _transport_mode_counts(transport_reality_rows),
             }

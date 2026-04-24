@@ -47,7 +47,7 @@ https://github.com/user-attachments/assets/e8f3717e-5948-49aa-a1cb-51490ca91f97
 - Builds a compact walk graph with the Rust `walkgraph` helper.
 - Computes livability scores across multiple grid resolutions.
 - Scores access to shops, public transport, healthcare, and parks using tiered units, amenity clustering, and distance decay.
-- Publishes GTFS transport stops with base-calendar weekly bus tiers, commute/off-peak/weekend departure metrics, frequency-derived score units, stricter unscheduled-stop detection, and a service-desert overlay.
+- Publishes GTFS transport stops with base-calendar weekly bus tiers, weekday daytime bus frequency tiers, commute/off-peak/weekend departure metrics, stricter unscheduled-stop detection, and a service-desert overlay.
 - Bakes grid, amenity, transport reality, and service-desert layers into `.livability_cache/livability.pmtiles`.
 - Serves a local MapLibre app from `static/index.html`.
 
@@ -204,7 +204,7 @@ If your app `DATABASE_URL` uses the SQLAlchemy driver form `postgresql+psycopg:/
 
 The transport reality and scoring pipeline uses local GTFS zip files first and only downloads feeds when you explicitly configure feed URLs.
 The active pipeline ingests NTA and Translink only; the standalone TFI Local Link feed is intentionally not configured because current NTA GTFS is treated as the Republic-side source of truth.
-The transport overlay is snapshot-based scheduled GTFS, not live GTFS-RT. Legacy `active_confirmed` / `inactive_confirmed` status still exists for compatibility, while scoring now uses frequency-derived `transport_score_units`. The UI centers on retrospective 7-day bus subtiers such as `Whole week`, `Mon-Sat`, `Weekdays only`, and `Unscheduled`, and popups expose commute, Friday-evening, and score-unit fields.
+The transport overlay is snapshot-based scheduled GTFS, not live GTFS-RT. Legacy `active_confirmed` / `inactive_confirmed` status still exists for compatibility. Bus-only stops now use weekday daytime bus frequency tiers for `transport_score_units`: `frequent` (<=15 min), `moderate` (16-30 min), `low_frequency` (31-60 min), `very_low_frequency` (61-120 min), and `token_skeletal` (>120 min). Rail/tram-only and mixed bus plus rail/tram stops keep the earlier commute/off-peak/weekend formula for now, but still expose bus frequency metadata when bus service is present. The UI keeps retrospective 7-day bus subtiers such as `Whole week`, `Mon-Sat`, `Weekdays only`, and `Unscheduled`, and popups expose bus headway, commute, Friday-evening, and score-unit fields.
 
 Default local zip paths:
 
@@ -389,22 +389,24 @@ The current model now tiers shops, healthcare, and parks by type or size, then c
 
 ### Service reality check
 
-Implemented as the GTFS-first transport reality layer. Stops are sourced from scheduled NTA and Translink feeds, school-only service is excluded from public scoring, and transport scoring now consumes frequency-derived `transport_score_units` rather than flat stop presence.
+Implemented as the GTFS-first transport reality layer. Stops are sourced from scheduled NTA and Translink feeds, school-only service is excluded from public scoring, and bus-only transport scoring now consumes weekday daytime frequency tiers rather than flat stop presence.
 
 - [x] GTFS-first transport reality: stops are sourced directly from NTA + Translink feeds, and stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
 - [x] Separate public services from school-only routes so the latter don't count toward general transit access.
 - [x] Flag service deserts — grid cells with reachable GTFS baseline stops but zero reachable public departures — and expose them as a dedicated overlay.
 - [x] Replace the old binary map view with weekly bus subtiers (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`) derived from base GTFS calendar patterns.
+- [x] Classify bus-only stops by weekday daytime frequency: `frequent`, `moderate`, `low_frequency`, `very_low_frequency`, and `token_skeletal`.
 - [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL. Local export to `.livability_cache/exports/` is generated after each transit refresh; hosted publishing is pending Phase 8.
 
 ### Transport scoring overhaul
 
-Builds on the service reality layer above. Transport scoring now uses scheduled public frequency, with remaining work focused on mode-specific interpretation and nuisance tradeoffs.
+Builds on the service reality layer above. Bus-only transport scoring now uses scheduled public daytime frequency, with remaining work focused on rail/tram interpretation and nuisance tradeoffs.
 
 - [x] Pull GTFS feeds (NTA + Translink) and compute commute, off-peak, weekend, and Friday-evening departures per stop.
 - [x] Replace flat stop-count scoring with frequency-derived `transport_score_units`.
 - [x] Cap low-frequency stops through the 1-5 `transport_score_units` scale so a single rare-service stop cannot match frequent urban transit access.
-- [ ] Tier transport scoring by mode: Luas → rail station → high-frequency bus → rural bus.
+- [x] Use bus weekday daytime headway as the scoring driver for bus-only stops, with no rural/urban distinction.
+- [ ] Design rail/tram-specific scoring without touching the bus frequency model.
 - [ ] Rail proximity sweet spot: reward walking distance to a station, penalize immediate adjacency (noise, dust).
 
 ### Noise and nuisance penalty layer

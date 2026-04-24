@@ -9,6 +9,8 @@ from pathlib import Path
 
 from config import (
     GTFS_ANALYSIS_WINDOW_DAYS,
+    GTFS_BUS_DAYTIME_END_HOUR,
+    GTFS_BUS_DAYTIME_START_HOUR,
     GTFS_LOOKAHEAD_DAYS,
     GTFS_SCHOOL_AM_END_HOUR,
     GTFS_SCHOOL_AM_START_HOUR,
@@ -80,6 +82,8 @@ def run_walkgraph_gtfs_refresh(
                 "commute_am_end_hour": GTFS_COMMUTE_AM_END_HOUR,
                 "commute_pm_start_hour": GTFS_COMMUTE_PM_START_HOUR,
                 "commute_pm_end_hour": GTFS_COMMUTE_PM_END_HOUR,
+                "bus_daytime_start_hour": GTFS_BUS_DAYTIME_START_HOUR,
+                "bus_daytime_end_hour": GTFS_BUS_DAYTIME_END_HOUR,
                 "friday_evening_start_hour": GTFS_FRIDAY_EVENING_START_HOUR,
                 "friday_evening_end_hour": GTFS_FRIDAY_EVENING_END_HOUR,
                 "feeds": [
@@ -159,6 +163,14 @@ def load_gtfs_stop_reality_models(csv_path: Path) -> list[GtfsStopReality]:
                     sunday_deps=float(row.get("sunday_deps") or 0.0),
                     friday_evening_deps=float(row.get("friday_evening_deps") or 0.0),
                     transport_score_units=int(row.get("transport_score_units") or 0),
+                    bus_daytime_deps=float(row.get("bus_daytime_deps") or 0.0),
+                    bus_daytime_headway_min=(
+                        None
+                        if not row.get("bus_daytime_headway_min")
+                        else float(row["bus_daytime_headway_min"])
+                    ),
+                    bus_frequency_tier=(row.get("bus_frequency_tier") or None),
+                    bus_frequency_score_units=int(row.get("bus_frequency_score_units") or 0),
                     last_public_service_date=(
                         None
                         if not row["last_public_service_date"]

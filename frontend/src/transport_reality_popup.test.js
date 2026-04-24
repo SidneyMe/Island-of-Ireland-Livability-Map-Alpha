@@ -11,11 +11,16 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
     weekday_evening_peak_deps: 5,
     friday_evening_deps: 6,
     transport_score_units: 3,
+    bus_daytime_deps: 28,
+    bus_daytime_headway_min: 30,
+    bus_frequency_tier: "moderate",
     route_modes: "bus"
   });
 
-  assert.match(html, /Public transport tier:<\/strong> Whole week/);
+  assert.match(html, /Public transport tier:<\/strong> Moderate \(16-30 min\)/);
   assert.match(html, /Transport score units: 3 \/ 5/);
+  assert.match(html, /Bus frequency: Moderate \(16-30 min\)/);
+  assert.match(html, /Weekday daytime bus headway: 30 min; departures: 28/);
   assert.match(html, /Weekday commute departures: 4 morning \/ 5 evening/);
   assert.match(html, /Friday evening departures: 6 \(Friday 16:00 through Saturday 02:00 am\)/);
   assert.match(html, /Scheduled snapshot departures in current activity window: 21/);
@@ -65,6 +70,7 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
   const html = transportRealityPopupHtml({
     stop_name: "Mixed interchange",
     bus_service_subtier: "mon_sun",
+    bus_frequency_tier: "frequent",
     public_departures_30d: 120,
     route_modes: "bus,rail,tram"
   });

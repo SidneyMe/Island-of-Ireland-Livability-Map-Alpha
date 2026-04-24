@@ -7,6 +7,8 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from config import (
     CACHE_DIR,
     GTFS_ANALYSIS_WINDOW_DAYS,
+    GTFS_BUS_DAYTIME_END_HOUR,
+    GTFS_BUS_DAYTIME_START_HOUR,
     GTFS_LOOKAHEAD_DAYS,
     GTFS_SERVICE_DESERT_WINDOW_DAYS,
     TRANSIT_REALITY_ALGO_VERSION,
@@ -41,6 +43,10 @@ def _feature_properties(row: GtfsStopReality) -> dict[str, object]:
         "sunday_deps": row.sunday_deps,
         "friday_evening_deps": row.friday_evening_deps,
         "transport_score_units": row.transport_score_units,
+        "bus_daytime_deps": row.bus_daytime_deps,
+        "bus_daytime_headway_min": row.bus_daytime_headway_min,
+        "bus_frequency_tier": row.bus_frequency_tier,
+        "bus_frequency_score_units": row.bus_frequency_score_units,
         "last_public_service_date": (
             row.last_public_service_date.isoformat()
             if row.last_public_service_date is not None
@@ -107,6 +113,10 @@ def _readme_text() -> str:
             (
                 "- Frequency fields are scheduled public departures averaged by service-day type; "
                 "Friday evening covers Friday 16:00 through Saturday 02:00 am."
+            ),
+            (
+                "- Bus frequency tiers use public, non-school, weekday bus departures from "
+                f"{GTFS_BUS_DAYTIME_START_HOUR:02d}:00 to {GTFS_BUS_DAYTIME_END_HOUR:02d}:00."
             ),
             "- Stops omitted from GTFS feeds cannot appear in this dataset.",
             "- This dataset is snapshot-based scheduled GTFS data, not live GTFS-RT.",

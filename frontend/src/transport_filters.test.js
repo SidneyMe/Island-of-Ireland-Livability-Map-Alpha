@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   buildTransportLayerFilter,
   routeModeTokenFilter,
+  transportBusFrequencyLabel,
+  transportBusFrequencyOptions,
   transportFlagCounts,
   transportModeOptions,
   transportSubtierLabel,
@@ -14,6 +16,11 @@ const runtime = {
     mon_sun: 10,
     mon_sat: 8,
     weekdays_only: 3
+  },
+  transport_bus_frequency_counts: {
+    frequent: 5,
+    moderate: 4,
+    token_skeletal: 1
   },
   transport_mode_counts: {
     tram: 4,
@@ -30,6 +37,8 @@ const runtime = {
 assert.equal(transportSubtierLabel("mon_sun"), "Whole week");
 assert.equal(transportSubtierLabel("single_day_only"), "Single-day only");
 assert.equal(transportSubtierLabel(null), "No recent public transport tier");
+assert.equal(transportBusFrequencyLabel("frequent"), "Frequent (<=15 min)");
+assert.equal(transportBusFrequencyLabel("very_low_frequency"), "Very low frequency (61-120 min)");
 
 assert.deepEqual(
   transportTierOptions(runtime).map(function (entry) {
@@ -43,6 +52,19 @@ assert.deepEqual(
     ["weekends_only", 0],
     ["single_day_only", 0],
     ["partial_week", 0]
+  ]
+);
+
+assert.deepEqual(
+  transportBusFrequencyOptions(runtime).map(function (entry) {
+    return [entry.value, entry.label, entry.count];
+  }),
+  [
+    ["frequent", "Frequent (<=15 min)", 5],
+    ["moderate", "Moderate (16-30 min)", 4],
+    ["low_frequency", "Low frequency (31-60 min)", 0],
+    ["very_low_frequency", "Very low frequency (61-120 min)", 0],
+    ["token_skeletal", "Token / skeletal (>120 min)", 1]
   ]
 );
 
@@ -66,6 +88,7 @@ assert.deepEqual(
 assert.deepEqual(
   buildTransportLayerFilter({
     selectedSubtiers: new Set(["mon_sat", "weekdays_only"]),
+    selectedBusFrequencies: new Set(["frequent"]),
     selectedModes: new Set(["rail"]),
     includeUnscheduled: true,
     requireExceptionOnly: true
@@ -75,6 +98,7 @@ assert.deepEqual(
     [
       "any",
       ["in", ["coalesce", ["get", "bus_service_subtier"], ""], ["literal", ["mon_sat", "weekdays_only"]]],
+      ["in", ["coalesce", ["get", "bus_frequency_tier"], ""], ["literal", ["frequent"]]],
       ["in", ",rail,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]],
       ["==", ["get", "is_unscheduled_stop"], 1]
     ],

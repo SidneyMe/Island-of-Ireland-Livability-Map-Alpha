@@ -782,6 +782,10 @@ class DbReadTests(TestCase):
                 "sunday_deps": 8.0,
                 "friday_evening_deps": 9.0,
                 "transport_score_units": 3,
+                "bus_daytime_deps": 28.0,
+                "bus_daytime_headway_min": 30.0,
+                "bus_frequency_tier": "moderate",
+                "bus_frequency_score_units": 4,
             }
         ]
         root = SimpleNamespace(
@@ -814,6 +818,10 @@ class DbReadTests(TestCase):
                     "sunday_deps": 8.0,
                     "friday_evening_deps": 9.0,
                     "transport_score_units": 3,
+                    "bus_daytime_deps": 28.0,
+                    "bus_daytime_headway_min": 30.0,
+                    "bus_frequency_tier": "moderate",
+                    "bus_frequency_score_units": 4,
                 }
             ],
         )

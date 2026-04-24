@@ -5,6 +5,8 @@ from datetime import date, timedelta
 import math
 
 from config import (
+    GTFS_BUS_DAYTIME_END_HOUR,
+    GTFS_BUS_DAYTIME_START_HOUR,
     GTFS_COMMUTE_AM_END_HOUR,
     GTFS_COMMUTE_AM_START_HOUR,
     GTFS_COMMUTE_PM_END_HOUR,
@@ -27,6 +29,20 @@ _SECONDS_PER_HOUR = 3600
 _FRIDAY_WEEKDAY = 4
 _SATURDAY_WEEKDAY = 5
 _SUNDAY_WEEKDAY = 6
+_BUS_DAYTIME_WINDOW_MINUTES = (
+    (GTFS_BUS_DAYTIME_END_HOUR - GTFS_BUS_DAYTIME_START_HOUR) % 24
+) * 60
+if _BUS_DAYTIME_WINDOW_MINUTES <= 0:
+    _BUS_DAYTIME_WINDOW_MINUTES += 24 * 60
+
+
+BUS_FREQUENCY_TIER_UNITS = {
+    "frequent": 5,
+    "moderate": 4,
+    "low_frequency": 3,
+    "very_low_frequency": 2,
+    "token_skeletal": 1,
+}
 
 
 def _exception_dates_by_service(dataset: FeedDataset) -> dict[str, dict[date, int]]:
@@ -111,10 +127,34 @@ def _is_friday_evening(seconds: int | None) -> bool:
     )
 
 
+def _is_bus_daytime(seconds: int | None) -> bool:
+    return _hour_window_contains(
+        seconds,
+        start_hour=GTFS_BUS_DAYTIME_START_HOUR,
+        end_hour=GTFS_BUS_DAYTIME_END_HOUR,
+    )
+
+
 def _avg(total: int, dates: set[date]) -> float:
     if not dates:
         return 0.0
     return float(total) / float(len(dates))
+
+
+def bus_frequency_tier_from_headway(headway_minutes: float | None) -> tuple[str | None, int]:
+    if headway_minutes is None or not math.isfinite(headway_minutes) or headway_minutes <= 0.0:
+        return None, 0
+    if headway_minutes <= 15.0:
+        tier = "frequent"
+    elif headway_minutes <= 30.0:
+        tier = "moderate"
+    elif headway_minutes <= 60.0:
+        tier = "low_frequency"
+    elif headway_minutes <= 120.0:
+        tier = "very_low_frequency"
+    else:
+        tier = "token_skeletal"
+    return tier, BUS_FREQUENCY_TIER_UNITS[tier]
 
 
 def transport_score_units_from_frequency(
@@ -276,10 +316,12 @@ def summarize_gtfs_stops(
                 "saturday_total": 0,
                 "sunday_total": 0,
                 "friday_evening_total": 0,
+                "bus_daytime_total": 0,
                 "weekday_dates": set(),
                 "saturday_dates": set(),
                 "sunday_dates": set(),
                 "friday_dates": set(),
+                "bus_daytime_dates": set(),
             },
         )
         stop_payload["route_modes"].add(mode)
@@ -322,6 +364,9 @@ def summarize_gtfs_stops(
                     stop_payload["weekday_evening_peak_total"] += occurrences
                 else:
                     stop_payload["weekday_offpeak_total"] += occurrences
+                if mode == "bus" and _is_bus_daytime(event_seconds):
+                    stop_payload["bus_daytime_total"] += occurrences
+                    stop_payload["bus_daytime_dates"].add(active_date)
             if weekday == _SATURDAY_WEEKDAY:
                 stop_payload["saturday_dates"].add(active_date)
                 stop_payload["saturday_total"] += occurrences
@@ -370,10 +415,12 @@ def summarize_gtfs_stops(
             "saturday_total": 0,
             "sunday_total": 0,
             "friday_evening_total": 0,
+            "bus_daytime_total": 0,
             "weekday_dates": set(),
             "saturday_dates": set(),
             "sunday_dates": set(),
             "friday_dates": set(),
+            "bus_daytime_dates": set(),
         }
 
     summaries: list[StopServiceSummary] = []
@@ -411,7 +458,19 @@ def summarize_gtfs_stops(
             int(payload["friday_evening_total"]),
             set(payload["friday_dates"]),
         )
-        transport_score_units = transport_score_units_from_frequency(
+        bus_daytime_deps = _avg(
+            int(payload["bus_daytime_total"]),
+            set(payload["bus_daytime_dates"]),
+        )
+        bus_daytime_headway_min = (
+            float(_BUS_DAYTIME_WINDOW_MINUTES) / bus_daytime_deps
+            if bus_daytime_deps > 0
+            else None
+        )
+        bus_frequency_tier, bus_frequency_score_units = bus_frequency_tier_from_headway(
+            bus_daytime_headway_min
+        )
+        legacy_transport_score_units = transport_score_units_from_frequency(
             weekday_morning_peak_deps=weekday_morning_peak_deps,
             weekday_evening_peak_deps=weekday_evening_peak_deps,
             weekday_offpeak_deps=weekday_offpeak_deps,
@@ -419,6 +478,12 @@ def summarize_gtfs_stops(
             sunday_deps=sunday_deps,
             friday_evening_deps=friday_evening_deps,
             public_departures_30d=int(payload["public_departures_30d"]),
+        )
+        route_modes = tuple(sorted(payload["route_modes"]))
+        transport_score_units = (
+            bus_frequency_score_units
+            if route_modes == ("bus",)
+            else legacy_transport_score_units
         )
         summaries.append(
             StopServiceSummary(
@@ -435,9 +500,13 @@ def summarize_gtfs_stops(
                 sunday_deps=sunday_deps,
                 friday_evening_deps=friday_evening_deps,
                 transport_score_units=transport_score_units,
+                bus_daytime_deps=bus_daytime_deps,
+                bus_daytime_headway_min=bus_daytime_headway_min,
+                bus_frequency_tier=bus_frequency_tier,
+                bus_frequency_score_units=bus_frequency_score_units,
                 last_public_service_date=payload["last_public_service_date"],
                 last_any_service_date=payload["last_any_service_date"],
-                route_modes=tuple(sorted(payload["route_modes"])),
+                route_modes=route_modes,
                 route_ids=tuple(sorted(payload["route_ids"])),
                 reason_codes=tuple(sorted(payload["reason_codes"])),
                 # Legacy export field name; semantics are now the base weekly bus mask.

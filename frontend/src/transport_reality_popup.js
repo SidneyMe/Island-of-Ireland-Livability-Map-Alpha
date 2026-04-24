@@ -1,5 +1,6 @@
 import {
   TRANSPORT_MODE_ORDER,
+  transportBusFrequencyLabel,
   transportModeLabel,
   transportSubtierLabel
 } from "./transport_filters.js";
@@ -62,6 +63,10 @@ function _modeTierText(properties) {
   return "";
 }
 
+function _busFrequencyTierText(properties) {
+  return transportBusFrequencyLabel(properties.bus_frequency_tier);
+}
+
 function _tierText(properties) {
   if (properties.is_unscheduled_stop) {
     return "Unscheduled";
@@ -70,7 +75,7 @@ function _tierText(properties) {
   if (modeTier) {
     return modeTier;
   }
-  return transportSubtierLabel(properties.bus_service_subtier);
+  return _busFrequencyTierText(properties) || transportSubtierLabel(properties.bus_service_subtier);
 }
 
 function _numberText(value) {
@@ -100,6 +105,19 @@ function _rowHtml(properties) {
       escapeHtml(String(properties.public_departures_30d || 0)) +
       "</p>"
   ];
+  const busFrequencyTier = _busFrequencyTierText(properties);
+  if (busFrequencyTier) {
+    detailLines.splice(
+      2,
+      0,
+      "<p>Bus frequency: " + escapeHtml(busFrequencyTier) + "</p>",
+      "<p>Weekday daytime bus headway: " +
+        escapeHtml(_numberText(properties.bus_daytime_headway_min)) +
+        " min; departures: " +
+        escapeHtml(_numberText(properties.bus_daytime_deps)) +
+        "</p>"
+    );
+  }
   const routeModes = _routeModesText(properties);
   if (routeModes) {
     detailLines.push("<p>Modes: " + escapeHtml(routeModes) + "</p>");

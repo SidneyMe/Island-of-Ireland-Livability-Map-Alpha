@@ -305,7 +305,12 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
   - `weekday_offpeak_deps` for weekday service outside those commute windows.
   - `saturday_deps` and `sunday_deps`.
   - `friday_evening_deps` for Friday 16:00 through Saturday 02:00 am.
-- Compute `transport_score_units` from those fields. Commute windows dominate; Friday evening adds useful nightlife-era coverage; off-peak and weekend service are secondary.
+- Compute `transport_score_units` from those fields for rail/tram-only and mixed bus plus rail/tram stops. Commute windows dominate; Friday evening adds useful nightlife-era coverage; off-peak and weekend service are secondary.
+- For bus-only stops, compute weekday daytime bus frequency from public, non-school bus departures between 06:00 and 20:00:
+  - `bus_daytime_deps` is the average daytime bus departures over active weekday service days in the analysis window.
+  - `bus_daytime_headway_min` is `840 / bus_daytime_deps`.
+  - `bus_frequency_tier` buckets headway as `frequent` (<=15 min), `moderate` (16-30 min), `low_frequency` (31-60 min), `very_low_frequency` (61-120 min), or `token_skeletal` (>120 min).
+  - `bus_frequency_score_units` is 5, 4, 3, 2, or 1 respectively, and is the scoring driver for bus-only stops.
 - School-only service is excluded from all public frequency metrics.
 - Friday evening is stored as a future hook for nightlife/noise calibration, but this phase does not subtract any nightlife penalty.
 
@@ -313,20 +318,21 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 
 - Python and Rust GTFS refresh paths now preserve stop-time event seconds and emit the frequency columns into derived CSV artifacts.
 - Migration `20260423_000010_transport_frequency_scoring.py` persists the frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
-- `transport_score_units` now flows through DB reads, scoring amenity rows, PMTiles metadata, the standalone export bundle, and transport popups.
-- `TRANSIT_REALITY_ALGO_VERSION = 7` and `PMTILES_SCHEMA_VERSION = 7` invalidate stale transport and tile outputs.
+- Migration `20260424_000011_bus_frequency_tiers.py` persists weekday daytime bus frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
+- `transport_score_units` plus bus frequency metadata now flows through DB reads, scoring amenity rows, PMTiles metadata, runtime summaries, frontend filters, the standalone export bundle, and transport popups.
+- `TRANSIT_REALITY_ALGO_VERSION = 8`, `CACHE_SCHEMA_VERSION = 12`, and `PMTILES_SCHEMA_VERSION = 8` invalidate stale transport, cache, and tile outputs.
 
-### Mode tiering
+### Deferred mode tiering
 
-**What:** Luas → rail → high-frequency bus → rural bus.
+**What:** Rail/tram interpretation, deferred until the rail model is ready.
 
 **How:**
 
-- Base weight per mode, multiplied by the frequency factor from departures-per-stop.
+- Bus-only stops now use simple weekday daytime frequency buckets, with no rural/urban distinction.
+- Rail/tram-only and mixed stops deliberately keep the existing formula until the rail model is designed.
 - **Luas:** anywhere on the Green or Red line gets a significant bonus — high frequency, high capacity, high reliability.
 - **Rail:** strong bonus for cells within walking distance of an active station.
 - **High-frequency bus:** ≥4 departures per hour during the day.
-- **Rural bus:** minimal weight even when technically present.
 
 ### Rail proximity sweet spot
 
@@ -337,21 +343,19 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 - Distance-decay bonus centred ~300–500 m from the station — close enough to walk, far enough to avoid track noise.
 - Overlaps with the Phase 4 railway-track noise penalty; the net effect is a sweet-spot curve with a rewarding plateau.
 
-### Rural bus minimal weight
+### ~~Rural bus minimal weight~~ Deferred
 
-**What:** Cap rural bus contributions so a single low-frequency stop cannot match urban transit access.
+**What:** Previously proposed cap rural bus contributions so a single low-frequency stop cannot match urban transit access.
 
 **How:**
 
-- Keep surviving rural stops in the scoring model to not completely zero out rural areas.
-- Hard cap on their contribution, enforced at the category level.
-- The filtering in Phase 1 already removes the ghost stops; this cap handles the ones that are real but infrequent.
+- Not implemented in this slice. Frequency is the whole bus story for now: if a bus stop runs often enough, it is good service regardless of rural/urban context.
 
 **Done so far:**
 
 - `transport_score_units` compresses each stop into a capped 1-5 score-unit scale.
 - Very low-frequency public service survives as a small contribution instead of matching frequent urban corridors.
-- A fuller rural-vs-urban bus distinction remains part of mode tiering.
+- A fuller rural-vs-urban bus distinction is deferred and not active in the current model.
 
 ---
 

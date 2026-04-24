@@ -26,6 +26,22 @@ const TRANSPORT_MODE_LABELS = {
   rail: "Rail"
 };
 
+const TRANSPORT_BUS_FREQUENCY_ORDER = [
+  "frequent",
+  "moderate",
+  "low_frequency",
+  "very_low_frequency",
+  "token_skeletal"
+];
+
+const TRANSPORT_BUS_FREQUENCY_LABELS = {
+  frequent: "Frequent (<=15 min)",
+  moderate: "Moderate (16-30 min)",
+  low_frequency: "Low frequency (31-60 min)",
+  very_low_frequency: "Very low frequency (61-120 min)",
+  token_skeletal: "Token / skeletal (>120 min)"
+};
+
 function _normalizedCounts(rawCounts) {
   const normalized = {};
   if (!rawCounts || typeof rawCounts !== "object" || Array.isArray(rawCounts)) {
@@ -69,6 +85,21 @@ function transportModeOptions(runtime) {
   });
 }
 
+function transportBusFrequencyLabel(value) {
+  return TRANSPORT_BUS_FREQUENCY_LABELS[String(value || "").trim()] || "";
+}
+
+function transportBusFrequencyOptions(runtime) {
+  const counts = _normalizedCounts(runtime && runtime.transport_bus_frequency_counts);
+  return TRANSPORT_BUS_FREQUENCY_ORDER.map(function (tier) {
+    return {
+      value: tier,
+      label: transportBusFrequencyLabel(tier),
+      count: Number(counts[tier] || 0)
+    };
+  });
+}
+
 function transportFlagCounts(runtime) {
   return _normalizedCounts(runtime && runtime.transport_flag_counts);
 }
@@ -84,6 +115,7 @@ function routeModeTokenFilter(mode) {
 
 function buildTransportLayerFilter(options = {}) {
   const selectedSubtiers = Array.from(options.selectedSubtiers || []);
+  const selectedBusFrequencies = Array.from(options.selectedBusFrequencies || []);
   const selectedModes = Array.from(options.selectedModes || []);
   const includeUnscheduled = Boolean(options.includeUnscheduled);
   const requireExceptionOnly = Boolean(options.requireExceptionOnly);
@@ -95,6 +127,13 @@ function buildTransportLayerFilter(options = {}) {
       "in",
       ["coalesce", ["get", "bus_service_subtier"], ""],
       ["literal", selectedSubtiers]
+    ]);
+  }
+  if (selectedBusFrequencies.length > 0) {
+    selectedClauses.push([
+      "in",
+      ["coalesce", ["get", "bus_frequency_tier"], ""],
+      ["literal", selectedBusFrequencies]
     ]);
   }
   selectedModes.forEach(function (mode) {
@@ -122,12 +161,16 @@ function buildTransportLayerFilter(options = {}) {
 }
 
 export {
+  TRANSPORT_BUS_FREQUENCY_LABELS,
+  TRANSPORT_BUS_FREQUENCY_ORDER,
   TRANSPORT_MODE_LABELS,
   TRANSPORT_MODE_ORDER,
   TRANSPORT_SUBTIER_LABELS,
   TRANSPORT_SUBTIER_ORDER,
   buildTransportLayerFilter,
   routeModeTokenFilter,
+  transportBusFrequencyLabel,
+  transportBusFrequencyOptions,
   transportFlagCounts,
   transportModeLabel,
   transportModeOptions,

@@ -139,6 +139,10 @@ _TRANSPORT_REALITY_TILE_SQL = text(
             t.sunday_deps,
             t.friday_evening_deps,
             t.transport_score_units,
+            t.bus_daytime_deps,
+            COALESCE(t.bus_daytime_headway_min, 0.0) AS bus_daytime_headway_min,
+            COALESCE(t.bus_frequency_tier, '') AS bus_frequency_tier,
+            t.bus_frequency_score_units,
             COALESCE(t.bus_active_days_mask_7d, '') AS bus_active_days_mask_7d,
             COALESCE(t.bus_service_subtier, '') AS bus_service_subtier,
             COALESCE(

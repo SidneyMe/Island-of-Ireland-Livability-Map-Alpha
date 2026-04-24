@@ -11,6 +11,7 @@ import {
 import {
   buildTransportLayerFilter,
   transportFlagCounts,
+  transportBusFrequencyOptions,
   transportModeOptions,
   transportTierOptions
 } from "./transport_filters.js";
@@ -131,6 +132,7 @@ const state = {
   gridDebugSnapshotFallbackText: "",
   transportRealityVisible: false,
   selectedTransportSubtiers: new Set(),
+  selectedTransportBusFrequencies: new Set(),
   selectedTransportModes: new Set(),
   transportIncludeUnscheduled: false,
   transportRequireExceptionOnly: false,
@@ -418,6 +420,7 @@ function applyAmenityFilter() {
 function transportFilterSummary() {
   const selectedCount = (
     state.selectedTransportSubtiers.size +
+    state.selectedTransportBusFrequencies.size +
     state.selectedTransportModes.size +
     (state.transportIncludeUnscheduled ? 1 : 0)
   );
@@ -426,6 +429,7 @@ function transportFilterSummary() {
   }
   const totalCount = (
     transportTierOptions(state.runtime).length +
+    transportBusFrequencyOptions(state.runtime).length +
     transportModeOptions(state.runtime).length +
     1
   );
@@ -439,6 +443,7 @@ function applyTransportRealityFilter() {
     "transport-reality-circle",
     buildTransportLayerFilter({
       selectedSubtiers: state.selectedTransportSubtiers,
+      selectedBusFrequencies: state.selectedTransportBusFrequencies,
       selectedModes: state.selectedTransportModes,
       includeUnscheduled: state.transportIncludeUnscheduled,
       requireExceptionOnly: state.transportRequireExceptionOnly
@@ -664,6 +669,8 @@ function buildTransitControls() {
         let isChecked = false;
         if (entry.type === "subtier") {
           isChecked = state.selectedTransportSubtiers.has(entry.value);
+        } else if (entry.type === "bus_frequency") {
+          isChecked = state.selectedTransportBusFrequencies.has(entry.value);
         } else if (entry.type === "mode") {
           isChecked = state.selectedTransportModes.has(entry.value);
         } else {
@@ -710,6 +717,42 @@ function buildTransitControls() {
       });
 
       tierRows.push({ type: "subtier", value: option.value, input: input });
+      textWrap.appendChild(title);
+      textWrap.appendChild(subtitle);
+      row.appendChild(textWrap);
+      row.appendChild(input);
+      tierList.appendChild(row);
+    });
+
+    transportBusFrequencyOptions(state.runtime).forEach(function (option) {
+      const row = document.createElement("label");
+      row.className = "amenity-tier-row";
+      row.htmlFor = "transport-bus-frequency-" + option.value;
+
+      const textWrap = document.createElement("span");
+      textWrap.className = "toggle-label";
+
+      const title = document.createElement("strong");
+      title.textContent = option.label;
+
+      const subtitle = document.createElement("span");
+      subtitle.textContent = String(option.count || 0) + " mapped";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = "transport-bus-frequency-" + option.value;
+      input.checked = state.selectedTransportBusFrequencies.has(option.value);
+      input.addEventListener("change", function () {
+        if (input.checked) {
+          state.selectedTransportBusFrequencies.add(option.value);
+        } else {
+          state.selectedTransportBusFrequencies.delete(option.value);
+        }
+        syncTransportInputs();
+        applyTransportRealityFilter();
+      });
+
+      tierRows.push({ type: "bus_frequency", value: option.value, input: input });
       textWrap.appendChild(title);
       textWrap.appendChild(subtitle);
       row.appendChild(textWrap);
@@ -1251,6 +1294,7 @@ function initializeApp(runtime) {
     })
   );
   state.selectedTransportSubtiers = new Set();
+  state.selectedTransportBusFrequencies = new Set();
   state.selectedTransportModes = new Set();
   state.transportIncludeUnscheduled = false;
   state.transportRequireExceptionOnly = false;

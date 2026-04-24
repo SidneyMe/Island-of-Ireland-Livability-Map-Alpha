@@ -32,7 +32,11 @@ from transit.models import (
     StopServiceSummary,
 )
 from transit.rust_gtfs import load_gtfs_stop_reality_models, run_walkgraph_gtfs_refresh
-from transit.service import expand_service_windows, summarize_gtfs_stops
+from transit.service import (
+    expand_service_windows,
+    summarize_gtfs_stops,
+    transport_score_units_from_frequency,
+)
 
 
 NTA_GTFS_SNAPSHOT_PATH = Path("gtfs/nta_gtfs.zip")
@@ -337,40 +341,115 @@ class TransitRealityRewriteTests(TestCase):
         self.assertEqual(row.weekday_morning_peak_deps, 16)
         self.assertEqual(row.weekday_evening_peak_deps, 16)
         self.assertEqual(row.weekday_offpeak_deps, 80)
+        self.assertEqual(row.bus_daytime_deps, 96)
+        self.assertEqual(row.bus_frequency_tier, "frequent")
+        self.assertEqual(row.bus_frequency_score_units, 5)
         self.assertEqual(row.transport_score_units, 5)
 
-    def test_offpeak_volume_cannot_outscore_commute_service(self) -> None:
-        commute_dataset = _single_stop_dataset(
+    def test_bus_only_scoring_uses_weekday_daytime_frequency_buckets(self) -> None:
+        cases = (
+            (56, 15.0, "frequent", 5),
+            (28, 30.0, "moderate", 4),
+            (14, 60.0, "low_frequency", 3),
+            (7, 120.0, "very_low_frequency", 2),
+            (6, 140.0, "token_skeletal", 1),
+        )
+
+        for departures, expected_headway, expected_tier, expected_units in cases:
+            with self.subTest(expected_tier=expected_tier):
+                dataset = _single_stop_dataset(
+                    service_start=date(2026, 4, 1),
+                    service_end=date(2026, 4, 30),
+                )
+                dataset.stop_service_time_occurrences = {
+                    ("S1", "SVC1", "R1", "bus", 12 * 3600): departures,
+                }
+
+                row = derive_gtfs_stop_reality(
+                    [dataset],
+                    _summaries_for_dataset(dataset),
+                    reality_fingerprint="reality-123",
+                    import_fingerprint="import-123",
+                )[0]
+
+                self.assertEqual(row.bus_daytime_deps, departures)
+                self.assertAlmostEqual(row.bus_daytime_headway_min or 0.0, expected_headway)
+                self.assertEqual(row.bus_frequency_tier, expected_tier)
+                self.assertEqual(row.bus_frequency_score_units, expected_units)
+                self.assertEqual(row.transport_score_units, expected_units)
+
+    def test_rail_only_rows_keep_existing_frequency_score_without_bus_tier(self) -> None:
+        dataset = _single_stop_dataset(
             service_start=date(2026, 4, 1),
             service_end=date(2026, 4, 30),
         )
-        commute_dataset.stop_service_time_occurrences = {
-            ("S1", "SVC1", "R1", "bus", 5 * 3600): 16,
-            ("S1", "SVC1", "R1", "bus", 17 * 3600): 16,
+        dataset.stop_service_occurrences = {("S1", "SVC1", "R1", "rail"): 1}
+        dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "rail", 5 * 3600): 16,
+            ("S1", "SVC1", "R1", "rail", 17 * 3600): 16,
         }
-        offpeak_dataset = _single_stop_dataset(
+        dataset.service_route_modes = {"SVC1": {"rail"}}
+
+        row = derive_gtfs_stop_reality(
+            [dataset],
+            _summaries_for_dataset(dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+
+        expected_score = transport_score_units_from_frequency(
+            weekday_morning_peak_deps=row.weekday_morning_peak_deps,
+            weekday_evening_peak_deps=row.weekday_evening_peak_deps,
+            weekday_offpeak_deps=row.weekday_offpeak_deps,
+            saturday_deps=row.saturday_deps,
+            sunday_deps=row.sunday_deps,
+            friday_evening_deps=row.friday_evening_deps,
+            public_departures_30d=row.public_departures_30d,
+        )
+        self.assertEqual(row.route_modes, ("rail",))
+        self.assertIsNone(row.bus_frequency_tier)
+        self.assertEqual(row.bus_frequency_score_units, 0)
+        self.assertEqual(row.bus_daytime_deps, 0)
+        self.assertEqual(row.transport_score_units, expected_score)
+
+    def test_mixed_bus_rail_rows_expose_bus_tier_but_keep_existing_score(self) -> None:
+        dataset = _single_stop_dataset(
             service_start=date(2026, 4, 1),
             service_end=date(2026, 4, 30),
         )
-        offpeak_dataset.stop_service_time_occurrences = {
-            ("S1", "SVC1", "R1", "bus", 12 * 3600): 200,
+        dataset.stop_service_occurrences = {
+            ("S1", "SVC1", "R1", "bus"): 1,
+            ("S1", "SVC1", "R2", "rail"): 1,
         }
+        dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 12 * 3600): 14,
+            ("S1", "SVC1", "R2", "rail", 5 * 3600): 16,
+            ("S1", "SVC1", "R2", "rail", 17 * 3600): 16,
+        }
+        dataset.service_route_ids = {"SVC1": {"R1", "R2"}}
+        dataset.service_route_modes = {"SVC1": {"bus", "rail"}}
 
-        commute_row = derive_gtfs_stop_reality(
-            [commute_dataset],
-            _summaries_for_dataset(commute_dataset),
+        row = derive_gtfs_stop_reality(
+            [dataset],
+            _summaries_for_dataset(dataset),
             reality_fingerprint="reality-123",
             import_fingerprint="import-123",
         )[0]
-        offpeak_row = derive_gtfs_stop_reality(
-            [offpeak_dataset],
-            _summaries_for_dataset(offpeak_dataset),
-            reality_fingerprint="reality-123",
-            import_fingerprint="import-123",
-        )[0]
 
-        self.assertGreater(commute_row.transport_score_units, offpeak_row.transport_score_units)
-        self.assertEqual(offpeak_row.transport_score_units, 1)
+        expected_score = transport_score_units_from_frequency(
+            weekday_morning_peak_deps=row.weekday_morning_peak_deps,
+            weekday_evening_peak_deps=row.weekday_evening_peak_deps,
+            weekday_offpeak_deps=row.weekday_offpeak_deps,
+            saturday_deps=row.saturday_deps,
+            sunday_deps=row.sunday_deps,
+            friday_evening_deps=row.friday_evening_deps,
+            public_departures_30d=row.public_departures_30d,
+        )
+        self.assertEqual(row.route_modes, ("bus", "rail"))
+        self.assertEqual(row.bus_frequency_tier, "low_frequency")
+        self.assertEqual(row.bus_frequency_score_units, 3)
+        self.assertEqual(row.transport_score_units, expected_score)
+        self.assertNotEqual(row.transport_score_units, row.bus_frequency_score_units)
 
     def test_friday_evening_counts_through_saturday_2am_without_dominating(self) -> None:
         friday_dataset = _single_stop_dataset(
@@ -449,6 +528,10 @@ class TransitRealityRewriteTests(TestCase):
         self.assertEqual(row.reality_status, "school_only_confirmed")
         self.assertEqual(row.weekday_morning_peak_deps, 0)
         self.assertEqual(row.weekday_evening_peak_deps, 0)
+        self.assertEqual(row.bus_daytime_deps, 0)
+        self.assertIsNone(row.bus_daytime_headway_min)
+        self.assertIsNone(row.bus_frequency_tier)
+        self.assertEqual(row.bus_frequency_score_units, 0)
         self.assertEqual(row.transport_score_units, 0)
 
     def test_derive_gtfs_stop_reality_marks_beyond_lookahead_service_inactive(self) -> None:
@@ -740,12 +823,17 @@ class TransitExportAndLoaderTests(TestCase):
         self.assertIn("weekday_morning_peak_deps", properties)
         self.assertIn("friday_evening_deps", properties)
         self.assertIn("transport_score_units", properties)
+        self.assertIn("bus_daytime_deps", properties)
+        self.assertIn("bus_daytime_headway_min", properties)
+        self.assertIn("bus_frequency_tier", properties)
+        self.assertIn("bus_frequency_score_units", properties)
         self.assertNotIn("osm_source_ref", properties)
         self.assertNotIn("match_status", properties)
         self.assertIn("bus_service_subtier", properties)
         self.assertIn("has_any_bus_service", properties)
         self.assertIn("GTFS", readme_text)
         self.assertIn("directly from configured GTFS feeds", readme_text)
+        self.assertIn("weekday bus departures from 06:00 to 20:00", readme_text)
 
     def test_load_gtfs_stop_reality_models_parses_csv_payload(self) -> None:
         with TemporaryDirectory() as tmp_name:
@@ -753,8 +841,8 @@ class TransitExportAndLoaderTests(TestCase):
             csv_path.write_text(
                 "\n".join(
                     (
-                        "reality_fingerprint,import_fingerprint,source_ref,stop_name,feed_id,stop_id,source_status,reality_status,school_only_state,public_departures_7d,public_departures_30d,school_only_departures_30d,weekday_morning_peak_deps,weekday_evening_peak_deps,weekday_offpeak_deps,saturday_deps,sunday_deps,friday_evening_deps,transport_score_units,last_public_service_date,last_any_service_date,bus_active_days_mask_7d,bus_service_subtier,is_unscheduled_stop,has_exception_only_service,has_any_bus_service,has_daily_bus_service,route_modes_json,source_reason_codes_json,reality_reason_codes_json,lat,lon,created_at",
-                        'reality-123,import-123,gtfs/nta/S1,Main Street,nta,S1,gtfs_direct,active_confirmed,no,7,21,0,4,5,6,7,8,9,3,2026-04-14,2026-04-14,1111111,mon_sun,false,false,true,true,"[""bus""]","[""gtfs_direct_source""]","[""public_service_present""]",53.35,-6.26,2026-04-14T00:00:00+00:00',
+                        "reality_fingerprint,import_fingerprint,source_ref,stop_name,feed_id,stop_id,source_status,reality_status,school_only_state,public_departures_7d,public_departures_30d,school_only_departures_30d,weekday_morning_peak_deps,weekday_evening_peak_deps,weekday_offpeak_deps,saturday_deps,sunday_deps,friday_evening_deps,transport_score_units,bus_daytime_deps,bus_daytime_headway_min,bus_frequency_tier,bus_frequency_score_units,last_public_service_date,last_any_service_date,bus_active_days_mask_7d,bus_service_subtier,is_unscheduled_stop,has_exception_only_service,has_any_bus_service,has_daily_bus_service,route_modes_json,source_reason_codes_json,reality_reason_codes_json,lat,lon,created_at",
+                        'reality-123,import-123,gtfs/nta/S1,Main Street,nta,S1,gtfs_direct,active_confirmed,no,7,21,0,4,5,6,7,8,9,3,28,30,moderate,4,2026-04-14,2026-04-14,1111111,mon_sun,false,false,true,true,"[""bus""]","[""gtfs_direct_source""]","[""public_service_present""]",53.35,-6.26,2026-04-14T00:00:00+00:00',
                     )
                 ),
                 encoding="utf-8",
@@ -773,6 +861,10 @@ class TransitExportAndLoaderTests(TestCase):
         self.assertEqual(rows[0].weekday_morning_peak_deps, 4)
         self.assertEqual(rows[0].friday_evening_deps, 9)
         self.assertEqual(rows[0].transport_score_units, 3)
+        self.assertEqual(rows[0].bus_daytime_deps, 28)
+        self.assertEqual(rows[0].bus_daytime_headway_min, 30)
+        self.assertEqual(rows[0].bus_frequency_tier, "moderate")
+        self.assertEqual(rows[0].bus_frequency_score_units, 4)
 
 
 class TransitRustRefreshTests(TestCase):
@@ -797,6 +889,8 @@ class TransitRustRefreshTests(TestCase):
 
         self.assertEqual(config_payload["matcher_version"], TRANSIT_REALITY_ALGO_VERSION)
         self.assertEqual(config_payload["commute_am_start_hour"], 4)
+        self.assertEqual(config_payload["bus_daytime_start_hour"], 6)
+        self.assertEqual(config_payload["bus_daytime_end_hour"], 20)
         self.assertEqual(config_payload["friday_evening_end_hour"], 2)
         self.assertNotIn("osm_features_path", config_payload)
         self.assertNotIn("match_radius_m", config_payload)

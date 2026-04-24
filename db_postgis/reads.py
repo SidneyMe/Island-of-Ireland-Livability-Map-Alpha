@@ -99,6 +99,10 @@ def load_transport_reality_rows_for_scoring(
                 transit_gtfs_stop_reality.c.sunday_deps,
                 transit_gtfs_stop_reality.c.friday_evening_deps,
                 transit_gtfs_stop_reality.c.transport_score_units,
+                transit_gtfs_stop_reality.c.bus_daytime_deps,
+                transit_gtfs_stop_reality.c.bus_daytime_headway_min,
+                transit_gtfs_stop_reality.c.bus_frequency_tier,
+                transit_gtfs_stop_reality.c.bus_frequency_score_units,
             )
             .where(transit_gtfs_stop_reality.c.reality_fingerprint == reality_fingerprint)
             .where(
@@ -126,6 +130,14 @@ def load_transport_reality_rows_for_scoring(
             "sunday_deps": float(row["sunday_deps"] or 0.0),
             "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
             "transport_score_units": int(row["transport_score_units"] or 0),
+            "bus_daytime_deps": float(row["bus_daytime_deps"] or 0.0),
+            "bus_daytime_headway_min": (
+                None
+                if row["bus_daytime_headway_min"] is None
+                else float(row["bus_daytime_headway_min"])
+            ),
+            "bus_frequency_tier": row["bus_frequency_tier"],
+            "bus_frequency_score_units": int(row["bus_frequency_score_units"] or 0),
         }
         for row in rows
     ]
@@ -164,6 +176,14 @@ def load_transport_reality_points(
                 "sunday_deps": float(row["sunday_deps"] or 0.0),
                 "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
                 "transport_score_units": int(row["transport_score_units"] or 0),
+                "bus_daytime_deps": float(row["bus_daytime_deps"] or 0.0),
+                "bus_daytime_headway_min": (
+                    None
+                    if row["bus_daytime_headway_min"] is None
+                    else float(row["bus_daytime_headway_min"])
+                ),
+                "bus_frequency_tier": row["bus_frequency_tier"],
+                "bus_frequency_score_units": int(row["bus_frequency_score_units"] or 0),
                 "last_public_service_date": row["last_public_service_date"],
                 "last_any_service_date": row["last_any_service_date"],
                 "bus_active_days_mask_7d": row.get("bus_active_days_mask_7d"),

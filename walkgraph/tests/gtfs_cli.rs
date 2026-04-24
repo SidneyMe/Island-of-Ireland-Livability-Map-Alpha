@@ -79,6 +79,8 @@ fn write_gtfs_config(config_path: &Path, zip_path: &Path) {
             "commute_am_end_hour": 8,
             "commute_pm_start_hour": 16,
             "commute_pm_end_hour": 20,
+            "bus_daytime_start_hour": 6,
+            "bus_daytime_end_hour": 20,
             "friday_evening_start_hour": 16,
             "friday_evening_end_hour": 2,
             "feeds": [{
@@ -137,6 +139,7 @@ fn gtfs_refresh_command_writes_expected_artifacts() {
 
     let reality_text = fs::read_to_string(reality_path).expect("read reality csv");
     assert!(reality_text.contains("source_status"));
+    assert!(reality_text.contains("bus_frequency_tier"));
     assert!(reality_text.contains("gtfs_direct"));
     assert!(reality_text.contains("school_only_confirmed"));
     assert!(reality_text.contains("\"school_only_departures_present\""));

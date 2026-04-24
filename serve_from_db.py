@@ -75,6 +75,7 @@ class RuntimeState:
     amenity_counts: dict[str, int]
     amenity_tier_counts: dict[str, dict[str, int]]
     transport_subtier_counts: dict[str, int]
+    transport_bus_frequency_counts: dict[str, int]
     transport_flag_counts: dict[str, int]
     transport_mode_counts: dict[str, int]
     fine_surface_enabled: bool
@@ -180,6 +181,16 @@ class RuntimeService:
             )
             if str(subtier)
         }
+        raw_transport_bus_frequency_counts = summary_json.get("transport_bus_frequency_counts", {}) or {}
+        transport_bus_frequency_counts = {
+            str(tier): int(value)
+            for tier, value in (
+                raw_transport_bus_frequency_counts.items()
+                if isinstance(raw_transport_bus_frequency_counts, dict)
+                else ()
+            )
+            if str(tier)
+        }
         raw_transport_flag_counts = summary_json.get("transport_flag_counts", {}) or {}
         transport_flag_counts = {
             str(flag_name): int(value)
@@ -250,6 +261,7 @@ class RuntimeService:
             amenity_counts=amenity_counts,
             amenity_tier_counts=amenity_tier_counts,
             transport_subtier_counts=transport_subtier_counts,
+            transport_bus_frequency_counts=transport_bus_frequency_counts,
             transport_flag_counts=transport_flag_counts,
             transport_mode_counts=transport_mode_counts,
             fine_surface_enabled=fine_surface_enabled,
@@ -313,6 +325,7 @@ class RuntimeService:
             "amenity_counts": state.amenity_counts,
             "amenity_tier_counts": state.amenity_tier_counts,
             "transport_subtier_counts": state.transport_subtier_counts,
+            "transport_bus_frequency_counts": state.transport_bus_frequency_counts,
             "transport_flag_counts": state.transport_flag_counts,
             "transport_mode_counts": state.transport_mode_counts,
             "category_colors": CATEGORY_COLORS,

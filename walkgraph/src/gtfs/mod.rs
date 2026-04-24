@@ -35,6 +35,8 @@ struct GtfsRefreshConfig {
     commute_am_end_hour: u8,
     commute_pm_start_hour: u8,
     commute_pm_end_hour: u8,
+    bus_daytime_start_hour: u8,
+    bus_daytime_end_hour: u8,
     friday_evening_start_hour: u8,
     friday_evening_end_hour: u8,
     feeds: Vec<FeedInput>,
@@ -64,6 +66,8 @@ struct RunSettings {
     commute_am_end_hour: u8,
     commute_pm_start_hour: u8,
     commute_pm_end_hour: u8,
+    bus_daytime_start_hour: u8,
+    bus_daytime_end_hour: u8,
     friday_evening_start_hour: u8,
     friday_evening_end_hour: u8,
     import_fingerprint: String,
@@ -185,6 +189,10 @@ struct StopServiceSummary {
     sunday_deps: f64,
     friday_evening_deps: f64,
     transport_score_units: u32,
+    bus_daytime_deps: f64,
+    bus_daytime_headway_min: Option<f64>,
+    bus_frequency_tier: Option<String>,
+    bus_frequency_score_units: u32,
     last_public_service_date: Option<Date>,
     last_any_service_date: Option<Date>,
     route_modes: Vec<String>,
@@ -217,6 +225,10 @@ struct GtfsStopReality {
     sunday_deps: f64,
     friday_evening_deps: f64,
     transport_score_units: u32,
+    bus_daytime_deps: f64,
+    bus_daytime_headway_min: Option<f64>,
+    bus_frequency_tier: Option<String>,
+    bus_frequency_score_units: u32,
     last_public_service_date: Option<Date>,
     last_any_service_date: Option<Date>,
     route_modes: Vec<String>,
@@ -341,6 +353,8 @@ pub fn run_gtfs_refresh(config_json: &Path, out_dir: &Path) -> Result<(), Box<dy
         commute_am_end_hour: config.commute_am_end_hour,
         commute_pm_start_hour: config.commute_pm_start_hour,
         commute_pm_end_hour: config.commute_pm_end_hour,
+        bus_daytime_start_hour: config.bus_daytime_start_hour,
+        bus_daytime_end_hour: config.bus_daytime_end_hour,
         friday_evening_start_hour: config.friday_evening_start_hour,
         friday_evening_end_hour: config.friday_evening_end_hour,
         import_fingerprint: config.import_fingerprint.clone(),
@@ -587,6 +601,10 @@ impl DerivedWriters {
                     "sunday_deps",
                     "friday_evening_deps",
                     "transport_score_units",
+                    "bus_daytime_deps",
+                    "bus_daytime_headway_min",
+                    "bus_frequency_tier",
+                    "bus_frequency_score_units",
                     "last_public_service_date",
                     "last_any_service_date",
                     "bus_active_days_mask_7d",
@@ -623,6 +641,10 @@ impl DerivedWriters {
                     "sunday_deps",
                     "friday_evening_deps",
                     "transport_score_units",
+                    "bus_daytime_deps",
+                    "bus_daytime_headway_min",
+                    "bus_frequency_tier",
+                    "bus_frequency_score_units",
                     "last_public_service_date",
                     "last_any_service_date",
                     "bus_active_days_mask_7d",
@@ -693,6 +715,10 @@ impl DerivedWriters {
             &float_string(row.sunday_deps),
             &float_string(row.friday_evening_deps),
             &row.transport_score_units.to_string(),
+            &float_string(row.bus_daytime_deps),
+            &optional_float_string(row.bus_daytime_headway_min),
+            row.bus_frequency_tier.as_deref().unwrap_or(""),
+            &row.bus_frequency_score_units.to_string(),
             &optional_date_string(row.last_public_service_date),
             &optional_date_string(row.last_any_service_date),
             row.bus_active_days_mask_7d.as_deref().unwrap_or(""),
@@ -735,6 +761,10 @@ impl DerivedWriters {
             &float_string(row.sunday_deps),
             &float_string(row.friday_evening_deps),
             &row.transport_score_units.to_string(),
+            &float_string(row.bus_daytime_deps),
+            &optional_float_string(row.bus_daytime_headway_min),
+            row.bus_frequency_tier.as_deref().unwrap_or(""),
+            &row.bus_frequency_score_units.to_string(),
             &optional_date_string(row.last_public_service_date),
             &optional_date_string(row.last_any_service_date),
             row.bus_active_days_mask_7d.as_deref().unwrap_or(""),
@@ -799,6 +829,10 @@ fn bool_string(value: bool) -> &'static str {
 
 fn optional_i32_string(value: Option<i32>) -> String {
     value.map(|number| number.to_string()).unwrap_or_default()
+}
+
+fn optional_float_string(value: Option<f64>) -> String {
+    value.map(float_string).unwrap_or_default()
 }
 
 fn optional_date_string(value: Option<Date>) -> String {
@@ -1709,12 +1743,57 @@ fn is_friday_evening(seconds: Option<i32>, settings: &RunSettings) -> bool {
     )
 }
 
+fn is_bus_daytime(seconds: Option<i32>, settings: &RunSettings) -> bool {
+    hour_window_contains(
+        seconds,
+        settings.bus_daytime_start_hour,
+        settings.bus_daytime_end_hour,
+    )
+}
+
 fn average_departures(total: u32, dates: &BTreeSet<Date>) -> f64 {
     if dates.is_empty() {
         0.0
     } else {
         (total as f64) / (dates.len() as f64)
     }
+}
+
+fn bus_daytime_window_minutes(settings: &RunSettings) -> f64 {
+    let start = u32::from(settings.bus_daytime_start_hour) * 60;
+    let mut end = u32::from(settings.bus_daytime_end_hour) * 60;
+    if end <= start {
+        end += 24 * 60;
+    }
+    (end - start) as f64
+}
+
+fn bus_frequency_tier_from_headway(headway_minutes: Option<f64>) -> (Option<String>, u32) {
+    let Some(headway) = headway_minutes else {
+        return (None, 0);
+    };
+    if !headway.is_finite() || headway <= 0.0 {
+        return (None, 0);
+    }
+    let tier = if headway <= 15.0 {
+        "frequent"
+    } else if headway <= 30.0 {
+        "moderate"
+    } else if headway <= 60.0 {
+        "low_frequency"
+    } else if headway <= 120.0 {
+        "very_low_frequency"
+    } else {
+        "token_skeletal"
+    };
+    let units = match tier {
+        "frequent" => 5,
+        "moderate" => 4,
+        "low_frequency" => 3,
+        "very_low_frequency" => 2,
+        _ => 1,
+    };
+    (Some(tier.to_string()), units)
 }
 
 fn transport_score_units_from_frequency(
@@ -1801,10 +1880,12 @@ fn summarize_gtfs_stops(
         saturday_total: u32,
         sunday_total: u32,
         friday_evening_total: u32,
+        bus_daytime_total: u32,
         weekday_dates: BTreeSet<Date>,
         saturday_dates: BTreeSet<Date>,
         sunday_dates: BTreeSet<Date>,
         friday_dates: BTreeSet<Date>,
+        bus_daytime_dates: BTreeSet<Date>,
     }
 
     let exception_only_service_ids: BTreeSet<String> = dataset
@@ -1873,6 +1954,10 @@ fn summarize_gtfs_stops(
                 } else {
                     payload.weekday_offpeak_total += occurrences;
                 }
+                if mode == "bus" && is_bus_daytime(event_seconds, settings) {
+                    payload.bus_daytime_total += occurrences;
+                    payload.bus_daytime_dates.insert(*active_date);
+                }
             }
             if weekday == 5 {
                 payload.saturday_dates.insert(*active_date);
@@ -1938,7 +2023,16 @@ fn summarize_gtfs_stops(
         let sunday_deps = average_departures(payload.sunday_total, &payload.sunday_dates);
         let friday_evening_deps =
             average_departures(payload.friday_evening_total, &payload.friday_dates);
-        let transport_score_units = transport_score_units_from_frequency(
+        let bus_daytime_deps =
+            average_departures(payload.bus_daytime_total, &payload.bus_daytime_dates);
+        let bus_daytime_headway_min = if bus_daytime_deps > 0.0 {
+            Some(bus_daytime_window_minutes(settings) / bus_daytime_deps)
+        } else {
+            None
+        };
+        let (bus_frequency_tier, bus_frequency_score_units) =
+            bus_frequency_tier_from_headway(bus_daytime_headway_min);
+        let legacy_transport_score_units = transport_score_units_from_frequency(
             weekday_morning_peak_deps,
             weekday_evening_peak_deps,
             weekday_offpeak_deps,
@@ -1947,6 +2041,12 @@ fn summarize_gtfs_stops(
             friday_evening_deps,
             payload.public_departures_30d,
         );
+        let route_modes: Vec<String> = payload.route_modes.into_iter().collect();
+        let transport_score_units = if route_modes.len() == 1 && route_modes[0] == "bus" {
+            bus_frequency_score_units
+        } else {
+            legacy_transport_score_units
+        };
         summaries.push(StopServiceSummary {
             feed_id: dataset.feed_id.clone(),
             stop_id,
@@ -1960,9 +2060,13 @@ fn summarize_gtfs_stops(
             sunday_deps,
             friday_evening_deps,
             transport_score_units,
+            bus_daytime_deps,
+            bus_daytime_headway_min,
+            bus_frequency_tier,
+            bus_frequency_score_units,
             last_public_service_date: payload.last_public_service_date,
             last_any_service_date: payload.last_any_service_date,
-            route_modes: payload.route_modes.into_iter().collect(),
+            route_modes,
             route_ids: payload.route_ids.into_iter().collect(),
             reason_codes: payload.reason_codes.into_iter().collect(),
             // Legacy export field name; semantics are now the base weekly bus mask.
@@ -2062,6 +2166,10 @@ fn derive_gtfs_stop_reality(
             sunday_deps: summary.sunday_deps,
             friday_evening_deps: summary.friday_evening_deps,
             transport_score_units: summary.transport_score_units,
+            bus_daytime_deps: summary.bus_daytime_deps,
+            bus_daytime_headway_min: summary.bus_daytime_headway_min,
+            bus_frequency_tier: summary.bus_frequency_tier.clone(),
+            bus_frequency_score_units: summary.bus_frequency_score_units,
             last_public_service_date: summary.last_public_service_date,
             last_any_service_date: summary.last_any_service_date,
             route_modes: summary.route_modes.clone(),
@@ -2159,6 +2267,10 @@ mod tests {
             sunday_deps: 0.0,
             friday_evening_deps: 0.0,
             transport_score_units: if public_departures_30d > 0 { 1 } else { 0 },
+            bus_daytime_deps: 0.0,
+            bus_daytime_headway_min: None,
+            bus_frequency_tier: None,
+            bus_frequency_score_units: 0,
             last_public_service_date: Some(
                 Date::from_calendar_date(2026, time::Month::April, 14).unwrap(),
             ),
@@ -2192,6 +2304,8 @@ mod tests {
             commute_am_end_hour: 8,
             commute_pm_start_hour: 16,
             commute_pm_end_hour: 20,
+            bus_daytime_start_hour: 6,
+            bus_daytime_end_hour: 20,
             friday_evening_start_hour: 16,
             friday_evening_end_hour: 2,
             import_fingerprint: "import-123".to_string(),
@@ -2436,6 +2550,53 @@ mod tests {
         assert_eq!(summaries[0].bus_active_days_mask_7d.as_deref(), Some("0000000"));
         assert_eq!(summaries[0].bus_service_subtier, None);
         assert!(summaries[0].has_exception_only_service);
+    }
+
+    #[test]
+    fn summarize_gtfs_stops_buckets_bus_daytime_frequency() {
+        let analysis_date = Date::from_calendar_date(2026, time::Month::April, 14).unwrap();
+        let settings = default_settings(analysis_date);
+        let cases = [
+            (56, 15.0, "frequent", 5),
+            (28, 30.0, "moderate", 4),
+            (14, 60.0, "low_frequency", 3),
+            (7, 120.0, "very_low_frequency", 2),
+            (6, 140.0, "token_skeletal", 1),
+        ];
+
+        for (departures, expected_headway, expected_tier, expected_units) in cases {
+            let mut dataset = single_bus_dataset("SVC1", [1, 1, 1, 1, 1, 0, 0], Some(0));
+            dataset.stop_service_time_occurrences.insert(
+                (
+                    "S1".to_string(),
+                    "SVC1".to_string(),
+                    "R1".to_string(),
+                    "bus".to_string(),
+                    Some(12 * 3600),
+                ),
+                departures,
+            );
+            let service_windows = expand_service_windows(&dataset, &settings);
+            let service_classifications =
+                classify_services(&dataset, "reality-123", &service_windows);
+            let summaries = summarize_gtfs_stops(
+                &dataset,
+                &settings,
+                "reality-123",
+                &service_windows,
+                &service_classifications,
+            );
+
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].bus_daytime_deps, f64::from(departures));
+            assert_eq!(
+                summaries[0].bus_daytime_headway_min.unwrap(),
+                expected_headway
+            );
+            assert_eq!(summaries[0].bus_frequency_tier.as_deref(), Some(expected_tier));
+            assert_eq!(summaries[0].bus_frequency_score_units, expected_units);
+            assert_eq!(summaries[0].transport_score_units, expected_units);
+        }
     }
 
     #[test]
