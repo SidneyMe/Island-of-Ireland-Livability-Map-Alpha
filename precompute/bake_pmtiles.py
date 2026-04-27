@@ -50,8 +50,10 @@ from pmtiles_bake_worker import (  # noqa: E402  (intentional top-level worker)
     _LAYER_AMENITIES,
     _LAYER_FINE_GRID,
     _LAYER_GRID,
+    _LAYER_NOISE,
     _LAYER_SERVICE_DESERTS,
     _LAYER_TRANSPORT_REALITY,
+    _NOISE_TILE_SQL,
     _SERVICE_DESERT_TILE_SQL,
     _TRANSPORT_REALITY_TILE_SQL,
 )
@@ -68,6 +70,8 @@ DEFAULT_BBOX = (-11.0, 51.3, -5.3, 55.5)
 # features; below this zoom they would be unreadable noise.
 AMENITY_MIN_ZOOM = 9
 TRANSPORT_REALITY_MIN_ZOOM = 9
+NOISE_MIN_ZOOM = 8
+NOISE_MAX_ZOOM_DEFAULT = 13
 GRID_AMENITY_CATEGORIES = ("shops", "transport", "healthcare", "parks")
 FINE_GRID_MIN_ZOOM = min(_FINE_GRID_RESOLUTIONS_BY_ZOOM)
 
@@ -132,6 +136,8 @@ def _pmtiles_metadata(
     service_desert_max_zoom: int,
     amenity_min_zoom: int,
     transport_reality_min_zoom: int,
+    noise_min_zoom: int = NOISE_MIN_ZOOM,
+    noise_max_zoom: int = NOISE_MAX_ZOOM_DEFAULT,
 ) -> dict[str, object]:
     return {
         "name": "livability",
@@ -202,6 +208,24 @@ def _pmtiles_metadata(
                     "reachable_public_departures_7d": "Number",
                 },
             },
+            {
+                "id": "noise",
+                "minzoom": noise_min_zoom,
+                "maxzoom": min(noise_max_zoom, max_zoom),
+                "fields": {
+                    "jurisdiction": "String",
+                    "source_type": "String",
+                    "metric": "String",
+                    "round": "Number",
+                    "report_period": "String",
+                    "db_low": "Number",
+                    "db_high": "Number",
+                    "db_value": "String",
+                    "source_dataset": "String",
+                    "source_layer": "String",
+                    "source_ref": "String",
+                },
+            },
         ],
     }
 
@@ -256,6 +280,18 @@ _TRANSPORT_REALITY_POINT_SQL = text(
     """
 )
 
+_NOISE_BOUNDS_SQL = text(
+    """
+    SELECT
+        ST_XMin(n.geom) AS min_lon,
+        ST_YMin(n.geom) AS min_lat,
+        ST_XMax(n.geom) AS max_lon,
+        ST_YMax(n.geom) AS max_lat
+    FROM noise_polygons AS n
+    WHERE n.build_key = :build_key
+    """
+)
+
 
 def _load_amenity_points(connection, *, build_key: str) -> list[tuple[float, float]]:
     rows = connection.execute(
@@ -271,6 +307,27 @@ def _load_transport_reality_points(connection, *, build_key: str) -> list[tuple[
         {"build_key": build_key},
     ).mappings().all()
     return [(float(row["lon"]), float(row["lat"])) for row in rows]
+
+
+def _load_noise_bounds(
+    connection,
+    *,
+    build_key: str,
+) -> list[tuple[float, float, float, float]]:
+    rows = connection.execute(
+        _NOISE_BOUNDS_SQL,
+        {"build_key": build_key},
+    ).mappings().all()
+    return [
+        (
+            float(row["min_lon"]),
+            float(row["min_lat"]),
+            float(row["max_lon"]),
+            float(row["max_lat"]),
+        )
+        for row in rows
+        if row["min_lon"] is not None
+    ]
 
 
 def _amenity_tile_coordinates(
@@ -298,6 +355,32 @@ def _point_tile_coordinates(
     bbox: tuple[float, float, float, float],
 ) -> list[tuple[int, int]]:
     return _amenity_tile_coordinates(points, zoom=zoom, bbox=bbox)
+
+
+def _bounds_tile_coordinates(
+    bounds: list[tuple[float, float, float, float]],
+    *,
+    zoom: int,
+    bbox: tuple[float, float, float, float],
+) -> list[tuple[int, int]]:
+    min_lon, min_lat, max_lon, max_lat = bbox
+    max_index = (1 << zoom) - 1
+    tile_coords: set[tuple[int, int]] = set()
+    for left, bottom, right, top in bounds:
+        clipped_left = max(float(left), min_lon)
+        clipped_right = min(float(right), max_lon)
+        clipped_bottom = max(float(bottom), min_lat)
+        clipped_top = min(float(top), max_lat)
+        if clipped_left > clipped_right or clipped_bottom > clipped_top:
+            continue
+        x_min = min(max(_lon_to_tile_x(clipped_left, zoom), 0), max_index)
+        x_max = min(max(_lon_to_tile_x(clipped_right, zoom), 0), max_index)
+        y_min = min(max(_lat_to_tile_y(clipped_top, zoom), 0), max_index)
+        y_max = min(max(_lat_to_tile_y(clipped_bottom, zoom), 0), max_index)
+        for x in range(x_min, x_max + 1):
+            for y in range(y_min, y_max + 1):
+                tile_coords.add((x, y))
+    return sorted(tile_coords)
 
 
 def _resolve_fine_grid_config(connection, *, build_key: str) -> dict[str, str] | None:
@@ -346,7 +429,9 @@ def _iter_tile_specs(
     coarse_grid_max_zoom: int,
     amenity_min_zoom: int,
     transport_reality_min_zoom: int,
+    noise_min_zoom: int = NOISE_MIN_ZOOM,
     fine_grid_tile_coords_by_zoom: dict[int, list[tuple[int, int]]] | None = None,
+    noise_tile_coords_by_zoom: dict[int, list[tuple[int, int]]] | None = None,
 ) -> Iterator[tuple[int, int, int, int]]:
     """Yield ``(z, x, y, layer_bitmask)`` tuples for every tile that will be baked.
 
@@ -355,9 +440,11 @@ def _iter_tile_specs(
     sees an approximately-sorted stream when workers=1.
     """
     fine_grid_tile_coords_by_zoom = fine_grid_tile_coords_by_zoom or {}
+    noise_tile_coords_by_zoom = noise_tile_coords_by_zoom or {}
     for zoom in range(min_zoom, max_zoom + 1):
         include_amenities = zoom >= amenity_min_zoom
         include_transport_reality = zoom >= transport_reality_min_zoom
+        include_noise = zoom >= noise_min_zoom and zoom in noise_tile_coords_by_zoom
         include_grid = zoom <= coarse_grid_max_zoom
         include_fine_grid = zoom in fine_grid_tile_coords_by_zoom
         include_service_deserts = zoom <= coarse_grid_max_zoom
@@ -373,6 +460,8 @@ def _iter_tile_specs(
             layers |= _LAYER_TRANSPORT_REALITY
         if include_service_deserts:
             layers |= _LAYER_SERVICE_DESERTS
+        if include_noise:
+            layers |= _LAYER_NOISE
         if layers == 0:
             continue
 
@@ -383,19 +472,34 @@ def _iter_tile_specs(
                     yield zoom, x, y, layers
             continue
 
-        tile_coords: set[tuple[int, int]] = set()
+        tile_layers: dict[tuple[int, int], int] = {}
+
+        def _add_tile_layers(coords: Iterable[tuple[int, int]], layer_mask: int) -> None:
+            for coord in coords:
+                tile_layers[coord] = tile_layers.get(coord, 0) | layer_mask
+
         if include_fine_grid:
-            tile_coords.update(fine_grid_tile_coords_by_zoom.get(zoom, ()))
+            _add_tile_layers(
+                fine_grid_tile_coords_by_zoom.get(zoom, ()),
+                _LAYER_FINE_GRID,
+            )
         if include_amenities:
-            tile_coords.update(
-                _point_tile_coordinates(amenity_points, zoom=zoom, bbox=bbox)
+            _add_tile_layers(
+                _point_tile_coordinates(amenity_points, zoom=zoom, bbox=bbox),
+                _LAYER_AMENITIES,
             )
         if include_transport_reality:
-            tile_coords.update(
-                _point_tile_coordinates(transport_reality_points, zoom=zoom, bbox=bbox)
+            _add_tile_layers(
+                _point_tile_coordinates(transport_reality_points, zoom=zoom, bbox=bbox),
+                _LAYER_TRANSPORT_REALITY,
             )
-        for x, y in sorted(tile_coords):
-            yield zoom, x, y, layers
+        if include_noise:
+            _add_tile_layers(
+                noise_tile_coords_by_zoom.get(zoom, ()),
+                _LAYER_NOISE,
+            )
+        for (x, y), tile_layer_mask in sorted(tile_layers.items()):
+            yield zoom, x, y, tile_layer_mask
 
 
 def _chunked(iterable: Iterable, size: int) -> Iterator[list]:
@@ -557,6 +661,8 @@ def bake_pmtiles(
     max_zoom: int = DEFAULT_MAX_ZOOM,
     amenity_min_zoom: int = AMENITY_MIN_ZOOM,
     transport_reality_min_zoom: int = TRANSPORT_REALITY_MIN_ZOOM,
+    noise_min_zoom: int = NOISE_MIN_ZOOM,
+    noise_max_zoom: int = NOISE_MAX_ZOOM_DEFAULT,
     workers: int | None = None,
     fine_grid_config: dict[str, str] | None = None,
     **_legacy_kwargs,
@@ -584,6 +690,7 @@ def bake_pmtiles(
         transport_reality_points = _load_transport_reality_points(
             connection, build_key=build_key
         )
+        noise_bounds = _load_noise_bounds(connection, build_key=build_key)
         if fine_grid_config is None:
             resolved_fine_grid_config = _resolve_fine_grid_config(
                 connection,
@@ -604,6 +711,14 @@ def bake_pmtiles(
                     source_max_zoom + 1,
                 ),
             )
+        effective_noise_max_zoom = max(
+            noise_min_zoom,
+            min(int(noise_max_zoom), source_max_zoom),
+        )
+        noise_tile_coords_by_zoom = {
+            zoom: _bounds_tile_coordinates(noise_bounds, zoom=zoom, bbox=bbox)
+            for zoom in range(max(min_zoom, noise_min_zoom), effective_noise_max_zoom + 1)
+        } if noise_bounds else {}
         grid_max_zoom = min(
             source_max_zoom,
             PMTILES_SOURCE_MAX_ZOOM if fine_grid_tile_coords_by_zoom else coarse_grid_max_zoom,
@@ -617,8 +732,8 @@ def bake_pmtiles(
         fine_grid_shard_count = _fine_grid_shard_count(resolved_fine_grid_config)
         in_flight_limit = _parallel_in_flight_limit(effective_workers)
 
-        def _tile_specs_iter() -> Iterator[tuple[int, int, int, int]]:
-            return _iter_tile_specs(
+        tile_specs_list: list[tuple[int, int, int, int]] = list(
+            _iter_tile_specs(
                 min_zoom=min_zoom,
                 max_zoom=source_max_zoom,
                 bbox=bbox,
@@ -627,10 +742,12 @@ def bake_pmtiles(
                 coarse_grid_max_zoom=coarse_grid_max_zoom,
                 amenity_min_zoom=amenity_min_zoom,
                 transport_reality_min_zoom=transport_reality_min_zoom,
+                noise_min_zoom=noise_min_zoom,
                 fine_grid_tile_coords_by_zoom=fine_grid_tile_coords_by_zoom,
+                noise_tile_coords_by_zoom=noise_tile_coords_by_zoom,
             )
-
-        total_specs = sum(1 for _ in _tile_specs_iter())
+        )
+        total_specs = len(tile_specs_list)
 
     print(
         "  bake setup: "
@@ -662,6 +779,8 @@ def bake_pmtiles(
         service_desert_max_zoom=coarse_grid_max_zoom,
         amenity_min_zoom=amenity_min_zoom,
         transport_reality_min_zoom=transport_reality_min_zoom,
+        noise_min_zoom=noise_min_zoom,
+        noise_max_zoom=effective_noise_max_zoom,
     )
 
     if temp_output_path.exists():
@@ -682,7 +801,7 @@ def bake_pmtiles(
                             attempt_connection,
                             writer=writer,
                             build_key=build_key,
-                            tile_specs=_tile_specs_iter(),
+                            tile_specs=iter(tile_specs_list),
                             fine_grid_config=resolved_fine_grid_config,
                         )
                 else:
@@ -694,7 +813,7 @@ def bake_pmtiles(
                         writer=writer,
                         build_key=build_key,
                         db_url=database_url(),
-                        tile_specs=_tile_specs_iter(),
+                        tile_specs=tile_specs_list,
                         workers=current_workers,
                         total_tile_count=total_specs,
                         fine_grid_config=resolved_fine_grid_config,

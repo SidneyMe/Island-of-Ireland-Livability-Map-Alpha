@@ -302,6 +302,30 @@ class SurfaceResolutionTests(TestCase):
         self.assertNotEqual(bbox_hashes.geo_hash, legacy_hashes.geo_hash)
         self.assertNotEqual(bbox_hashes.config_hash, legacy_hashes.config_hash)
 
+    def test_profiles_carry_distinct_noise_max_zoom_caps(self) -> None:
+        self.assertEqual(config.build_profile_settings("dev").noise_max_zoom, 10)
+        self.assertEqual(config.build_profile_settings("full").noise_max_zoom, 13)
+        self.assertEqual(config.build_profile_settings("test").noise_max_zoom, 13)
+
+    def test_resolve_noise_max_zoom_returns_profile_default_without_env_var(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NOISE_MAX_ZOOM_DEV", None)
+            self.assertEqual(config.resolve_noise_max_zoom("dev"), 10)
+            self.assertEqual(config.resolve_noise_max_zoom("full"), 13)
+            self.assertEqual(config.resolve_noise_max_zoom("test"), 13)
+
+    def test_resolve_noise_max_zoom_dev_env_var_overrides_only_dev_profile(self) -> None:
+        with mock.patch.dict(os.environ, {"NOISE_MAX_ZOOM_DEV": "13"}):
+            self.assertEqual(config.resolve_noise_max_zoom("dev"), 13)
+            self.assertEqual(config.resolve_noise_max_zoom("full"), 13)
+            self.assertEqual(config.resolve_noise_max_zoom("test"), 13)
+
+    def test_resolve_noise_max_zoom_clamps_dev_override_to_supported_range(self) -> None:
+        with mock.patch.dict(os.environ, {"NOISE_MAX_ZOOM_DEV": "99"}):
+            self.assertEqual(config.resolve_noise_max_zoom("dev"), 15)
+        with mock.patch.dict(os.environ, {"NOISE_MAX_ZOOM_DEV": "-3"}):
+            self.assertEqual(config.resolve_noise_max_zoom("dev"), 0)
+
     def test_resolution_for_zoom_uses_fixed_breaks(self) -> None:
         expectations = {
             0: 20000,

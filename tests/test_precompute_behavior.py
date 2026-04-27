@@ -186,6 +186,7 @@ def _workflow_kwargs(**overrides):
         "amenity_rows": mock.Mock(return_value=[]),
         "transport_reality_rows": mock.Mock(return_value=[]),
         "service_desert_rows": mock.Mock(return_value=[]),
+        "noise_rows": mock.Mock(return_value=[]),
         "compute_service_deserts": mock.Mock(),
         "publish_precomputed_artifacts": mock.Mock(),
         "summary_json": mock.Mock(return_value={"summary": True}),
@@ -980,6 +981,52 @@ class AmenityPhaseIntegrationTests(TestCase):
             summary["transport_mode_counts"],
             {"bus": 2, "rail": 1, "tram": 1},
         )
+
+    def test_summary_json_includes_noise_counts(self) -> None:
+        summary = precompute._publish.summary_json_impl(
+            box(-10.0, 50.0, -5.0, 55.0),
+            {20_000: [_grid_cell("coarse-cell")]},
+            _empty_amenity_data(),
+            [],
+            noise_rows=[
+                {
+                    "jurisdiction": "roi",
+                    "source_type": "road",
+                    "metric": "Lden",
+                    "db_value": "55-59",
+                },
+                {
+                    "jurisdiction": "roi",
+                    "source_type": "rail",
+                    "metric": "Lnight",
+                    "db_value": "50-54",
+                },
+                {
+                    "jurisdiction": "ni",
+                    "source_type": "road",
+                    "metric": "Lden",
+                    "db_value": "55-59",
+                },
+            ],
+            hashes=SimpleNamespace(
+                build_key="build-key-dev",
+                config_hash="config-hash-dev",
+                import_fingerprint="import-fingerprint-dev",
+            ),
+            build_profile="dev",
+            source_state=SimpleNamespace(extract_path=Path("extract.osm.pbf")),
+            osm_extract_path=Path("extract.osm.pbf"),
+            grid_sizes_m=[20_000],
+            fine_resolutions_m=[],
+            output_html="index.html",
+            zoom_breaks=[(0, 20_000)],
+        )
+
+        self.assertTrue(summary["noise_enabled"])
+        self.assertEqual(summary["noise_counts"], {"roi": 2, "ni": 1})
+        self.assertEqual(summary["noise_source_counts"], {"road": 2, "rail": 1})
+        self.assertEqual(summary["noise_metric_counts"], {"Lden": 2, "Lnight": 1})
+        self.assertEqual(summary["noise_band_counts"], {"55-59": 2, "50-54": 1})
 
 
 class PrecomputeReachabilityTests(TestCase):
@@ -2310,11 +2357,13 @@ class WorkflowTests(TestCase):
     def test_successful_rebuild_preserves_walk_only_publish_payloads(self) -> None:
         walk_payload = [{"kind": "walk"}]
         amenity_payload = [{"kind": "amenity"}]
+        noise_payload = [{"kind": "noise"}]
         summary_payload = {"summary": True}
         kwargs = _workflow_kwargs(
             phase_grids=mock.Mock(return_value={1000: []}),
             walk_rows=mock.Mock(return_value=walk_payload),
             amenity_rows=mock.Mock(return_value=amenity_payload),
+            noise_rows=mock.Mock(return_value=noise_payload),
             summary_json=mock.Mock(return_value=summary_payload),
         )
 
@@ -2326,6 +2375,9 @@ class WorkflowTests(TestCase):
         self.assertEqual(publish_kwargs["summary_json"], summary_payload)
         self.assertEqual(publish_kwargs["transport_reality_rows"], [])
         self.assertEqual(publish_kwargs["service_desert_rows"], [])
+        self.assertEqual(publish_kwargs["noise_rows"], noise_payload)
+        self.assertEqual(publish_kwargs["study_area_wgs84"], box(0.0, 0.0, 1.0, 1.0))
+        self.assertIsNone(kwargs["summary_json"].call_args.kwargs["noise_rows"])
         self.assertNotIn("drive_rows", publish_kwargs)
         self.assertNotIn("hotspot_rows", publish_kwargs)
 

@@ -116,6 +116,27 @@ service_deserts = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
+noise_polygons = Table(
+    "noise_polygons",
+    metadata,
+    Column("build_key", Text, nullable=False),
+    Column("config_hash", Text, nullable=False),
+    Column("import_fingerprint", Text, nullable=False),
+    Column("jurisdiction", Text, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("metric", Text, nullable=False),
+    Column("round_number", Integer, nullable=False),
+    Column("report_period", Text, nullable=True),
+    Column("db_low", Float, nullable=True),
+    Column("db_high", Float, nullable=True),
+    Column("db_value", Text, nullable=False),
+    Column("source_dataset", Text, nullable=False),
+    Column("source_layer", Text, nullable=False),
+    Column("source_ref", Text, nullable=False),
+    Column("geom", Geometry("GEOMETRY", srid=4326), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
 build_manifest = Table(
     "build_manifest",
     metadata,
@@ -127,6 +148,9 @@ build_manifest = Table(
     Column("reach_hash", Text, nullable=False),
     Column("score_hash", Text, nullable=False),
     Column("render_hash", Text, nullable=False),
+    Column("noise_processing_hash", Text, nullable=True),
+    Column("noise_artifact_hash", Text, nullable=True),
+    Column("noise_mode", Text, nullable=True),
     Column("status", Text, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True), nullable=True),
@@ -405,12 +429,94 @@ transit_service_desert_cells = Table(
 )
 
 
+noise_artifact_manifest = Table(
+    "noise_artifact_manifest",
+    metadata,
+    Column("artifact_hash", Text, primary_key=True),
+    Column("artifact_type", Text, nullable=False),
+    Column("manifest_json", JSONB, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+)
+
+noise_artifact_lineage = Table(
+    "noise_artifact_lineage",
+    metadata,
+    Column("artifact_hash", Text, nullable=False),
+    Column("parent_hash", Text, nullable=False),
+)
+
+noise_active_artifact = Table(
+    "noise_active_artifact",
+    metadata,
+    Column("artifact_type", Text, primary_key=True),
+    Column("artifact_hash", Text, nullable=False),
+)
+
+# Canonical processing tables — EPSG:2157 geometry (metre-based)
+noise_normalized = Table(
+    "noise_normalized",
+    metadata,
+    Column("noise_source_hash", Text, nullable=False),
+    Column("jurisdiction", Text, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("metric", Text, nullable=False),
+    Column("round_number", Integer, nullable=False),
+    Column("report_period", Text, nullable=True),
+    Column("db_low", Float, nullable=True),
+    Column("db_high", Float, nullable=True),
+    Column("db_value", Text, nullable=False),
+    Column("source_dataset", Text, nullable=False),
+    Column("source_layer", Text, nullable=False),
+    Column("source_ref", Text, nullable=True),
+    Column("geom", Geometry("MULTIPOLYGON", srid=2157), nullable=False),
+)
+
+noise_resolved_display = Table(
+    "noise_resolved_display",
+    metadata,
+    Column("noise_resolved_hash", Text, nullable=False),
+    Column("noise_feature_id", BigInteger, primary_key=True),
+    Column("jurisdiction", Text, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("metric", Text, nullable=False),
+    Column("round_number", Integer, nullable=False),
+    Column("report_period", Text, nullable=True),
+    Column("db_low", Float, nullable=True),
+    Column("db_high", Float, nullable=True),
+    Column("db_value", Text, nullable=False),
+    Column("geom", Geometry("MULTIPOLYGON", srid=2157), nullable=False),
+)
+
+noise_resolved_provenance = Table(
+    "noise_resolved_provenance",
+    metadata,
+    Column("noise_resolved_hash", Text, nullable=False),
+    Column("jurisdiction", Text, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("metric", Text, nullable=False),
+    Column("round_number", Integer, nullable=False),
+    Column("source_dataset", Text, nullable=False),
+    Column("source_layer", Text, nullable=False),
+    Column("source_ref_count", Integer, nullable=False),
+    Column("source_refs_hash", Text, nullable=False),
+)
+
+
 REQUIRED_PUBLIC_TABLES = {
     "grid_walk",
     "amenities",
     "transport_reality",
     "service_deserts",
+    "noise_polygons",
     "build_manifest",
+    "noise_artifact_manifest",
+    "noise_artifact_lineage",
+    "noise_active_artifact",
+    "noise_normalized",
+    "noise_resolved_display",
+    "noise_resolved_provenance",
 }
 
 REQUIRED_RAW_TABLES = {
@@ -467,8 +573,11 @@ GEOMETRY_FIELDS = {
     _table_key(amenities): ("geom",),
     _table_key(transport_reality): ("geom",),
     _table_key(service_deserts): ("cell_geom",),
+    _table_key(noise_polygons): ("geom",),
     _table_key(features): ("geom",),
     _table_key(transit_stops): ("geom",),
     _table_key(transit_gtfs_stop_reality): ("geom",),
     _table_key(transit_service_desert_cells): ("cell_geom",),
+    _table_key(noise_normalized): ("geom",),
+    _table_key(noise_resolved_display): ("geom",),
 }

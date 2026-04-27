@@ -263,12 +263,14 @@ body.panel-hidden #control-panel {
     align-items: baseline;
 }
 
-#amenity-note {
+#amenity-note,
+#noise-note {
     color: var(--muted);
     font-size: 13px;
 }
 
-#amenity-controls {
+#amenity-controls,
+#noise-controls {
     display: grid;
     gap: 8px;
 }

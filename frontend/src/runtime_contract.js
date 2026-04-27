@@ -4,7 +4,7 @@ const ACTIVE_GRID_OUTLINE_LAYER_ID = "grid-outline-active";
 const ACTIVE_DEBUG_GRID_LAYER_ID = "grid-fill-debug-active";
 const GRID_SOURCE_ID = "livability";
 const GRID_SOURCE_LAYER_ID = "grid";
-const GRID_INSERT_BEFORE_LAYER_ID = "amenities-circle";
+const GRID_INSERT_BEFORE_LAYER_ID = "noise-fill";
 
 function runtimeZoomBreaks(runtime) {
   const breaks = runtime && Array.isArray(runtime.surface_zoom_breaks)
@@ -370,6 +370,21 @@ function serviceDesertFillColorExpression() {
   ];
 }
 
+function noiseFillColorExpression() {
+  return [
+    "interpolate",
+    ["linear"],
+    ["coalesce", ["get", "db_low"], 0],
+    45, "#fee8c8",
+    50, "#fdbb84",
+    55, "#fc8d59",
+    60, "#ef6548",
+    65, "#d7301f",
+    70, "#990000",
+    75, "#67000d"
+  ];
+}
+
 function buildStyle(runtime, options = {}) {
   const colors = runtime.category_colors || {};
   const origin = options.windowOrigin || "http://127.0.0.1:8000";
@@ -380,6 +395,29 @@ function buildStyle(runtime, options = {}) {
     activeGridResolution(runtime, Number(runtime.default_zoom || 0))
   ).forEach(function (layer) {
     layers.push(layer);
+  });
+
+  layers.push({
+    id: "noise-fill",
+    type: "fill",
+    source: "livability",
+    "source-layer": "noise",
+    minzoom: 8,
+    layout: {
+      visibility: "none",
+      "fill-sort-key": ["coalesce", ["get", "db_low"], 0]
+    },
+    filter: ["all", ["==", ["get", "metric"], "Lden"]],
+    paint: {
+      "fill-color": noiseFillColorExpression(),
+      "fill-opacity": [
+        "interpolate", ["linear"], ["zoom"],
+        8, 0.22,
+        13, 0.30,
+        19, 0.36
+      ],
+      "fill-outline-color": "rgba(102, 37, 6, 0.26)"
+    }
   });
 
   layers.push({

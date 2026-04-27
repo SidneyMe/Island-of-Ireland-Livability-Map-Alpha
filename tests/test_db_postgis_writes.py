@@ -1,17 +1,33 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, mock
 
-from shapely.geometry import Point
+from shapely.geometry import Point, box
 
 from db_postgis import amenity_merge as db_amenity_merge
+from db_postgis import schema as db_schema
+from db_postgis import tables as db_tables
 from db_postgis import writes as db_writes
 
 
 class DbPostgisTransitArtifactWriteTests(TestCase):
+    def test_noise_polygons_is_managed_public_geometry(self) -> None:
+        managed_tables = {str(table.name) for table in db_schema._MANAGED_TABLES}
+        managed_indexes = {spec.index_name for spec in db_schema._MANAGED_INDEX_SPECS}
+
+        self.assertIn("noise_polygons", db_tables.REQUIRED_PUBLIC_TABLES)
+        self.assertIn("noise_polygons", managed_tables)
+        self.assertEqual(
+            db_tables.GEOMETRY_FIELDS[db_tables.noise_polygons.name],
+            ("geom",),
+        )
+        self.assertIn("noise_polygons_build_metric_idx", managed_indexes)
+        self.assertIn("noise_polygons_source_metric_idx", managed_indexes)
+        self.assertIn("noise_polygons_geom_gist", managed_indexes)
+
     def test_replace_gtfs_feed_rows_from_artifacts_executes_stop_staging_sql(self) -> None:
         engine = mock.MagicMock()
         connection = engine.begin.return_value.__enter__.return_value
@@ -80,6 +96,122 @@ class DbPostgisTransitArtifactWriteTests(TestCase):
                 for call in copy_mock.call_args_list
             )
         )
+
+    def test_noise_publish_stages_candidates_before_database_materialization(self) -> None:
+        connection = mock.MagicMock()
+        # Force the prior-build clone lookup to find nothing so staging runs.
+        connection.execute.return_value.scalar_one_or_none.return_value = None
+        summary_json: dict[str, object] = {}
+        created_at = datetime.now(timezone.utc)
+        row = {
+            "build_key": "build-key-123",
+            "config_hash": "config-hash-123",
+            "import_fingerprint": "import-fingerprint-123",
+            "jurisdiction": "roi",
+            "source_type": "road",
+            "metric": "Lden",
+            "round_number": 4,
+            "report_period": "Round 4",
+            "db_low": 55.0,
+            "db_high": 59.0,
+            "db_value": "55-59",
+            "source_dataset": "NOISE_Round4.zip",
+            "source_layer": "Noise_R4_Road",
+            "source_ref": "noise-1",
+            "geom": box(0.0, 0.0, 1.0, 1.0),
+            "created_at": created_at,
+        }
+
+        with (
+            mock.patch.object(db_writes, "_materialize_noise_polygons_from_stage", return_value=1) as materialize,
+            mock.patch.object(db_writes, "_update_noise_summary_from_database") as update_summary,
+            mock.patch.object(db_writes, "_stage_noise_candidate_rows", return_value=1) as stage,
+        ):
+            db_writes._publish_noise_polygons(
+                connection,
+                noise_rows=[row],
+                build_key="build-key-123",
+                config_hash="config-hash-123",
+                import_fingerprint="import-fingerprint-123",
+                render_hash="render-hash-123",
+                created_at=created_at,
+                study_area_wgs84=box(-1.0, -1.0, 2.0, 2.0),
+                summary_json=summary_json,
+            )
+
+        statements = [str(call.args[0]) for call in connection.execute.call_args_list]
+        joined_statements = "\n".join(statements)
+        self.assertIn("CREATE TEMP TABLE", joined_statements)
+        self.assertIn("_tmp_noise_polygons_stage", joined_statements)
+        self.assertIn("CREATE INDEX ON", joined_statements)
+        self.assertIn("USING GIST (geom)", joined_statements)
+        stage.assert_called_once()
+        materialize.assert_called_once()
+        update_summary.assert_called_once_with(
+            connection,
+            build_key="build-key-123",
+            summary_json=summary_json,
+        )
+
+    def test_noise_publish_clones_from_prior_build_when_render_hash_matches(self) -> None:
+        connection = mock.MagicMock()
+        # Returning a non-empty build_key triggers the clone path.
+        connection.execute.return_value.scalar_one_or_none.return_value = "prior-build-key"
+        # The INSERT ... SELECT result needs a rowcount.
+        connection.execute.return_value.rowcount = 17
+        summary_json: dict[str, object] = {}
+        created_at = datetime.now(timezone.utc)
+
+        with (
+            mock.patch.object(db_writes, "_stage_noise_candidate_rows") as stage,
+            mock.patch.object(db_writes, "_materialize_noise_polygons_from_stage") as materialize,
+            mock.patch.object(db_writes, "_update_noise_summary_from_database") as update_summary,
+        ):
+            db_writes._publish_noise_polygons(
+                connection,
+                noise_rows=iter([]),  # candidate rows discarded
+                build_key="new-build-key",
+                config_hash="new-config-hash",
+                import_fingerprint="new-import-fingerprint",
+                render_hash="render-hash-shared",
+                created_at=created_at,
+                study_area_wgs84=box(-1.0, -1.0, 2.0, 2.0),
+                summary_json=summary_json,
+            )
+
+        statements = [str(call.args[0]) for call in connection.execute.call_args_list]
+        joined_statements = "\n".join(statements)
+        self.assertIn("INSERT INTO", joined_statements)
+        self.assertIn("FROM build_manifest", joined_statements)
+        # No staging path should run when clone fires.
+        stage.assert_not_called()
+        materialize.assert_not_called()
+        update_summary.assert_called_once()
+
+    def test_noise_materialization_sql_uses_intersecting_newer_fallback_pieces(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value = mock.Mock(rowcount=3)
+
+        inserted = db_writes._materialize_noise_group_round(
+            connection,
+            staging_quoted='"_tmp_noise_polygons_stage"',
+            study_area_wkb=box(-1.0, -1.0, 2.0, 2.0).wkb,
+            build_key="build-key-123",
+            jurisdiction="roi",
+            source_type="road",
+            metric="Lden",
+            round_number=3,
+        )
+
+        self.assertEqual(inserted, 3)
+        statement = str(connection.execute.call_args.args[0])
+        params = connection.execute.call_args.args[1]
+        self.assertIn("_tmp_noise_polygons_stage", statement)
+        self.assertIn("ST_Difference", statement)
+        self.assertIn("ST_UnaryUnion(ST_Collect(n.geom))", statement)
+        self.assertEqual(statement.count("ST_Subdivide"), 1)
+        self.assertEqual(params["build_key"], "build-key-123")
+        self.assertEqual(params["round_number"], 3)
 
 
 class DbPostgisAmenityMergeTests(TestCase):

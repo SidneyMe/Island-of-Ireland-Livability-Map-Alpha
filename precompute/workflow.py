@@ -61,12 +61,17 @@ def _run_pmtiles_bake(
     engine,
     build_key: str,
     pmtiles_output_path: Path,
+    noise_max_zoom: int | None = None,
 ) -> float:
     bake_started_at = time.perf_counter()
+    bake_kwargs: dict = {}
+    if noise_max_zoom is not None:
+        bake_kwargs["noise_max_zoom"] = int(noise_max_zoom)
     bake_pmtiles(
         engine,
         build_key,
         pmtiles_output_path,
+        **bake_kwargs,
     )
     return time.perf_counter() - bake_started_at
 
@@ -165,7 +170,10 @@ def run_precompute_impl(
     amenity_rows,
     transport_reality_rows,
     service_desert_rows,
+    noise_rows,
+    dispatch_noise_loader=None,
     compute_service_deserts,
+    noise_processing_hash=None,
     publish_precomputed_artifacts,
     summary_json,
     package_snapshot,
@@ -177,6 +185,7 @@ def run_precompute_impl(
     fine_surface_ready=None,
     bake_pmtiles=None,
     pmtiles_output_path: Path | None = None,
+    noise_max_zoom: int | None = None,
 ) -> str:
     total_started_at = time.perf_counter()
     print(f"=== Livability Score Map Precompute ({build_profile}) ===\n")
@@ -210,6 +219,12 @@ def run_precompute_impl(
 
     study_area_metric, study_area_wgs84 = phase_geometry(tracker)
     _print_geometry_bounds(study_area_metric)
+
+    if dispatch_noise_loader is not None:
+        try:
+            dispatch_noise_loader()
+        except Exception as exc:  # noqa: BLE001 - background dispatch must not block main pipeline
+            print(f"[noise] background dispatch failed: {exc}; falling back to inline load")
 
     if not import_was_ready:
         tracker.start_phase("import", detail="refreshing raw OSM import")
@@ -262,6 +277,7 @@ def run_precompute_impl(
                 engine=engine,
                 build_key=hashes.build_key,
                 pmtiles_output_path=pmtiles_output_path,
+                noise_max_zoom=noise_max_zoom,
             )
             print(
                 f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
@@ -315,6 +331,11 @@ def run_precompute_impl(
         publish_started_at,
         progress_cb=publish_progress_cb,
     )
+    noise_row_payload = noise_rows(
+        engine,
+        publish_started_at,
+        progress_cb=publish_progress_cb,
+    )
     summary_started_at = time.perf_counter()
     summary_payload = summary_json(
         study_area_wgs84,
@@ -322,6 +343,7 @@ def run_precompute_impl(
         amenity_data,
         amenity_source_rows,
         transport_reality_rows=transport_reality_row_payload,
+        noise_rows=None,
     )
     tracker.record_substep(
         "publish",
@@ -334,6 +356,7 @@ def run_precompute_impl(
         + len(amenity_row_payload)
         + len(transport_reality_row_payload)
         + len(service_desert_row_payload)
+        + len(noise_row_payload)
     )
     tracker.set_phase_totals(
         "publish",
@@ -355,6 +378,9 @@ def run_precompute_impl(
         summary_json=summary_payload,
         transport_reality_rows=transport_reality_row_payload,
         service_desert_rows=service_desert_row_payload,
+        noise_rows=noise_row_payload,
+        study_area_wgs84=study_area_wgs84,
+        noise_processing_hash=noise_processing_hash() if callable(noise_processing_hash) else noise_processing_hash,
         progress_cb=publish_progress_cb,
     )
     walk_stats = getattr(walk_row_payload, "stats", None)
@@ -402,6 +428,14 @@ def run_precompute_impl(
             getattr(service_desert_stats, "row_assembly_seconds", 0.0),
             force_log=True,
         )
+    noise_stats = getattr(noise_row_payload, "stats", None)
+    if noise_stats is not None:
+        tracker.record_substep(
+            "publish",
+            "noise_row_assembly",
+            getattr(noise_stats, "row_assembly_seconds", 0.0),
+            force_log=True,
+        )
     publish_write_seconds = max(
         time.perf_counter() - publish_write_started_at - walk_prep_seconds - amenity_prep_seconds,
         0.0,
@@ -420,6 +454,7 @@ def run_precompute_impl(
             engine=engine,
             build_key=hashes.build_key,
             pmtiles_output_path=pmtiles_output_path,
+            noise_max_zoom=noise_max_zoom,
         )
         tracker.record_substep(
             "publish",

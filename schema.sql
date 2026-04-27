@@ -77,6 +77,25 @@ CREATE TABLE IF NOT EXISTS service_deserts (
     created_at TIMESTAMPTZ NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS noise_polygons (
+    build_key TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    import_fingerprint TEXT NOT NULL,
+    jurisdiction TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    round_number INTEGER NOT NULL,
+    report_period TEXT NULL,
+    db_low DOUBLE PRECISION NULL,
+    db_high DOUBLE PRECISION NULL,
+    db_value TEXT NOT NULL,
+    source_dataset TEXT NOT NULL,
+    source_layer TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    geom GEOMETRY(Geometry, 4326) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS build_manifest (
     build_key TEXT PRIMARY KEY,
     config_hash TEXT NOT NULL,
@@ -353,6 +372,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS service_deserts_build_resolution_cell_idx
 
 CREATE INDEX IF NOT EXISTS service_deserts_geom_gist
     ON service_deserts USING GIST (cell_geom);
+
+CREATE INDEX IF NOT EXISTS noise_polygons_build_metric_idx
+    ON noise_polygons (build_key, metric);
+
+CREATE INDEX IF NOT EXISTS noise_polygons_source_metric_idx
+    ON noise_polygons (build_key, source_type, metric, db_value);
+
+CREATE INDEX IF NOT EXISTS noise_polygons_geom_gist
+    ON noise_polygons USING GIST (geom);
 
 CREATE INDEX IF NOT EXISTS osm_raw_import_manifest_path_idx
     ON osm_raw.import_manifest (extract_path, completed_at DESC);

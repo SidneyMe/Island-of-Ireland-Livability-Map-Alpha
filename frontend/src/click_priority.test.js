@@ -45,6 +45,28 @@ function fakeMap(featuresByLayer) {
 
 {
   const map = fakeMap({
+    "noise-fill": [fakeFeature("noise")]
+  });
+  const action = resolveMapClickAction({
+    map,
+    point: { x: 10, y: 20 },
+    fineSurfaceEnabled: true,
+    gridVisible: true,
+    activeGridLayerId: "grid-fill-active"
+  });
+
+  assert.equal(action.type, CLICK_ACTIONS.NOISE);
+  assert.equal(action.features[0].id, "noise");
+  assert.deepEqual(map.calls, [
+    "transport-reality-circle",
+    "amenities-circle",
+    "service-deserts-fill",
+    "noise-fill"
+  ]);
+}
+
+{
+  const map = fakeMap({
     "transport-reality-circle": [fakeFeature("transport")],
     "amenities-circle": [fakeFeature("amenity")],
     "service-deserts-fill": [fakeFeature("desert")]
@@ -98,6 +120,7 @@ function fakeMap(featuresByLayer) {
     "transport-reality-circle",
     "amenities-circle",
     "service-deserts-fill",
+    "noise-fill",
     "grid-fill-active"
   ]);
 }
@@ -116,7 +139,8 @@ function fakeMap(featuresByLayer) {
   assert.deepEqual(map.calls, [
     "transport-reality-circle",
     "amenities-circle",
-    "service-deserts-fill"
+    "service-deserts-fill",
+    "noise-fill"
   ]);
 }
 

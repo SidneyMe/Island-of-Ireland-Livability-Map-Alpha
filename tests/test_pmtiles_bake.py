@@ -93,6 +93,29 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(desert_layer["fields"]["baseline_reachable_stop_count"], "Number")
         self.assertEqual(desert_layer["fields"]["reachable_public_departures_7d"], "Number")
 
+    def test_pmtiles_metadata_declares_noise_layer(self) -> None:
+        metadata = bake_pmtiles._pmtiles_metadata(
+            min_zoom=5,
+            max_zoom=14,
+            grid_max_zoom=11,
+            service_desert_max_zoom=11,
+            amenity_min_zoom=9,
+            transport_reality_min_zoom=9,
+            noise_max_zoom=12,
+        )
+
+        noise_layer = next(
+            layer for layer in metadata["vector_layers"] if layer["id"] == "noise"
+        )
+
+        self.assertEqual(noise_layer["minzoom"], bake_pmtiles.NOISE_MIN_ZOOM)
+        self.assertEqual(noise_layer["maxzoom"], 12)
+        self.assertEqual(noise_layer["fields"]["source_type"], "String")
+        self.assertEqual(noise_layer["fields"]["metric"], "String")
+        self.assertEqual(noise_layer["fields"]["round"], "Number")
+        self.assertEqual(noise_layer["fields"]["db_low"], "Number")
+        self.assertEqual(noise_layer["fields"]["db_value"], "String")
+
     def test_amenity_layer_metadata_declares_tier_name_and_conflict_class(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
             min_zoom=5,
@@ -131,6 +154,16 @@ class PmtilesBakeContractTests(TestCase):
         self.assertIn("CASE WHEN t.is_unscheduled_stop THEN 1 ELSE 0 END", sql)
         self.assertNotIn("STRING_AGG", sql)
         self.assertNotIn("SUM(t.school_only_departures_30d)", sql)
+
+    def test_noise_tile_sql_exports_display_fields(self) -> None:
+        sql = str(bake_pmtiles._NOISE_TILE_SQL)
+
+        self.assertIn("n.source_type", sql)
+        self.assertIn("n.metric", sql)
+        self.assertIn("n.round_number AS round", sql)
+        self.assertIn("n.db_value", sql)
+        self.assertNotIn("ST_Subdivide", sql)
+        self.assertIn("'noise'", sql)
 
     def test_amenity_tile_sql_exports_tier_name_and_conflict_class(self) -> None:
         sql = str(bake_pmtiles._AMENITY_TILE_SQL)
@@ -173,6 +206,7 @@ class PmtilesBakeContractTests(TestCase):
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[(-6.2, 53.4)]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[(-6.1, 53.5)]),
+                mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)) as bbox_mock,
                 mock.patch.object(bake_pmtiles, "_point_tile_coordinates", return_value=[(1, 2)]) as point_tiles_mock,
                 mock.patch.object(bake_pmtiles, "_vector_tile_mvt_bytes_by_flags", return_value=b"mvt"),
@@ -230,6 +264,7 @@ class PmtilesBakeContractTests(TestCase):
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)),
                 mock.patch.object(bake_pmtiles, "_vector_tile_mvt_bytes_by_flags", return_value=b"mvt"),
             ):
@@ -272,6 +307,7 @@ class PmtilesTileSpecIteratorTests(TestCase):
             self.assertTrue(layers & bake_pmtiles._LAYER_AMENITIES)
             self.assertTrue(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY)
             self.assertTrue(layers & bake_pmtiles._LAYER_SERVICE_DESERTS)
+            self.assertFalse(layers & bake_pmtiles._LAYER_NOISE)
 
         # z12 > coarse_grid_max_zoom → only amenities + transport_reality.
         z12_specs = [spec for spec in specs if spec[0] == 12]
@@ -279,10 +315,30 @@ class PmtilesTileSpecIteratorTests(TestCase):
         for z, _, _, layers in z12_specs:
             self.assertEqual(z, 12)
             self.assertFalse(layers & bake_pmtiles._LAYER_GRID)
-            self.assertTrue(layers & bake_pmtiles._LAYER_FINE_GRID)
-            self.assertTrue(layers & bake_pmtiles._LAYER_AMENITIES)
-            self.assertTrue(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY)
             self.assertFalse(layers & bake_pmtiles._LAYER_SERVICE_DESERTS)
+            self.assertFalse(layers & bake_pmtiles._LAYER_NOISE)
+        self.assertTrue(any(layers & bake_pmtiles._LAYER_FINE_GRID for _, _, _, layers in z12_specs))
+        self.assertTrue(any(layers & bake_pmtiles._LAYER_AMENITIES for _, _, _, layers in z12_specs))
+        self.assertTrue(
+            any(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY for _, _, _, layers in z12_specs)
+        )
+
+    def test_noise_tile_specs_are_included_above_coarse_zoom(self) -> None:
+        specs = list(
+            bake_pmtiles._iter_tile_specs(
+                min_zoom=12,
+                max_zoom=12,
+                bbox=(-6.2, 53.4, -6.2, 53.4),
+                amenity_points=[],
+                transport_reality_points=[],
+                coarse_grid_max_zoom=11,
+                amenity_min_zoom=9,
+                transport_reality_min_zoom=9,
+                noise_tile_coords_by_zoom={12: [(10, 11)]},
+            )
+        )
+
+        self.assertEqual(specs, [(12, 10, 11, bake_pmtiles._LAYER_NOISE)])
 
     def test_below_amenity_min_zoom_skips_amenity_layers(self) -> None:
         # At z5 with amenity_min_zoom=9, only grid + service_deserts should be included.
@@ -444,6 +500,7 @@ class PmtilesBakeReliabilityTests(TestCase):
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
                 mock.patch.object(
                     bake_pmtiles,
                     "fine_grid_tile_coordinates_by_zoom",
@@ -518,6 +575,7 @@ class PmtilesBakeReliabilityTests(TestCase):
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
                 mock.patch.object(
                     bake_pmtiles,
                     "fine_grid_tile_coordinates_by_zoom",
@@ -574,6 +632,7 @@ class PmtilesBakeReliabilityTests(TestCase):
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)),
                 mock.patch.object(
                     bake_pmtiles,
@@ -626,6 +685,7 @@ class PmtilesBakeReliabilityTests(TestCase):
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
+                mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_tile_range_for_bbox", return_value=(0, 0, 0, 0)),
                 mock.patch.object(bake_pmtiles, "_bake_sequential", return_value=(0, 0, {})),
             ):

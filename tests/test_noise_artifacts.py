@@ -1,0 +1,694 @@
+"""
+Tests for the noise artifact manifest system (Phases 2 and 3).
+All DB operations use mock engines — no live DB required.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+from unittest import TestCase
+from unittest.mock import MagicMock, call, patch
+
+from noise_artifacts.manifest import (
+    ArtifactManifest,
+    get_active_artifact,
+    mark_artifact_complete,
+    mark_artifact_failed,
+    noise_domain_hash,
+    noise_resolved_hash,
+    noise_source_hash,
+    noise_tile_hash,
+    record_lineage,
+    reset_artifact_for_retry,
+    set_active_artifact,
+    upsert_artifact,
+)
+
+
+# ---------------------------------------------------------------------------
+# Hash function tests
+# ---------------------------------------------------------------------------
+
+class NoiseArtifactHashTests(TestCase):
+
+    def test_noise_source_hash_is_deterministic(self) -> None:
+        h1 = noise_source_hash("sig-abc", 2, 3)
+        h2 = noise_source_hash("sig-abc", 2, 3)
+        self.assertEqual(h1, h2)
+
+    def test_noise_source_hash_is_16_hex_chars(self) -> None:
+        h = noise_source_hash("sig-abc", 2, 3)
+        self.assertEqual(len(h), 16)
+        int(h, 16)  # must be valid hex
+
+    def test_noise_source_hash_changes_when_signature_changes(self) -> None:
+        h1 = noise_source_hash("sig-abc", 2, 3)
+        h2 = noise_source_hash("sig-xyz", 2, 3)
+        self.assertNotEqual(h1, h2)
+
+    def test_noise_source_hash_changes_when_parser_version_changes(self) -> None:
+        h1 = noise_source_hash("sig-abc", 1, 3)
+        h2 = noise_source_hash("sig-abc", 2, 3)
+        self.assertNotEqual(h1, h2)
+
+    def test_noise_source_hash_changes_when_schema_version_changes(self) -> None:
+        h1 = noise_source_hash("sig-abc", 2, 1)
+        h2 = noise_source_hash("sig-abc", 2, 2)
+        self.assertNotEqual(h1, h2)
+
+    def test_noise_domain_hash_is_deterministic(self) -> None:
+        boundary = b"\x00\x01\x02"
+        h1 = noise_domain_hash(boundary, 1)
+        h2 = noise_domain_hash(boundary, 1)
+        self.assertEqual(h1, h2)
+
+    def test_noise_domain_hash_changes_when_boundary_changes(self) -> None:
+        h1 = noise_domain_hash(b"\x00\x01", 1)
+        h2 = noise_domain_hash(b"\x00\x02", 1)
+        self.assertNotEqual(h1, h2)
+
+    def test_noise_domain_hash_changes_when_extent_version_changes(self) -> None:
+        h1 = noise_domain_hash(b"\x00\x01", 1)
+        h2 = noise_domain_hash(b"\x00\x01", 2)
+        self.assertNotEqual(h1, h2)
+
+    def test_noise_resolved_hash_is_deterministic(self) -> None:
+        h1 = noise_resolved_hash("src", "dom", 1, 1, 1, 0.1)
+        h2 = noise_resolved_hash("src", "dom", 1, 1, 1, 0.1)
+        self.assertEqual(h1, h2)
+
+    def test_noise_resolved_hash_changes_when_any_input_changes(self) -> None:
+        base = noise_resolved_hash("src", "dom", 1, 1, 1, 0.1)
+        variants = [
+            noise_resolved_hash("src2", "dom", 1, 1, 1, 0.1),
+            noise_resolved_hash("src", "dom2", 1, 1, 1, 0.1),
+            noise_resolved_hash("src", "dom", 2, 1, 1, 0.1),
+            noise_resolved_hash("src", "dom", 1, 2, 1, 0.1),
+            noise_resolved_hash("src", "dom", 1, 1, 2, 0.1),
+            noise_resolved_hash("src", "dom", 1, 1, 1, 0.5),
+        ]
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertNotEqual(base, variant)
+
+    def test_noise_tile_hash_is_deterministic(self) -> None:
+        h1 = noise_tile_hash("res", 1, 8, 13, ("metric", "db_value"), (5.0, 10.0))
+        h2 = noise_tile_hash("res", 1, 8, 13, ("metric", "db_value"), (5.0, 10.0))
+        self.assertEqual(h1, h2)
+
+    def test_noise_tile_hash_property_order_does_not_matter(self) -> None:
+        h1 = noise_tile_hash("res", 1, 8, 13, ("metric", "db_value"), (5.0, 10.0))
+        h2 = noise_tile_hash("res", 1, 8, 13, ("db_value", "metric"), (5.0, 10.0))
+        self.assertEqual(h1, h2, "exported_properties are sorted before hashing")
+
+
+# ---------------------------------------------------------------------------
+# Manifest DB operation tests (mock engine)
+# ---------------------------------------------------------------------------
+
+def _make_mock_engine():
+    engine = MagicMock()
+    conn = MagicMock()
+    engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+    engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+    engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+    return engine, conn
+
+
+class UpsertArtifactTests(TestCase):
+
+    def test_upsert_calls_execute(self) -> None:
+        engine, conn = _make_mock_engine()
+        upsert_artifact(engine, "abc123", "resolved", {"key": "val"})
+        self.assertTrue(conn.execute.called)
+
+    def test_upsert_sql_contains_on_conflict_do_nothing(self) -> None:
+        engine, conn = _make_mock_engine()
+        upsert_artifact(engine, "abc123", "resolved", {})
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("ON CONFLICT", sql_text)
+        self.assertIn("DO NOTHING", sql_text)
+
+    def test_upsert_sql_inserts_with_building_status(self) -> None:
+        engine, conn = _make_mock_engine()
+        upsert_artifact(engine, "abc123", "resolved", {})
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("'building'", sql_text)
+
+
+class ResetArtifactTests(TestCase):
+
+    def test_reset_updates_status_to_building(self) -> None:
+        engine, conn = _make_mock_engine()
+        reset_artifact_for_retry(engine, "abc123", {"reset": True})
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("'building'", sql_text)
+        self.assertIn("UPDATE", sql_text)
+
+    def test_reset_clears_completed_at(self) -> None:
+        engine, conn = _make_mock_engine()
+        reset_artifact_for_retry(engine, "abc123", {})
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("completed_at", sql_text)
+        self.assertIn("NULL", sql_text)
+
+
+class MarkCompleteTests(TestCase):
+
+    def test_mark_complete_updates_status(self) -> None:
+        engine, conn = _make_mock_engine()
+        mark_artifact_complete(engine, "abc123", updated_manifest_json={"rows": 42})
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("'complete'", sql_text)
+        self.assertIn("UPDATE", sql_text)
+
+    def test_mark_complete_sets_completed_at(self) -> None:
+        engine, conn = _make_mock_engine()
+        mark_artifact_complete(engine, "abc123", updated_manifest_json={})
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("completed_at", sql_text)
+
+
+class MarkFailedTests(TestCase):
+
+    def test_mark_failed_updates_status(self) -> None:
+        engine, conn = _make_mock_engine()
+        mark_artifact_failed(engine, "abc123", error_detail="boom")
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("'failed'", sql_text)
+        self.assertIn("UPDATE", sql_text)
+
+    def test_mark_failed_stores_error_detail(self) -> None:
+        engine, conn = _make_mock_engine()
+        mark_artifact_failed(engine, "abc123", error_detail="boom")
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("error_detail", sql_text)
+
+
+class RecordLineageTests(TestCase):
+
+    def test_record_lineage_inserts_row(self) -> None:
+        engine, conn = _make_mock_engine()
+        record_lineage(engine, "child", "parent")
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("INSERT INTO noise_artifact_lineage", sql_text)
+
+    def test_record_lineage_is_idempotent(self) -> None:
+        engine, conn = _make_mock_engine()
+        record_lineage(engine, "child", "parent")
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("ON CONFLICT", sql_text)
+
+
+class SetActiveArtifactTests(TestCase):
+
+    def test_set_active_upserts_pointer(self) -> None:
+        engine, conn = _make_mock_engine()
+        set_active_artifact(engine, "resolved", "abc123")
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("INSERT INTO noise_active_artifact", sql_text)
+        self.assertIn("ON CONFLICT", sql_text)
+
+    def test_set_active_updates_existing_pointer(self) -> None:
+        engine, conn = _make_mock_engine()
+        set_active_artifact(engine, "resolved", "abc123")
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("DO UPDATE", sql_text)
+
+
+class GetActiveArtifactTests(TestCase):
+
+    def _make_engine_with_row(self, row_data):
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        mapping_mock = MagicMock()
+        mapping_mock.first.return_value = row_data
+        conn.execute.return_value.mappings.return_value = mapping_mock
+        return engine
+
+    def test_returns_none_when_no_active_artifact(self) -> None:
+        engine = self._make_engine_with_row(None)
+        result = get_active_artifact(engine, "resolved")
+        self.assertIsNone(result)
+
+    def test_returns_manifest_when_found(self) -> None:
+        now = datetime.now(timezone.utc)
+        row = {
+            "artifact_hash": "abc123",
+            "artifact_type": "resolved",
+            "status": "complete",
+            "manifest_json": {"rows": 42},
+            "created_at": now,
+            "completed_at": now,
+        }
+        engine = self._make_engine_with_row(row)
+        result = get_active_artifact(engine, "resolved")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.artifact_hash, "abc123")
+        self.assertEqual(result.artifact_type, "resolved")
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.manifest_json, {"rows": 42})
+
+    def test_query_filters_on_complete_status(self) -> None:
+        engine = self._make_engine_with_row(None)
+        get_active_artifact(engine, "resolved")
+        conn = engine.connect.return_value.__enter__.return_value
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("status = 'complete'", sql_text)
+
+    def test_query_joins_active_artifact_to_manifest(self) -> None:
+        engine = self._make_engine_with_row(None)
+        get_active_artifact(engine, "tiles")
+        conn = engine.connect.return_value.__enter__.return_value
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("noise_active_artifact", sql_text)
+        self.assertIn("noise_artifact_manifest", sql_text)
+
+
+# ---------------------------------------------------------------------------
+# DB table registration tests
+# ---------------------------------------------------------------------------
+
+class NoiseArtifactTableRegistrationTests(TestCase):
+
+    def test_noise_artifact_manifest_in_required_public_tables(self) -> None:
+        from db_postgis.tables import REQUIRED_PUBLIC_TABLES
+        self.assertIn("noise_artifact_manifest", REQUIRED_PUBLIC_TABLES)
+
+    def test_noise_artifact_lineage_in_required_public_tables(self) -> None:
+        from db_postgis.tables import REQUIRED_PUBLIC_TABLES
+        self.assertIn("noise_artifact_lineage", REQUIRED_PUBLIC_TABLES)
+
+    def test_noise_active_artifact_in_required_public_tables(self) -> None:
+        from db_postgis.tables import REQUIRED_PUBLIC_TABLES
+        self.assertIn("noise_active_artifact", REQUIRED_PUBLIC_TABLES)
+
+    def test_noise_artifact_manifest_table_importable(self) -> None:
+        from db_postgis.tables import noise_artifact_manifest
+        self.assertEqual(noise_artifact_manifest.name, "noise_artifact_manifest")
+
+    def test_noise_artifact_lineage_table_importable(self) -> None:
+        from db_postgis.tables import noise_artifact_lineage
+        self.assertEqual(noise_artifact_lineage.name, "noise_artifact_lineage")
+
+    def test_noise_active_artifact_table_importable(self) -> None:
+        from db_postgis.tables import noise_active_artifact
+        self.assertEqual(noise_active_artifact.name, "noise_active_artifact")
+
+    def test_all_three_tables_in_managed_tables(self) -> None:
+        import db_postgis.schema as _schema
+        table_names = {t.name for t in _schema._MANAGED_TABLES}
+        self.assertIn("noise_artifact_manifest", table_names)
+        self.assertIn("noise_artifact_lineage", table_names)
+        self.assertIn("noise_active_artifact", table_names)
+
+
+# ---------------------------------------------------------------------------
+# Migration SQL content tests
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Phase 3: Canonical table registration tests
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Phase 4A-8A: pipeline module tests
+# ---------------------------------------------------------------------------
+
+class GeometrySqlHelperTests(TestCase):
+
+    def test_clean_geometry_sql_contains_make_valid_and_collection_extract(self) -> None:
+        from noise_artifacts.geometry import clean_geometry_sql
+        sql = clean_geometry_sql("g.geom")
+        self.assertIn("ST_MakeValid", sql)
+        self.assertIn("ST_CollectionExtract", sql)
+        self.assertIn("g.geom", sql)
+
+    def test_reduce_precision_sql_uses_grid_metres(self) -> None:
+        from noise_artifacts.geometry import reduce_precision_sql
+        sql = reduce_precision_sql("g.geom", grid_metres=0.5)
+        self.assertIn("ST_ReducePrecision", sql)
+        self.assertIn("0.5", sql)
+
+    def test_reduce_precision_sql_does_not_use_degrees(self) -> None:
+        from noise_artifacts.geometry import reduce_precision_sql
+        sql = reduce_precision_sql("g.geom", grid_metres=0.1)
+        # Must NOT use degree-scale snap grids (e.g. 0.0000001)
+        self.assertNotIn("0.0000001", sql)
+
+    def test_subdivide_geometry_sql_parameterises_max_vertices(self) -> None:
+        from noise_artifacts.geometry import subdivide_geometry_sql
+        sql = subdivide_geometry_sql("g.geom", max_vertices=128)
+        self.assertIn("ST_Subdivide", sql)
+        self.assertIn("128", sql)
+
+    def test_area_filter_excludes_null_and_empty(self) -> None:
+        from noise_artifacts.geometry import area_filter_fragment
+        sql = area_filter_fragment("g.geom")
+        self.assertIn("IS NOT NULL", sql)
+        self.assertIn("ST_IsEmpty", sql)
+        self.assertIn("ST_Area", sql)
+
+
+class DissolveSqlTests(TestCase):
+
+    def test_dissolve_module_importable(self) -> None:
+        from noise_artifacts import dissolve
+        self.assertTrue(callable(dissolve.dissolve_noise_into_staging))
+
+    def test_pass1_dissolve_sql_contains_st_unary_union(self) -> None:
+        import inspect
+        from noise_artifacts.dissolve import _pass1_dissolve
+        src = inspect.getsource(_pass1_dissolve)
+        self.assertIn("ST_UnaryUnion", src)
+
+    def test_pass1_dissolve_sql_contains_st_reduce_precision(self) -> None:
+        import inspect
+        from noise_artifacts.dissolve import _pass1_dissolve
+        src = inspect.getsource(_pass1_dissolve)
+        self.assertIn("ST_ReducePrecision", src)
+
+    def test_pass1_dissolve_sql_contains_processing_grid(self) -> None:
+        import inspect
+        from noise_artifacts.dissolve import _pass1_dissolve
+        src = inspect.getsource(_pass1_dissolve)
+        self.assertIn("processing_grid", src)
+
+    def test_pass2_dissolve_sql_contains_st_unary_union(self) -> None:
+        import inspect
+        from noise_artifacts.dissolve import _pass2_dissolve
+        src = inspect.getsource(_pass2_dissolve)
+        self.assertIn("ST_UnaryUnion", src)
+
+    def test_staging_tables_are_unlogged(self) -> None:
+        import inspect
+        from noise_artifacts.dissolve import _create_dissolve_staging
+        src = inspect.getsource(_create_dissolve_staging)
+        self.assertIn("UNLOGGED", src)
+
+    def test_dissolve_has_square_grid_fallback(self) -> None:
+        import inspect
+        import noise_artifacts.dissolve as _d
+        src = inspect.getsource(_d)
+        self.assertIn("generate_series", src)
+        self.assertIn("ST_SquareGrid", src)
+
+
+class ResolveSqlTests(TestCase):
+
+    def test_resolve_module_importable(self) -> None:
+        from noise_artifacts import resolve
+        self.assertTrue(callable(resolve.materialize_resolved_display))
+
+    def test_insert_resolved_round_sql_contains_st_difference(self) -> None:
+        import inspect
+        from noise_artifacts.resolve import _insert_resolved_round
+        src = inspect.getsource(_insert_resolved_round)
+        self.assertIn("ST_Difference", src)
+
+    def test_insert_resolved_round_sql_contains_st_subdivide(self) -> None:
+        import inspect
+        from noise_artifacts.resolve import _insert_resolved_round
+        src = inspect.getsource(_insert_resolved_round)
+        self.assertIn("ST_Subdivide", src)
+
+    def test_insert_resolved_round_sql_contains_st_reduce_precision(self) -> None:
+        import inspect
+        from noise_artifacts.resolve import _insert_resolved_round
+        src = inspect.getsource(_insert_resolved_round)
+        self.assertIn("ST_ReducePrecision", src)
+
+    def test_fetch_rounds_orders_descending(self) -> None:
+        import inspect
+        from noise_artifacts.resolve import _fetch_rounds
+        src = inspect.getsource(_fetch_rounds)
+        self.assertIn("DESC", src)
+
+    def test_insert_provenance_is_group_level(self) -> None:
+        import inspect
+        from noise_artifacts.resolve import _insert_provenance
+        src = inspect.getsource(_insert_provenance)
+        # Group-level means GROUP BY, not per-polygon spatial join
+        self.assertIn("GROUP BY", src)
+        self.assertNotIn("ST_Intersects", src)
+
+    def test_provenance_uses_on_conflict_do_nothing(self) -> None:
+        import inspect
+        from noise_artifacts.resolve import _insert_provenance
+        src = inspect.getsource(_insert_provenance)
+        self.assertIn("ON CONFLICT", src)
+        self.assertIn("DO NOTHING", src)
+
+
+class BuilderTests(TestCase):
+
+    def _make_engine_with_status(self, status=None):
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        row = MagicMock()
+        row.__getitem__ = MagicMock(side_effect=lambda k: status if k == "status" else 0)
+        row.mappings.return_value.first.return_value = None if status is None else row
+        conn.execute.return_value.mappings.return_value.first.return_value = (
+            None if status is None else {"status": status, "row_count": 0,
+                                          "jurisdiction_count": 0,
+                                          "source_type_count": 0, "metric_count": 0}
+        )
+        return engine
+
+    def test_builder_marks_failed_on_ingest_error(self) -> None:
+        from unittest.mock import patch, MagicMock
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.mappings.return_value.first.return_value = None
+
+        with patch("noise_artifacts.builder.ingest_noise_normalized",
+                   side_effect=RuntimeError("boom")):
+            with patch("noise_artifacts.builder.mark_artifact_failed") as mock_fail:
+                with patch("noise_artifacts.builder.upsert_artifact"):
+                    with patch("noise_artifacts.builder.record_lineage"):
+                        with self.assertRaises(RuntimeError):
+                            from noise_artifacts.builder import build_noise_artifact
+                            build_noise_artifact(
+                                engine,
+                                data_dir="/fake",
+                                domain_wgs84=MagicMock(),
+                                domain_wkb=b"\x00",
+                                source_hash="src",
+                                domain_hash="dom",
+                                resolved_hash="res",
+                            )
+                mock_fail.assert_called_once()
+                call_kwargs = mock_fail.call_args
+                self.assertIn("error_detail", call_kwargs.kwargs)
+
+    def test_builder_sets_active_artifact_on_success(self) -> None:
+        from unittest.mock import patch, MagicMock
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.mappings.return_value.first.return_value = {
+            "row_count": 10, "jurisdiction_count": 2,
+            "source_type_count": 3, "metric_count": 2,
+        }
+
+        with patch("noise_artifacts.builder.ingest_noise_normalized"):
+            with patch("noise_artifacts.builder.dissolve_noise_into_staging",
+                       return_value=("dissolve_tbl", "round_tbl")):
+                with patch("noise_artifacts.builder.materialize_resolved_display",
+                           return_value={"total_inserted": 10, "groups_processed": 3}):
+                    with patch("noise_artifacts.builder.mark_artifact_complete"):
+                        with patch("noise_artifacts.builder.set_active_artifact") as mock_set:
+                            with patch("noise_artifacts.builder.record_lineage"):
+                                with patch("noise_artifacts.builder.upsert_artifact"):
+                                    with patch("noise_artifacts.builder.drop_staging_tables"):
+                                        from noise_artifacts.builder import build_noise_artifact
+                                        build_noise_artifact(
+                                            engine,
+                                            data_dir="/fake",
+                                            domain_wgs84=MagicMock(),
+                                            domain_wkb=b"\x00",
+                                            source_hash="src",
+                                            domain_hash="dom",
+                                            resolved_hash="res",
+                                        )
+                        mock_set.assert_called_once_with(engine, "resolved", "res")
+
+
+class IngestSqlTests(TestCase):
+
+    def test_ingest_sql_transforms_to_2157(self) -> None:
+        import inspect
+        from noise_artifacts.ingest import _insert_batch
+        src = inspect.getsource(_insert_batch)
+        self.assertIn("ST_Transform", src)
+        self.assertIn("2157", src)
+
+    def test_ingest_sql_makes_valid(self) -> None:
+        import inspect
+        from noise_artifacts.ingest import _insert_batch
+        src = inspect.getsource(_insert_batch)
+        self.assertIn("ST_MakeValid", src)
+
+    def test_ingest_deletes_prior_rows_on_force(self) -> None:
+        import inspect
+        from noise_artifacts.ingest import ingest_noise_normalized
+        src = inspect.getsource(ingest_noise_normalized)
+        self.assertIn("DELETE FROM noise_normalized", src)
+
+    def test_bake_stub_raises_not_implemented(self) -> None:
+        from noise_artifacts.bake import bake_noise_artifact_pmtiles
+        from pathlib import Path
+        engine = MagicMock()
+        with self.assertRaises(NotImplementedError):
+            bake_noise_artifact_pmtiles(engine, "tilehash", output_dir=Path("/tmp"))
+
+
+class NoiseCanonicalTableRegistrationTests(TestCase):
+
+    def test_noise_normalized_in_required_public_tables(self) -> None:
+        from db_postgis.tables import REQUIRED_PUBLIC_TABLES
+        self.assertIn("noise_normalized", REQUIRED_PUBLIC_TABLES)
+
+    def test_noise_resolved_display_in_required_public_tables(self) -> None:
+        from db_postgis.tables import REQUIRED_PUBLIC_TABLES
+        self.assertIn("noise_resolved_display", REQUIRED_PUBLIC_TABLES)
+
+    def test_noise_resolved_provenance_in_required_public_tables(self) -> None:
+        from db_postgis.tables import REQUIRED_PUBLIC_TABLES
+        self.assertIn("noise_resolved_provenance", REQUIRED_PUBLIC_TABLES)
+
+    def test_all_three_canonical_tables_in_managed_tables(self) -> None:
+        import db_postgis.schema as _schema
+        table_names = {t.name for t in _schema._MANAGED_TABLES}
+        self.assertIn("noise_normalized", table_names)
+        self.assertIn("noise_resolved_display", table_names)
+        self.assertIn("noise_resolved_provenance", table_names)
+
+    def test_noise_normalized_geom_is_2157(self) -> None:
+        from db_postgis.tables import noise_normalized
+        geom_col = noise_normalized.c["geom"]
+        self.assertEqual(geom_col.type.srid, 2157)
+
+    def test_noise_resolved_display_geom_is_2157(self) -> None:
+        from db_postgis.tables import noise_resolved_display
+        geom_col = noise_resolved_display.c["geom"]
+        self.assertEqual(geom_col.type.srid, 2157)
+
+    def test_noise_resolved_provenance_has_no_geom(self) -> None:
+        from db_postgis.tables import noise_resolved_provenance
+        col_names = {c.name for c in noise_resolved_provenance.c}
+        self.assertNotIn("geom", col_names)
+
+    def test_noise_normalized_in_geometry_fields(self) -> None:
+        from db_postgis.tables import GEOMETRY_FIELDS, noise_normalized
+        from db_postgis.common import _table_key
+        self.assertIn(_table_key(noise_normalized), GEOMETRY_FIELDS)
+
+    def test_noise_resolved_display_in_geometry_fields(self) -> None:
+        from db_postgis.tables import GEOMETRY_FIELDS, noise_resolved_display
+        from db_postgis.common import _table_key
+        self.assertIn(_table_key(noise_resolved_display), GEOMETRY_FIELDS)
+
+    def test_migration_000015_creates_all_three_canonical_tables(self) -> None:
+        import importlib, inspect
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260427_000015_noise_canonical_tables"
+        )
+        src = inspect.getsource(mod)
+        self.assertIn("noise_normalized", src)
+        self.assertIn("noise_resolved_display", src)
+        self.assertIn("noise_resolved_provenance", src)
+
+    def test_migration_000015_canonical_geom_is_2157(self) -> None:
+        import importlib, inspect
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260427_000015_noise_canonical_tables"
+        )
+        src = inspect.getsource(mod)
+        self.assertIn("2157", src)
+
+    def test_migration_000015_has_db_high_ge_db_low_check(self) -> None:
+        import importlib, inspect
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260427_000015_noise_canonical_tables"
+        )
+        src = inspect.getsource(mod)
+        self.assertIn("db_high >= db_low", src)
+
+    def test_migration_000015_correct_down_revision(self) -> None:
+        import importlib
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260427_000015_noise_canonical_tables"
+        )
+        self.assertEqual(mod.down_revision, "20260427_000014")
+
+    def test_migration_000015_downgrade_drops_all_tables(self) -> None:
+        import importlib, inspect
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260427_000015_noise_canonical_tables"
+        )
+        src = inspect.getsource(mod)
+        self.assertIn("DROP TABLE IF EXISTS noise_resolved_provenance", src)
+        self.assertIn("DROP TABLE IF EXISTS noise_resolved_display", src)
+        self.assertIn("DROP TABLE IF EXISTS noise_normalized", src)
+
+
+class MigrationSqlTests(TestCase):
+
+    def _get_migration_source(self) -> str:
+        import importlib
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260427_000014_noise_artifact_manifest"
+        )
+        import inspect
+        return inspect.getsource(mod)
+
+    def test_migration_creates_noise_artifact_manifest(self) -> None:
+        src = self._get_migration_source()
+        self.assertIn("noise_artifact_manifest", src)
+
+    def test_migration_creates_noise_artifact_lineage(self) -> None:
+        src = self._get_migration_source()
+        self.assertIn("noise_artifact_lineage", src)
+
+    def test_migration_creates_noise_active_artifact(self) -> None:
+        src = self._get_migration_source()
+        self.assertIn("noise_active_artifact", src)
+
+    def test_migration_has_correct_check_on_artifact_type(self) -> None:
+        src = self._get_migration_source()
+        for expected in ("source", "domain", "resolved", "tiles", "exposure"):
+            self.assertIn(expected, src)
+
+    def test_migration_has_correct_check_on_status(self) -> None:
+        src = self._get_migration_source()
+        for expected in ("building", "complete", "failed", "superseded"):
+            self.assertIn(expected, src)
+
+    def test_migration_has_correct_down_revision(self) -> None:
+        import importlib
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260427_000014_noise_artifact_manifest"
+        )
+        self.assertEqual(mod.down_revision, "20260426_000013")
+
+    def test_migration_downgrade_drops_all_three_tables(self) -> None:
+        src = self._get_migration_source()
+        self.assertIn("DROP TABLE IF EXISTS noise_active_artifact", src)
+        self.assertIn("DROP TABLE IF EXISTS noise_artifact_lineage", src)
+        self.assertIn("DROP TABLE IF EXISTS noise_artifact_manifest", src)

@@ -16,6 +16,8 @@ from zoneinfo import ZoneInfo
 from overture.loader import category_map_signature as overture_category_map_signature
 from overture.loader import dataset_info as overture_dataset_info
 from overture.loader import dataset_signature as overture_dataset_signature
+from noise.loader import dataset_info as noise_dataset_info
+from noise.loader import dataset_signature as noise_dataset_signature
 from pyproj import Transformer
 
 try:
@@ -269,6 +271,7 @@ class BuildProfileSettings:
     fine_resolutions_m: tuple[int, ...]
     surface_zoom_breaks: tuple[tuple[int, int], ...]
     fine_surface_enabled: bool
+    noise_max_zoom: int = 13
     study_area_kind: StudyAreaKind = "ireland"
     study_area_county_name: str | None = None
     study_area_bbox_wgs84: tuple[float, float, float, float] | None = None
@@ -299,6 +302,7 @@ _BUILD_PROFILE_SETTINGS: dict[BuildProfile, BuildProfileSettings] = {
             (0, 20_000),
         ),
         fine_surface_enabled=True,
+        noise_max_zoom=13,
         study_area_kind="ireland",
     ),
     "dev": BuildProfileSettings(
@@ -311,6 +315,7 @@ _BUILD_PROFILE_SETTINGS: dict[BuildProfile, BuildProfileSettings] = {
             (0, 20_000),
         ),
         fine_surface_enabled=False,
+        noise_max_zoom=10,
         study_area_kind="ireland",
     ),
     "test": BuildProfileSettings(
@@ -329,6 +334,7 @@ _BUILD_PROFILE_SETTINGS: dict[BuildProfile, BuildProfileSettings] = {
             (0, 20_000),
         ),
         fine_surface_enabled=True,
+        noise_max_zoom=13,
         study_area_kind="bbox",
         study_area_bbox_wgs84=(-8.55, 51.87, -8.41, 51.93),
     ),
@@ -482,7 +488,7 @@ CATEGORY_COLORS = {
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
 OSM_EXTRACT_FINGERPRINT_CACHE_PATH = CACHE_DIR / "osm_extract_fingerprint_cache.json"
-PMTILES_SCHEMA_VERSION = 8
+PMTILES_SCHEMA_VERSION = 10
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 12
 FORCE_RECOMPUTE = False
@@ -491,9 +497,100 @@ MANIFEST_NAME = "manifest.json"
 DEFAULT_DATABASE_CONNECT_TIMEOUT_SECONDS = 15
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _int_env(name: str, default: int, *, min_value: int = 1, max_value: int = 64) -> int:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(min_value, min(max_value, value))
+
+
+NOISE_PUBLISH_USE_COPY = _bool_env("NOISE_PUBLISH_USE_COPY", True)
+NOISE_LOADER_WORKERS = _int_env(
+    "NOISE_LOADER_WORKERS",
+    min(os.cpu_count() or 2, 3),
+    min_value=1,
+    max_value=16,
+)
+NOISE_BACKGROUND_DISPATCH = _bool_env("NOISE_BACKGROUND_DISPATCH", True)
+
+
+def _noise_mode() -> str:
+    raw = (os.getenv("NOISE_MODE") or "legacy").strip().lower()
+    if raw not in {"legacy", "artifact"}:
+        raise ValueError(
+            f"NOISE_MODE must be 'legacy' or 'artifact', got {raw!r}. "
+            "Set NOISE_MODE=artifact after running: python -m noise_artifacts"
+        )
+    if raw == "legacy":
+        import warnings
+        warnings.warn(
+            "NOISE_MODE=legacy is deprecated. The legacy noise loader reads raw ZIP files "
+            "on every build, which is slow and couples builds to raw source files. "
+            "Migrate to artifact mode: run 'python -m noise_artifacts' once, "
+            "then set NOISE_MODE=artifact.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    return raw
+
+
+NOISE_MODE: str = _noise_mode()
+
+# Geometry precision / simplification in metres (EPSG:2157 only)
+NOISE_TOPOLOGY_GRID_METRES: float = float(
+    os.getenv("NOISE_TOPOLOGY_GRID_METRES") or "0.1"
+)
+NOISE_QUERY_SIMPLIFY_METRES: float = float(
+    os.getenv("NOISE_QUERY_SIMPLIFY_METRES") or "1.0"
+)
+NOISE_TILE_SIMPLIFY_METRES_LZ: float = float(
+    os.getenv("NOISE_TILE_SIMPLIFY_METRES_LOW_ZOOM") or "10.0"
+)
+NOISE_TILE_SIMPLIFY_METRES_HZ: float = float(
+    os.getenv("NOISE_TILE_SIMPLIFY_METRES_HIGH_ZOOM") or "5.0"
+)
+NOISE_DISSOLVE_TILE_SIZE_METRES: float = float(
+    os.getenv("NOISE_DISSOLVE_TILE_SIZE_METRES") or "10000.0"
+)
+
+
 def profile_fine_surface_enabled(profile: str | None = None) -> bool:
     settings = build_profile_settings(profile)
     return bool(settings.fine_surface_enabled and ENABLE_FINE_RASTER_SURFACE)
+
+
+def resolve_noise_max_zoom(profile: str | None = None) -> int:
+    normalized_profile = normalize_build_profile(profile)
+    settings = _BUILD_PROFILE_SETTINGS[normalized_profile]
+    default = int(settings.noise_max_zoom)
+    if normalized_profile != "dev":
+        return default
+    raw = os.getenv("NOISE_MAX_ZOOM_DEV")
+    if raw is None or not raw.strip():
+        return default
+    try:
+        override = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"NOISE_MAX_ZOOM_DEV must be an integer, got {raw!r}"
+        ) from exc
+    return max(0, min(15, override))
 
 
 def precompute_flag_for_profile(profile: str | None = None) -> str:
@@ -830,6 +927,8 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     overture_info = overture_dataset_info()
     overture_category_signature = overture_category_map_signature()
     overture_signature = overture_dataset_signature()
+    noise_info = noise_dataset_info()
+    noise_signature = noise_dataset_signature()
 
     geo_params = {
         "roi_path": str(ROI_BOUNDARY_PATH),
@@ -937,6 +1036,8 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "output_html": OUTPUT_HTML,
         "category_colors": CATEGORY_COLORS,
         "pmtiles_schema_version": PMTILES_SCHEMA_VERSION,
+        "noise_dataset_signature": noise_signature,
+        "noise_dataset_files": noise_info.get("files", {}),
     }
     render_hash = hash_dict(render_params)
 

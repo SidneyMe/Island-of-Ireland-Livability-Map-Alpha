@@ -78,6 +78,11 @@ class RuntimeState:
     transport_bus_frequency_counts: dict[str, int]
     transport_flag_counts: dict[str, int]
     transport_mode_counts: dict[str, int]
+    noise_enabled: bool
+    noise_counts: dict[str, int]
+    noise_source_counts: dict[str, int]
+    noise_metric_counts: dict[str, int]
+    noise_band_counts: dict[str, int]
     fine_surface_enabled: bool
     surface_shell_dir: Path | None
     surface_score_dir: Path | None
@@ -211,6 +216,46 @@ class RuntimeService:
             )
             if str(mode)
         }
+        raw_noise_counts = summary_json.get("noise_counts", {}) or {}
+        noise_counts = {
+            str(key): int(value)
+            for key, value in (
+                raw_noise_counts.items()
+                if isinstance(raw_noise_counts, dict)
+                else ()
+            )
+            if str(key)
+        }
+        raw_noise_source_counts = summary_json.get("noise_source_counts", {}) or {}
+        noise_source_counts = {
+            str(key): int(value)
+            for key, value in (
+                raw_noise_source_counts.items()
+                if isinstance(raw_noise_source_counts, dict)
+                else ()
+            )
+            if str(key)
+        }
+        raw_noise_metric_counts = summary_json.get("noise_metric_counts", {}) or {}
+        noise_metric_counts = {
+            str(key): int(value)
+            for key, value in (
+                raw_noise_metric_counts.items()
+                if isinstance(raw_noise_metric_counts, dict)
+                else ()
+            )
+            if str(key)
+        }
+        raw_noise_band_counts = summary_json.get("noise_band_counts", {}) or {}
+        noise_band_counts = {
+            str(key): int(value)
+            for key, value in (
+                raw_noise_band_counts.items()
+                if isinstance(raw_noise_band_counts, dict)
+                else ()
+            )
+            if str(key)
+        }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -264,6 +309,11 @@ class RuntimeService:
             transport_bus_frequency_counts=transport_bus_frequency_counts,
             transport_flag_counts=transport_flag_counts,
             transport_mode_counts=transport_mode_counts,
+            noise_enabled=bool(summary_json.get("noise_enabled")) or bool(noise_source_counts),
+            noise_counts=noise_counts,
+            noise_source_counts=noise_source_counts,
+            noise_metric_counts=noise_metric_counts,
+            noise_band_counts=noise_band_counts,
             fine_surface_enabled=fine_surface_enabled,
             surface_shell_dir=surface_shell_dir,
             surface_score_dir=surface_score_dir,
@@ -328,6 +378,11 @@ class RuntimeService:
             "transport_bus_frequency_counts": state.transport_bus_frequency_counts,
             "transport_flag_counts": state.transport_flag_counts,
             "transport_mode_counts": state.transport_mode_counts,
+            "noise_enabled": state.noise_enabled,
+            "noise_counts": state.noise_counts,
+            "noise_source_counts": state.noise_source_counts,
+            "noise_metric_counts": state.noise_metric_counts,
+            "noise_band_counts": state.noise_band_counts,
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,
             "max_zoom": SURFACE_MAX_ZOOM,

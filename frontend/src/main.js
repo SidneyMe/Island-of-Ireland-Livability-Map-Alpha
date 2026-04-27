@@ -16,6 +16,14 @@ import {
   transportTierOptions
 } from "./transport_filters.js";
 import {
+  buildNoiseLayerFilter,
+  defaultNoiseSelections,
+  noiseBandOptions,
+  noiseMetricOptions,
+  noiseSourceLabel,
+  noiseSourceOptions
+} from "./noise_filters.js";
+import {
   CLICK_ACTIONS,
   resolveMapClickAction
 } from "./click_priority.js";
@@ -88,6 +96,8 @@ const elements = {
   amenityNote: document.getElementById("amenity-note"),
   transitControls: document.getElementById("transit-controls"),
   transitNote: document.getElementById("transit-note"),
+  noiseControls: document.getElementById("noise-controls"),
+  noiseNote: document.getElementById("noise-note"),
   transportRealityDownload: document.getElementById("transport-reality-download"),
   gridToggle: document.getElementById("grid-toggle"),
   map: document.getElementById("map"),
@@ -137,6 +147,10 @@ const state = {
   transportIncludeUnscheduled: false,
   transportRequireExceptionOnly: false,
   serviceDesertsVisible: false,
+  noiseVisible: false,
+  selectedNoiseMetric: "Lden",
+  selectedNoiseSources: new Set(),
+  selectedNoiseBands: new Set(),
   pendingInspect: null
 };
 
@@ -470,6 +484,48 @@ function applyServiceDesertVisibility() {
   );
 }
 
+function noiseFilterSummary() {
+  const sourceOptions = noiseSourceOptions(state.runtime);
+  const bandOptions = noiseBandOptions(state.runtime);
+  const sourceCount = state.selectedNoiseSources.size;
+  const bandCount = state.selectedNoiseBands.size;
+  if (!sourceCount || !bandCount) return "No filters selected";
+  const sourceText = sourceCount === sourceOptions.length ? "all sources" : sourceCount + " sources";
+  const bandText = bandCount === bandOptions.length ? "all bands" : bandCount + " bands";
+  return state.selectedNoiseMetric + ", " + sourceText + ", " + bandText;
+}
+
+function updateNoiseNote() {
+  if (!elements.noiseNote) return;
+  if (!state.runtime.noise_enabled) {
+    elements.noiseNote.textContent = "No noise contours in this build";
+    return;
+  }
+  elements.noiseNote.textContent = state.noiseVisible ? noiseFilterSummary() : "Off until enabled";
+}
+
+function applyNoiseFilter() {
+  if (!state.map) return;
+  state.map.setFilter(
+    "noise-fill",
+    buildNoiseLayerFilter({
+      metric: state.selectedNoiseMetric,
+      selectedSources: state.selectedNoiseSources,
+      selectedBands: state.selectedNoiseBands
+    })
+  );
+}
+
+function applyNoiseVisibility() {
+  if (!state.map) return;
+  state.map.setLayoutProperty(
+    "noise-fill",
+    "visibility",
+    state.noiseVisible ? "visible" : "none"
+  );
+  applyNoiseFilter();
+}
+
 function buildAmenityControls() {
   elements.amenityControls.replaceChildren();
   const colors = state.runtime.category_colors || {};
@@ -612,6 +668,168 @@ function buildAmenityControls() {
       elements.amenityControls.appendChild(card);
     });
   updateAmenityNote();
+}
+
+function buildNoiseControls() {
+  if (!elements.noiseControls) return;
+  elements.noiseControls.replaceChildren();
+  if (!state.runtime.noise_enabled) {
+    updateNoiseNote();
+    return;
+  }
+
+  const overlayLabel = document.createElement("label");
+  overlayLabel.className = "toggle-row";
+  overlayLabel.htmlFor = "noise-toggle";
+
+  const overlayTextWrap = document.createElement("span");
+  overlayTextWrap.className = "toggle-label";
+
+  const overlayTitle = document.createElement("strong");
+  overlayTitle.textContent = "Show official noise contours";
+
+  const overlaySubtitle = document.createElement("span");
+  overlaySubtitle.textContent = "Lden and Lnight polygons";
+
+  const overlayInput = document.createElement("input");
+  overlayInput.type = "checkbox";
+  overlayInput.id = "noise-toggle";
+  overlayInput.checked = state.noiseVisible;
+
+  overlayTextWrap.appendChild(overlayTitle);
+  overlayTextWrap.appendChild(overlaySubtitle);
+  overlayLabel.appendChild(overlayTextWrap);
+  overlayLabel.appendChild(overlayInput);
+  elements.noiseControls.appendChild(overlayLabel);
+
+  const filterDetails = document.createElement("details");
+  filterDetails.className = "amenity-tier-details";
+
+  const filterSummary = document.createElement("summary");
+  filterSummary.className = "amenity-tier-summary";
+
+  const filterSummaryLabel = document.createElement("span");
+  filterSummaryLabel.textContent = "Noise filters";
+
+  const filterMeta = document.createElement("span");
+  filterMeta.className = "amenity-tier-meta";
+  filterMeta.textContent = noiseFilterSummary();
+
+  filterSummary.appendChild(filterSummaryLabel);
+  filterSummary.appendChild(filterMeta);
+  filterDetails.appendChild(filterSummary);
+
+  const filterList = document.createElement("div");
+  filterList.className = "amenity-tier-list";
+
+  const filterRows = [];
+
+  function syncNoiseInputs() {
+    filterRows.forEach(function (entry) {
+      if (entry.type === "metric") {
+        entry.input.checked = state.selectedNoiseMetric === entry.value;
+      } else if (entry.type === "source") {
+        entry.input.checked = state.selectedNoiseSources.has(entry.value);
+      } else if (entry.type === "band") {
+        entry.input.checked = state.selectedNoiseBands.has(entry.value);
+      }
+      entry.input.disabled = !state.noiseVisible;
+    });
+    filterMeta.textContent = noiseFilterSummary();
+    filterDetails.classList.toggle("is-disabled", !state.noiseVisible);
+    if (!state.noiseVisible) {
+      filterDetails.open = false;
+    }
+    updateNoiseNote();
+  }
+
+  function appendFilterRow({ type, value, label, count, inputType }) {
+    const row = document.createElement("label");
+    row.className = "amenity-tier-row";
+    row.htmlFor = "noise-" + type + "-" + value;
+
+    const textWrap = document.createElement("span");
+    textWrap.className = "toggle-label";
+
+    const title = document.createElement("strong");
+    title.textContent = label;
+
+    const subtitle = document.createElement("span");
+    subtitle.textContent = String(count || 0) + " mapped";
+
+    const input = document.createElement("input");
+    input.type = inputType;
+    if (type === "metric") {
+      input.name = "noise-metric";
+    }
+    input.id = "noise-" + type + "-" + value;
+    input.addEventListener("change", function () {
+      if (type === "metric" && input.checked) {
+        state.selectedNoiseMetric = value;
+      } else if (type === "source") {
+        if (input.checked) {
+          state.selectedNoiseSources.add(value);
+        } else {
+          state.selectedNoiseSources.delete(value);
+        }
+      } else if (type === "band") {
+        if (input.checked) {
+          state.selectedNoiseBands.add(value);
+        } else {
+          state.selectedNoiseBands.delete(value);
+        }
+      }
+      syncNoiseInputs();
+      applyNoiseFilter();
+    });
+
+    filterRows.push({ type: type, value: value, input: input });
+    textWrap.appendChild(title);
+    textWrap.appendChild(subtitle);
+    row.appendChild(textWrap);
+    row.appendChild(input);
+    filterList.appendChild(row);
+  }
+
+  noiseMetricOptions(state.runtime).forEach(function (option) {
+    appendFilterRow({
+      type: "metric",
+      value: option.value,
+      label: option.label,
+      count: option.count,
+      inputType: "radio"
+    });
+  });
+
+  noiseSourceOptions(state.runtime).forEach(function (option) {
+    appendFilterRow({
+      type: "source",
+      value: option.value,
+      label: option.label,
+      count: option.count,
+      inputType: "checkbox"
+    });
+  });
+
+  noiseBandOptions(state.runtime).forEach(function (option) {
+    appendFilterRow({
+      type: "band",
+      value: option.value,
+      label: option.label,
+      count: option.count,
+      inputType: "checkbox"
+    });
+  });
+
+  filterDetails.appendChild(filterList);
+  elements.noiseControls.appendChild(filterDetails);
+
+  overlayInput.addEventListener("change", function () {
+    state.noiseVisible = overlayInput.checked;
+    syncNoiseInputs();
+    applyNoiseVisibility();
+  });
+  syncNoiseInputs();
 }
 
 function buildTransitControls() {
@@ -961,6 +1179,34 @@ function serviceDesertPopupHtml(properties) {
   );
 }
 
+function noisePopupHtml(properties) {
+  const sourceLabel = noiseSourceLabel(properties.source_type || "noise");
+  const metricLabel = properties.metric === "Lnight" ? "Night" : "Day-evening-night";
+  const round = properties.round || properties.round_number || "";
+  const reportPeriod = properties.report_period || "";
+  const jurisdiction = properties.jurisdiction === "roi"
+    ? "Republic of Ireland"
+    : properties.jurisdiction === "ni"
+      ? "Northern Ireland"
+      : properties.jurisdiction || "";
+  const details = [
+    "<p>" + escapeHtml(metricLabel + ": " + (properties.db_value || "unknown") + " dB") + "</p>",
+    "<p>" + escapeHtml(sourceLabel + (jurisdiction ? " - " + jurisdiction : "")) + "</p>"
+  ];
+  if (round || reportPeriod) {
+    details.push("<p>Round: " + escapeHtml([round, reportPeriod].filter(Boolean).join(" - ")) + "</p>");
+  }
+  if (properties.source_dataset) {
+    details.push("<p>Source: " + escapeHtml(properties.source_dataset) + "</p>");
+  }
+  return (
+    '<div class="popup-content">' +
+      "<h3>Noise contour</h3>" +
+      details.join("") +
+    "</div>"
+  );
+}
+
 function formatEffectiveUnits(value) {
   const numeric = Number(value || 0);
   return numeric.toFixed(2).replace(/\.?0+$/, "");
@@ -1150,6 +1396,7 @@ function initializeMap() {
     applyAmenityFilter();
     applyTransportRealityVisibility();
     applyServiceDesertVisibility();
+    applyNoiseVisibility();
     updateStatus("");
     elements.statusPill.style.display = "none";
   });
@@ -1226,6 +1473,14 @@ function initializeMap() {
       return;
     }
 
+    if (clickAction.type === CLICK_ACTIONS.NOISE) {
+      state.popup
+        .setLngLat(event.lngLat)
+        .setHTML(noisePopupHtml(clickAction.features[0].properties || {}))
+        .addTo(state.map);
+      return;
+    }
+
     if (clickAction.type === CLICK_ACTIONS.FINE_INSPECT) {
       try {
         const payload = await fetchInspect(event.lngLat);
@@ -1269,6 +1524,12 @@ function initializeMap() {
   state.map.on("mouseleave", "service-deserts-fill", function () {
     state.map.getCanvas().style.cursor = "";
   });
+  state.map.on("mouseenter", "noise-fill", function () {
+    state.map.getCanvas().style.cursor = "pointer";
+  });
+  state.map.on("mouseleave", "noise-fill", function () {
+    state.map.getCanvas().style.cursor = "";
+  });
 
   state.map.on("error", function (event) {
     const message = (event && event.error && event.error.message) || "Map error";
@@ -1298,7 +1559,13 @@ function initializeApp(runtime) {
   state.selectedTransportModes = new Set();
   state.transportIncludeUnscheduled = false;
   state.transportRequireExceptionOnly = false;
+  state.noiseVisible = false;
+  const noiseDefaults = defaultNoiseSelections(runtime);
+  state.selectedNoiseMetric = noiseDefaults.metric;
+  state.selectedNoiseSources = new Set(noiseDefaults.sources);
+  state.selectedNoiseBands = new Set(noiseDefaults.bands);
   buildAmenityControls();
+  buildNoiseControls();
   buildTransitControls();
   maybeBuildDebugGridControl();
   wireUi();

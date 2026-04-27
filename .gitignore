@@ -43,6 +43,7 @@ osm/extract_manifest.json
 osm/flat-nodes.bin
 gtfs/*.zip
 boundaries/*.geojson
+noise_datasets/*.zip
 overture/*.geoparquet
 overture/*.geoparquet.state
 overture/*.parquet

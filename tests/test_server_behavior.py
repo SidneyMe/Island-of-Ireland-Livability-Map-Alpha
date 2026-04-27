@@ -410,6 +410,11 @@ class RenderAndCliTests(TestCase):
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "transport_reality_download_url": "/exports/transport-reality.zip",
+                "noise_enabled": True,
+                "noise_counts": {"roi": 5, "ni": 3},
+                "noise_source_counts": {"road": 4, "rail": 2, "airport": 2},
+                "noise_metric_counts": {"Lden": 5, "Lnight": 3},
+                "noise_band_counts": {"55-59": 6, "75+": 2},
                 "transit_analysis_date": "2026-04-14",
                 "transit_analysis_window_days": 30,
                 "transit_service_desert_window_days": 7,
@@ -460,6 +465,11 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["transport_bus_frequency_counts"], {"frequent": 2, "moderate": 1})
         self.assertEqual(payload["transport_flag_counts"]["is_unscheduled_stop"], 1)
         self.assertEqual(payload["transport_mode_counts"], {"tram": 4, "rail": 6})
+        self.assertTrue(payload["noise_enabled"])
+        self.assertEqual(payload["noise_counts"], {"roi": 5, "ni": 3})
+        self.assertEqual(payload["noise_source_counts"]["road"], 4)
+        self.assertEqual(payload["noise_metric_counts"], {"Lden": 5, "Lnight": 3})
+        self.assertEqual(payload["noise_band_counts"]["75+"], 2)
         self.assertNotIn("ov_shops", payload["category_colors"])
 
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
@@ -502,6 +512,8 @@ class RenderAndCliTests(TestCase):
         self.assertFalse(payload["service_deserts_enabled"])
         self.assertEqual(payload["transport_mode_counts"], {})
         self.assertEqual(payload["transport_bus_frequency_counts"], {})
+        self.assertFalse(payload["noise_enabled"])
+        self.assertEqual(payload["noise_counts"], {})
 
     def test_runtime_service_uses_dev_config_hash_and_coarse_only_payload(self) -> None:
         manifest = {

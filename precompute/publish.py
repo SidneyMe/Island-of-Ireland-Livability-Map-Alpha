@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import time
 from typing import Any, Callable, Iterable, Iterator
@@ -43,6 +43,12 @@ class AmenityRowPreparationStats:
     prepared_rows: int = 0
 
 
+@dataclass
+class NoiseRowPreparationStats:
+    row_assembly_seconds: float = 0.0
+    prepared_rows: int = 0
+
+
 class PreparedRowStream:
     def __init__(self, row_count: int, iterator_factory: Callable[[], Iterator[dict[str, Any]]], stats):
         self.row_count = int(row_count)
@@ -64,6 +70,13 @@ def amenity_row_count(amenity_source_rows: list[dict[str, Any]]) -> int:
     return len(amenity_source_rows)
 
 
+def noise_row_count(noise_source_rows: Iterable[dict[str, Any]]) -> int:
+    try:
+        return len(noise_source_rows)  # type: ignore[arg-type]
+    except TypeError:
+        return 0
+
+
 def _amenity_tier_counts(
     amenity_source_rows: list[dict[str, Any]] | None,
     *,
@@ -80,62 +93,49 @@ def _amenity_tier_counts(
     return counts
 
 
-def _transport_subtier_counts(
+@dataclass
+class _TransportSummaryCounts:
+    subtier: dict[str, int] = field(default_factory=dict)
+    bus_frequency: dict[str, int] = field(default_factory=dict)
+    flags: dict[str, int] = field(default_factory=dict)
+    modes: dict[str, int] = field(default_factory=dict)
+
+
+_TRANSPORT_FLAG_NAMES = (
+    "is_unscheduled_stop",
+    "has_exception_only_service",
+    "has_any_bus_service",
+    "has_daily_bus_service",
+)
+
+
+def _transport_summary_counts(
     transport_reality_rows: list[dict[str, Any]] | None,
-) -> dict[str, int]:
-    counts: dict[str, int] = {}
+) -> _TransportSummaryCounts:
+    c = _TransportSummaryCounts(flags={name: 0 for name in _TRANSPORT_FLAG_NAMES})
     for row in transport_reality_rows or []:
-        subtier = str(row.get("bus_service_subtier") or "").strip()
-        if not subtier:
-            continue
-        counts[subtier] = int(counts.get(subtier, 0)) + 1
-    return counts
-
-
-def _transport_bus_frequency_counts(
-    transport_reality_rows: list[dict[str, Any]] | None,
-) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for row in transport_reality_rows or []:
-        tier = str(row.get("bus_frequency_tier") or "").strip()
-        if not tier:
-            continue
-        counts[tier] = int(counts.get(tier, 0)) + 1
-    return counts
-
-
-def _transport_flag_counts(
-    transport_reality_rows: list[dict[str, Any]] | None,
-) -> dict[str, int]:
-    flag_names = (
-        "is_unscheduled_stop",
-        "has_exception_only_service",
-        "has_any_bus_service",
-        "has_daily_bus_service",
-    )
-    counts = {name: 0 for name in flag_names}
-    for row in transport_reality_rows or []:
-        for flag_name in flag_names:
+        if subtier := str(row.get("bus_service_subtier") or "").strip():
+            c.subtier[subtier] = c.subtier.get(subtier, 0) + 1
+        if tier := str(row.get("bus_frequency_tier") or "").strip():
+            c.bus_frequency[tier] = c.bus_frequency.get(tier, 0) + 1
+        for flag_name in _TRANSPORT_FLAG_NAMES:
             if bool(row.get(flag_name, False)):
-                counts[flag_name] = int(counts.get(flag_name, 0)) + 1
-    return counts
-
-
-def _transport_mode_counts(
-    transport_reality_rows: list[dict[str, Any]] | None,
-) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for row in transport_reality_rows or []:
+                c.flags[flag_name] += 1
         modes = row.get("route_modes_json") or row.get("route_modes") or []
         if isinstance(modes, str):
-            modes = [value.strip() for value in modes.split(",")]
-        seen = {
-            str(mode).strip()
-            for mode in modes
-            if str(mode).strip()
-        }
-        for mode in seen:
-            counts[mode] = int(counts.get(mode, 0)) + 1
+            modes = [v.strip() for v in modes.split(",")]
+        for mode in {str(m).strip() for m in modes if str(m).strip()}:
+            c.modes[mode] = c.modes.get(mode, 0) + 1
+    return c
+
+
+def _noise_counts(noise_rows: list[dict[str, Any]] | None, field_name: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in noise_rows or []:
+        value = str(row.get(field_name) or "").strip()
+        if not value:
+            continue
+        counts[value] = int(counts.get(value, 0)) + 1
     return counts
 
 
@@ -291,12 +291,62 @@ def amenity_rows_impl(
     )
 
 
+def iter_noise_rows_impl(
+    noise_source_rows: list[dict[str, Any]],
+    created_at: datetime,
+    *,
+    hashes,
+    progress_cb=None,
+    progress_every: int = PREP_PROGRESS_EVERY,
+) -> PreparedRowStream:
+    total_rows = noise_row_count(noise_source_rows)
+    stats = NoiseRowPreparationStats()
+
+    def _iter_rows() -> Iterator[dict[str, Any]]:
+        prepared_rows = 0
+        for row in noise_source_rows:
+            row_started_at = time.perf_counter()
+            payload = {
+                "build_key": hashes.build_key,
+                "config_hash": hashes.config_hash,
+                "import_fingerprint": hashes.import_fingerprint,
+                "jurisdiction": str(row["jurisdiction"]),
+                "source_type": str(row["source_type"]),
+                "metric": str(row["metric"]),
+                "round_number": int(row["round_number"]),
+                "report_period": row.get("report_period"),
+                "db_low": row.get("db_low"),
+                "db_high": row.get("db_high"),
+                "db_value": str(row["db_value"]),
+                "source_dataset": str(row["source_dataset"]),
+                "source_layer": str(row["source_layer"]),
+                "source_ref": str(row["source_ref"]),
+                "geom": row["geom"],
+                "created_at": created_at,
+            }
+            stats.row_assembly_seconds += max(time.perf_counter() - row_started_at, 0.0)
+            prepared_rows += 1
+            stats.prepared_rows = prepared_rows
+            if prepared_rows % max(int(progress_every), 1) == 0 or (
+                total_rows > 0 and prepared_rows == total_rows
+            ):
+                suffix = f"/{total_rows:,}" if total_rows > 0 else ""
+                _emit_progress(
+                    progress_cb,
+                    f"preparing noise_polygons rows {prepared_rows:,}{suffix}",
+                )
+            yield payload
+
+    return PreparedRowStream(total_rows, _iter_rows, stats)
+
+
 def summary_json_impl(
     study_area_wgs84,
     walk_grids: dict[int, list[dict[str, Any]]],
     amenity_data: dict[str, list[tuple[float, float]]],
     amenity_source_rows: list[dict[str, Any]] | None = None,
     transport_reality_rows: list[dict[str, Any]] | None = None,
+    noise_rows: list[dict[str, Any]] | None = None,
     *,
     hashes,
     build_profile: str,
@@ -314,6 +364,10 @@ def summary_json_impl(
     overture_dataset: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     centre = study_area_wgs84.centroid
+    noise_jurisdiction_counts = _noise_counts(noise_rows, "jurisdiction")
+    noise_source_counts = _noise_counts(noise_rows, "source_type")
+    noise_metric_counts = _noise_counts(noise_rows, "metric")
+    noise_band_counts = _noise_counts(noise_rows, "db_value")
     payload = {
         "build_key": hashes.build_key,
         "config_hash": hashes.config_hash,
@@ -330,11 +384,17 @@ def summary_json_impl(
             amenity_source_rows,
             categories=amenity_data.keys(),
         ),
+        "noise_enabled": bool(noise_source_counts),
+        "noise_counts": noise_jurisdiction_counts,
+        "noise_source_counts": noise_source_counts,
+        "noise_metric_counts": noise_metric_counts,
+        "noise_band_counts": noise_band_counts,
         "output_html": output_html,
         "zoom_breaks": zoom_breaks,
         "surface_zoom_breaks": zoom_breaks,
     }
     if transit_reality_state is not None:
+        _tc = _transport_summary_counts(transport_reality_rows)
         payload.update(
             {
                 "transit_analysis_date": transit_reality_state.analysis_date.isoformat(),
@@ -346,12 +406,10 @@ def summary_json_impl(
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": bool(service_deserts_enabled),
                 "transport_reality_download_url": transport_reality_download_url,
-                "transport_subtier_counts": _transport_subtier_counts(transport_reality_rows),
-                "transport_bus_frequency_counts": _transport_bus_frequency_counts(
-                    transport_reality_rows
-                ),
-                "transport_flag_counts": _transport_flag_counts(transport_reality_rows),
-                "transport_mode_counts": _transport_mode_counts(transport_reality_rows),
+                "transport_subtier_counts": _tc.subtier,
+                "transport_bus_frequency_counts": _tc.bus_frequency,
+                "transport_flag_counts": _tc.flags,
+                "transport_mode_counts": _tc.modes,
             }
         )
     if overture_dataset:

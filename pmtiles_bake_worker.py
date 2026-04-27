@@ -31,6 +31,7 @@ _LAYER_AMENITIES = 1 << 1
 _LAYER_TRANSPORT_REALITY = 1 << 2
 _LAYER_SERVICE_DESERTS = 1 << 3
 _LAYER_FINE_GRID = 1 << 4
+_LAYER_NOISE = 1 << 5
 
 
 # ── Per-tile SQL (one ST_AsMVT call per layer) ──────────────────────────────
@@ -201,6 +202,43 @@ _SERVICE_DESERT_TILE_SQL = text(
 )
 
 
+_NOISE_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            n.jurisdiction,
+            n.source_type,
+            n.metric,
+            n.round_number AS round,
+            COALESCE(n.report_period, '') AS report_period,
+            COALESCE(n.db_low, 0.0) AS db_low,
+            COALESCE(n.db_high, 0.0) AS db_high,
+            n.db_value,
+            n.source_dataset,
+            n.source_layer,
+            n.source_ref,
+            ST_AsMVTGeom(
+                ST_Transform(n.geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM noise_polygons AS n, tile
+        WHERE n.build_key = :build_key
+          AND n.geom && tile.env_4326
+          AND ST_Intersects(n.geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'noise', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
 def _resolution_for_zoom(zoom: int) -> int:
     if zoom >= 10:
         return 5000
@@ -273,6 +311,15 @@ def _tile_mvt_bytes_by_flags(
             or b""
         )
         chunks.append(bytes(service_desert_bytes))
+    if layers & _LAYER_NOISE:
+        noise_bytes = (
+            connection.execute(
+                _NOISE_TILE_SQL,
+                {"z": z, "x": x, "y": y, "build_key": build_key},
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(noise_bytes))
     return b"".join(chunks)
 
 
@@ -322,10 +369,12 @@ __all__ = [
     "_LAYER_TRANSPORT_REALITY",
     "_LAYER_SERVICE_DESERTS",
     "_LAYER_FINE_GRID",
+    "_LAYER_NOISE",
     "_GRID_TILE_SQL",
     "_AMENITY_TILE_SQL",
     "_TRANSPORT_REALITY_TILE_SQL",
     "_SERVICE_DESERT_TILE_SQL",
+    "_NOISE_TILE_SQL",
     "_resolution_for_zoom",
     "_tile_mvt_bytes_by_flags",
     "_worker_get_engine",

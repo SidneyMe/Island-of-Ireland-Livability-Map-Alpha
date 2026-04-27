@@ -140,6 +140,19 @@ struct TimeBucketCounts {
     offpeak: u32,
 }
 
+// Pre-aggregated time-bucket counts per (stop, service, route, mode).
+// Replaces the former per-(stop,service,route,mode,time_seconds) HashMap whose
+// entry count was O(stop_times rows) — easily 10M+ entries for NTA, causing OOM.
+#[derive(Debug, Default, Clone)]
+struct StopTimeBuckets {
+    total: u32,
+    morning_peak: u32,
+    evening_peak: u32,
+    offpeak: u32,
+    bus_daytime: u32,
+    friday_evening: u32,
+}
+
 #[derive(Debug)]
 struct FeedDataset {
     feed_id: String,
@@ -148,8 +161,7 @@ struct FeedDataset {
     trips: BTreeMap<String, TripInfo>,
     calendar_services: BTreeMap<String, CalendarService>,
     calendar_dates: Vec<CalendarDateException>,
-    stop_service_occurrences: HashMap<(String, String, String, String), u32>,
-    stop_service_time_occurrences: HashMap<(String, String, String, String, Option<i32>), u32>,
+    stop_service_buckets: HashMap<(String, String, String, String), StopTimeBuckets>,
     service_time_buckets: HashMap<String, TimeBucketCounts>,
     service_route_ids: HashMap<String, BTreeSet<String>>,
     service_route_modes: HashMap<String, BTreeSet<String>>,
@@ -370,28 +382,30 @@ pub fn run_gtfs_refresh(config_json: &Path, out_dir: &Path) -> Result<(), Box<dy
         config_started_at.elapsed().as_millis(),
     );
 
-    for feed in &config.feeds {
-        eprintln!("gtfs-refresh: parsing GTFS feed {}", feed.feed_id);
-        let started_at = Instant::now();
-        let raw_dir = out_dir.join("raw").join(&feed.feed_id);
-        let (dataset, feed_summary) = parse_gtfs_feed(feed, &settings, &raw_dir)?;
-        timings_ms.insert(
-            format!("feed_parse_{}", feed.feed_id),
-            started_at.elapsed().as_millis(),
-        );
-        feed_datasets.push(dataset);
-        feed_summaries.push(feed_summary);
-    }
-
-    let derived_started_at = Instant::now();
+    // Derive each feed immediately after parsing so its heavy aggregation maps
+    // are freed before the next feed is loaded. Without this, NTA's
+    // stop_service_time_occurrences alone exceeds 800 MB, causing an OOM crash
+    // when Translink is parsed next.
     let mut all_service_classifications = Vec::new();
     let mut all_stop_summaries = Vec::new();
-    for dataset in &feed_datasets {
-        let service_windows = expand_service_windows(dataset, &settings);
+    let mut derive_ms: u128 = 0;
+
+    for feed in &config.feeds {
+        eprintln!("gtfs-refresh: parsing GTFS feed {}", feed.feed_id);
+        let parse_started_at = Instant::now();
+        let raw_dir = out_dir.join("raw").join(&feed.feed_id);
+        let (mut dataset, feed_summary) = parse_gtfs_feed(feed, &settings, &raw_dir)?;
+        timings_ms.insert(
+            format!("feed_parse_{}", feed.feed_id),
+            parse_started_at.elapsed().as_millis(),
+        );
+
+        let derive_started_at = Instant::now();
+        let service_windows = expand_service_windows(&dataset, &settings);
         let dataset_classifications =
-            classify_services(dataset, &settings.reality_fingerprint, &service_windows);
+            classify_services(&dataset, &settings.reality_fingerprint, &service_windows);
         let stop_summaries = summarize_gtfs_stops(
-            dataset,
+            &dataset,
             &settings,
             &settings.reality_fingerprint,
             &service_windows,
@@ -399,11 +413,24 @@ pub fn run_gtfs_refresh(config_json: &Path, out_dir: &Path) -> Result<(), Box<dy
         );
         all_service_classifications.extend(dataset_classifications.into_values());
         all_stop_summaries.extend(stop_summaries);
+        derive_ms += derive_started_at.elapsed().as_millis();
+
+        // Free the heavy aggregation maps before the next feed is parsed.
+        // derive_gtfs_stop_reality only needs dataset.feed_id and dataset.stops.
+        dataset.stop_service_buckets = HashMap::new();
+        dataset.service_time_buckets = HashMap::new();
+        dataset.service_route_ids = HashMap::new();
+        dataset.service_route_modes = HashMap::new();
+        dataset.service_keywords = HashMap::new();
+        dataset.calendar_services = BTreeMap::new();
+        dataset.calendar_dates = Vec::new();
+        dataset.trips = BTreeMap::new();
+        dataset.routes = BTreeMap::new();
+
+        feed_datasets.push(dataset);
+        feed_summaries.push(feed_summary);
     }
-    timings_ms.insert(
-        "service_derive".to_string(),
-        derived_started_at.elapsed().as_millis(),
-    );
+    timings_ms.insert("service_derive".to_string(), derive_ms);
 
     let reality_started_at = Instant::now();
     let reality_rows = derive_gtfs_stop_reality(
@@ -1161,8 +1188,7 @@ fn parse_gtfs_feed(
         trips: BTreeMap::new(),
         calendar_services: BTreeMap::new(),
         calendar_dates: Vec::new(),
-        stop_service_occurrences: HashMap::new(),
-        stop_service_time_occurrences: HashMap::new(),
+        stop_service_buckets: HashMap::new(),
         service_time_buckets: HashMap::new(),
         service_route_ids: HashMap::new(),
         service_route_modes: HashMap::new(),
@@ -1445,29 +1471,33 @@ fn parse_gtfs_feed(
                                 .to_string()
                         })?;
 
-                let occurrence_key = (
-                    stop_id.clone(),
-                    trip_info.service_id.clone(),
-                    trip_info.route_id.clone(),
-                    trip_info.mode.clone(),
-                );
-                *dataset
-                    .stop_service_occurrences
-                    .entry(occurrence_key)
-                    .or_insert(0) += 1;
-
                 let event_seconds = departure_seconds.or(arrival_seconds);
-                let timed_occurrence_key = (
+                let bucket_key = (
                     stop_id.clone(),
                     trip_info.service_id.clone(),
                     trip_info.route_id.clone(),
                     trip_info.mode.clone(),
-                    event_seconds,
                 );
-                *dataset
-                    .stop_service_time_occurrences
-                    .entry(timed_occurrence_key)
-                    .or_insert(0) += 1;
+                let sb = dataset
+                    .stop_service_buckets
+                    .entry(bucket_key)
+                    .or_default();
+                sb.total += 1;
+                if is_weekday_morning_peak(event_seconds, settings) {
+                    sb.morning_peak += 1;
+                } else if is_weekday_evening_peak(event_seconds, settings) {
+                    sb.evening_peak += 1;
+                } else {
+                    sb.offpeak += 1;
+                }
+                if trip_info.mode == "bus" {
+                    if is_bus_daytime(event_seconds, settings) {
+                        sb.bus_daytime += 1;
+                    }
+                    if is_friday_evening(event_seconds, settings) {
+                        sb.friday_evening += 1;
+                    }
+                }
 
                 let bucket = time_bucket(event_seconds, settings);
                 let bucket_counts = dataset
@@ -1818,40 +1848,6 @@ fn transport_score_units_from_frequency(
     ((frequency * 5.0).ceil() as u32).clamp(1, 5)
 }
 
-fn stop_service_time_occurrences(
-    dataset: &FeedDataset,
-) -> Vec<(String, String, String, String, Option<i32>, u32)> {
-    if !dataset.stop_service_time_occurrences.is_empty() {
-        return dataset
-            .stop_service_time_occurrences
-            .iter()
-            .map(|((stop_id, service_id, route_id, mode, seconds), occurrences)| {
-                (
-                    stop_id.clone(),
-                    service_id.clone(),
-                    route_id.clone(),
-                    mode.clone(),
-                    *seconds,
-                    *occurrences,
-                )
-            })
-            .collect();
-    }
-    dataset
-        .stop_service_occurrences
-        .iter()
-        .map(|((stop_id, service_id, route_id, mode), occurrences)| {
-            (
-                stop_id.clone(),
-                service_id.clone(),
-                route_id.clone(),
-                mode.clone(),
-                None,
-                *occurrences,
-            )
-        })
-        .collect()
-}
 
 fn summarize_gtfs_stops(
     dataset: &FeedDataset,
@@ -1900,30 +1896,28 @@ fn summarize_gtfs_stops(
         })
         .collect();
     let stop_ids_with_stop_times: BTreeSet<String> = dataset
-        .stop_service_occurrences
+        .stop_service_buckets
         .keys()
         .map(|(stop_id, _, _, _)| stop_id.clone())
         .collect();
     let mut per_stop: BTreeMap<String, StopPayload> = BTreeMap::new();
-    for (stop_id, service_id, route_id, mode, event_seconds, occurrences) in
-        stop_service_time_occurrences(dataset)
-    {
-        let window = service_windows.get(&service_id);
+    for ((stop_id, service_id, route_id, mode), buckets) in &dataset.stop_service_buckets {
+        let window = service_windows.get(service_id);
         let dates_30d = window.map(|row| row.dates_30d.as_slice()).unwrap_or(&[]);
         let dates_7d = window.map(|row| row.dates_7d.as_slice()).unwrap_or(&[]);
-        let classification = service_classifications.get(&service_id);
+        let classification = service_classifications.get(service_id);
         let payload = per_stop.entry(stop_id.clone()).or_default();
         payload.route_modes.insert(mode.clone());
         payload.route_ids.insert(route_id.clone());
         if mode == "bus" {
             payload.has_any_bus_service = true;
-            if let Some(calendar) = dataset.calendar_services.get(&service_id) {
+            if let Some(calendar) = dataset.calendar_services.get(service_id) {
                 payload
                     .base_weekly_bus_weekdays
                     .extend(calendar_weekday_indexes(calendar));
             }
             payload.has_exception_only_service = payload.has_exception_only_service
-                || exception_only_service_ids.contains(&service_id);
+                || exception_only_service_ids.contains(service_id);
         }
         if let Some(last_date) = dates_30d.last().copied() {
             payload.last_any_service_date =
@@ -1934,43 +1928,39 @@ fn summarize_gtfs_stops(
             .map(|row| row.school_only_state.as_str() == "yes")
             .unwrap_or(false)
         {
-            payload.school_only_departures_30d += occurrences * (dates_30d.len() as u32);
+            payload.school_only_departures_30d += buckets.total * (dates_30d.len() as u32);
             payload
                 .reason_codes
                 .insert("school_only_service_present".to_string());
             continue;
         }
 
-        payload.public_departures_7d += occurrences * (dates_7d.len() as u32);
-        payload.public_departures_30d += occurrences * (dates_30d.len() as u32);
+        payload.public_departures_7d += buckets.total * (dates_7d.len() as u32);
+        payload.public_departures_30d += buckets.total * (dates_30d.len() as u32);
         for active_date in dates_30d {
             let weekday = active_date.weekday().number_days_from_monday();
             if weekday < 5 {
                 payload.weekday_dates.insert(*active_date);
-                if is_weekday_morning_peak(event_seconds, settings) {
-                    payload.weekday_morning_peak_total += occurrences;
-                } else if is_weekday_evening_peak(event_seconds, settings) {
-                    payload.weekday_evening_peak_total += occurrences;
-                } else {
-                    payload.weekday_offpeak_total += occurrences;
-                }
-                if mode == "bus" && is_bus_daytime(event_seconds, settings) {
-                    payload.bus_daytime_total += occurrences;
-                    payload.bus_daytime_dates.insert(*active_date);
+                payload.weekday_morning_peak_total += buckets.morning_peak;
+                payload.weekday_evening_peak_total += buckets.evening_peak;
+                payload.weekday_offpeak_total += buckets.offpeak;
+                if mode == "bus" {
+                    payload.bus_daytime_total += buckets.bus_daytime;
+                    if buckets.bus_daytime > 0 {
+                        payload.bus_daytime_dates.insert(*active_date);
+                    }
                 }
             }
             if weekday == 5 {
                 payload.saturday_dates.insert(*active_date);
-                payload.saturday_total += occurrences;
+                payload.saturday_total += buckets.total;
             } else if weekday == 6 {
                 payload.sunday_dates.insert(*active_date);
-                payload.sunday_total += occurrences;
+                payload.sunday_total += buckets.total;
             }
             if weekday == 4 {
                 payload.friday_dates.insert(*active_date);
-                if is_friday_evening(event_seconds, settings) {
-                    payload.friday_evening_total += occurrences;
-                }
+                payload.friday_evening_total += buckets.friday_evening;
             }
         }
         if let Some(last_date) = dates_30d.last().copied() {
@@ -2216,8 +2206,7 @@ mod tests {
             trips: BTreeMap::new(),
             calendar_services: BTreeMap::new(),
             calendar_dates: Vec::new(),
-            stop_service_occurrences: HashMap::new(),
-            stop_service_time_occurrences: HashMap::new(),
+            stop_service_buckets: HashMap::new(),
             service_time_buckets: HashMap::new(),
             service_route_ids: HashMap::new(),
             service_route_modes: HashMap::new(),
@@ -2337,14 +2326,18 @@ mod tests {
                 end_date: Date::from_calendar_date(2026, time::Month::April, 30).unwrap(),
             },
         );
-        dataset.stop_service_occurrences.insert(
+        dataset.stop_service_buckets.insert(
             (
                 "S1".to_string(),
                 service_id.to_string(),
                 "R1".to_string(),
                 "bus".to_string(),
             ),
-            1,
+            StopTimeBuckets {
+                total: 1,
+                offpeak: 1,
+                ..Default::default()
+            },
         );
         dataset.service_time_buckets.insert(
             service_id.to_string(),
@@ -2509,14 +2502,18 @@ mod tests {
             service_date: analysis_date,
             exception_type: 1,
         });
-        dataset.stop_service_occurrences.insert(
+        dataset.stop_service_buckets.insert(
             (
                 "S1".to_string(),
                 "EXC_ONLY".to_string(),
                 "R1".to_string(),
                 "bus".to_string(),
             ),
-            1,
+            StopTimeBuckets {
+                total: 1,
+                offpeak: 1,
+                ..Default::default()
+            },
         );
         dataset.service_time_buckets.insert(
             "EXC_ONLY".to_string(),
@@ -2566,15 +2563,21 @@ mod tests {
 
         for (departures, expected_headway, expected_tier, expected_units) in cases {
             let mut dataset = single_bus_dataset("SVC1", [1, 1, 1, 1, 1, 0, 0], Some(0));
-            dataset.stop_service_time_occurrences.insert(
+            // Noon is bus daytime (6-20) and off-peak (not AM/PM commute window).
+            // Overwrite the default single entry from single_bus_dataset.
+            dataset.stop_service_buckets.insert(
                 (
                     "S1".to_string(),
                     "SVC1".to_string(),
                     "R1".to_string(),
                     "bus".to_string(),
-                    Some(12 * 3600),
                 ),
-                departures,
+                StopTimeBuckets {
+                    total: departures,
+                    offpeak: departures,
+                    bus_daytime: departures,
+                    ..Default::default()
+                },
             );
             let service_windows = expand_service_windows(&dataset, &settings);
             let service_classifications =

@@ -48,6 +48,7 @@ const fullRuntime = {
   },
   transport_reality_enabled: true,
   service_deserts_enabled: true,
+  noise_enabled: true,
   max_zoom: 19
 };
 
@@ -71,6 +72,7 @@ const devRuntime = {
   },
   transport_reality_enabled: true,
   service_deserts_enabled: true,
+  noise_enabled: true,
   max_zoom: 19
 };
 
@@ -146,7 +148,7 @@ const devRuntime = {
   const lifecycle500 = activeGridLifecycle(fullRuntime, 1000, 14);
   const lifecycle1000Stable = activeGridLifecycle(fullRuntime, 1000, 13);
 
-  assert.equal(GRID_INSERT_BEFORE_LAYER_ID, "amenities-circle");
+  assert.equal(GRID_INSERT_BEFORE_LAYER_ID, "noise-fill");
   assert.equal(layers2500.length, 3);
   assert.equal(layers2500[0].id, "grid-fill-active");
   assert.equal(layers2500[1].id, "grid-outline-active");
@@ -199,6 +201,9 @@ const devRuntime = {
   const transportRealityLayer = style.layers.find(function (layer) {
     return layer.id === "transport-reality-circle";
   });
+  const noiseLayer = style.layers.find(function (layer) {
+    return layer.id === "noise-fill";
+  });
   const serviceDesertsLayer = style.layers.find(function (layer) {
     return layer.id === "service-deserts-fill";
   });
@@ -243,6 +248,20 @@ const devRuntime = {
     19, 0.75
   ]);
   assert.equal(transportRealityLayer.source, "livability");
+  assert.equal(noiseLayer.source, "livability");
+  assert.equal(noiseLayer["source-layer"], "noise");
+  assert.equal(noiseLayer.minzoom, 8);
+  assert.deepEqual(noiseLayer.filter, ["all", ["==", ["get", "metric"], "Lden"]]);
+  assert.deepEqual(noiseLayer.paint["fill-color"], [
+    "interpolate", ["linear"], ["coalesce", ["get", "db_low"], 0],
+    45, "#fee8c8",
+    50, "#fdbb84",
+    55, "#fc8d59",
+    60, "#ef6548",
+    65, "#d7301f",
+    70, "#990000",
+    75, "#67000d"
+  ]);
   assert.equal(transportRealityLayer["source-layer"], "transport_reality");
   assert.equal(transportRealityLayer.minzoom, 9);
   assert.equal(transportRealityLayer.paint["circle-stroke-color"], "#ffffff");

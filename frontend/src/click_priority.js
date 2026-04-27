@@ -2,6 +2,7 @@ export const CLICK_ACTIONS = {
   TRANSPORT: "transport",
   AMENITY: "amenity",
   SERVICE_DESERT: "service_desert",
+  NOISE: "noise",
   FINE_INSPECT: "fine_inspect",
   COARSE_GRID: "coarse_grid",
   NONE: "none"
@@ -32,6 +33,11 @@ export function resolveMapClickAction({
   const desertFeatures = queryLayer(map, point, "service-deserts-fill");
   if (desertFeatures.length > 0) {
     return { type: CLICK_ACTIONS.SERVICE_DESERT, features: desertFeatures };
+  }
+
+  const noiseFeatures = queryLayer(map, point, "noise-fill");
+  if (noiseFeatures.length > 0) {
+    return { type: CLICK_ACTIONS.NOISE, features: noiseFeatures };
   }
 
   if (fineSurfaceEnabled) {
