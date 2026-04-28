@@ -159,11 +159,75 @@ class NoiseLoaderNormalizationTests(TestCase):
         self.assertEqual(high, 59)
         self.assertEqual(label, "55-59")
 
-    def test_ni_gridcode_maps_to_display_band_and_excludes_no_data(self) -> None:
-        self.assertEqual(normalize_ni_gridcode_band(49), (50.0, 54.0, "50-54"))
-        self.assertEqual(normalize_ni_gridcode_band(54), (55.0, 59.0, "55-59"))
-        self.assertEqual(normalize_ni_gridcode_band(74), (75.0, 99.0, "75+"))
-        self.assertEqual(normalize_ni_gridcode_band(1000), (None, None, None))
+    def test_ni_round1_class_mapping_for_lden_is_round_aware(self) -> None:
+        self.assertEqual(
+            normalize_ni_gridcode_band(
+                1,
+                round_number=1,
+                source_type="airport",
+                metric="Lden",
+            ),
+            (45.0, 49.0, "45-49"),
+        )
+        self.assertEqual(
+            normalize_ni_gridcode_band(
+                3,
+                round_number=1,
+                source_type="airport",
+                metric="Lden",
+            ),
+            (55.0, 59.0, "55-59"),
+        )
+
+    def test_ni_round1_small_class_code_does_not_produce_2_6(self) -> None:
+        _, _, label = normalize_ni_gridcode_band(
+            1,
+            round_number=1,
+            source_type="airport",
+            metric="Lden",
+        )
+        self.assertNotEqual(label, "2-6")
+
+    def test_ni_round3_threshold_style_mapping_still_works(self) -> None:
+        self.assertEqual(
+            normalize_ni_gridcode_band(
+                49,
+                round_number=3,
+                source_type="road",
+                metric="Lnight",
+            ),
+            (50.0, 54.0, "50-54"),
+        )
+        self.assertEqual(
+            normalize_ni_gridcode_band(
+                54,
+                round_number=3,
+                source_type="road",
+                metric="Lden",
+            ),
+            (55.0, 59.0, "55-59"),
+        )
+        self.assertEqual(
+            normalize_ni_gridcode_band(
+                1000,
+                round_number=3,
+                source_type="road",
+                metric="Lden",
+            ),
+            (None, None, None),
+        )
+
+    def test_ni_round2_small_unmapped_gridcode_raises_clear_error(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "NI Round 2 gridcode 1 .* no verified threshold mapping",
+        ):
+            normalize_ni_gridcode_band(
+                1,
+                round_number=2,
+                source_type="airport",
+                metric="Lden",
+            )
 
 
 class NoiseFallbackTests(TestCase):

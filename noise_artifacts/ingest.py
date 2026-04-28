@@ -31,7 +31,7 @@ _BAND_RE = re.compile(r"^\d{2}-\d{2}$|^\d{2}\+$")
 _META_KEYS = (
     "source_ref", "jurisdiction", "source_type", "metric",
     "round_number", "report_period", "db_low", "db_high", "db_value",
-    "source_dataset", "source_layer",
+    "source_dataset", "source_layer", "raw_gridcode",
 )
 
 
@@ -45,12 +45,31 @@ def _progress(progress_cb, message: str) -> None:
 def _validate_noise_row(row: dict) -> None:
     db_value = str(row.get("db_value") or "")
     if not _BAND_RE.match(db_value):
+        jurisdiction = str(row.get("jurisdiction") or "").lower()
+        if jurisdiction == "ni":
+            lines = [
+                "Invalid NI noise band:",
+                f"  source_dataset={row.get('source_dataset')}",
+                f"  source_layer={row.get('source_layer')}",
+                f"  source_ref={row.get('source_ref')}",
+                f"  jurisdiction={row.get('jurisdiction')}",
+                f"  source_type={row.get('source_type')}",
+                f"  metric={row.get('metric')}",
+                f"  round_number={row.get('round_number')}",
+                f"  raw_gridcode={row.get('raw_gridcode')}",
+                f"  produced db_value={db_value!r}",
+                "",
+                "This looks like a class-coded Round 1 gridcode, not a dB threshold.",
+                "Add round-aware NI gridcode mapping.",
+            ]
+            raise NoiseIngestError("\n".join(lines))
         raise NoiseIngestError(
             f"invalid db_value {db_value!r}: expected 'NN-NN' or 'NN+' "
             f"(jurisdiction={row.get('jurisdiction')!r}, "
             f"source_type={row.get('source_type')!r}, "
             f"metric={row.get('metric')!r}, "
-            f"source_dataset={row.get('source_dataset')!r})"
+            f"source_dataset={row.get('source_dataset')!r}, "
+            f"source_ref={row.get('source_ref')!r})"
         )
     db_low = row.get("db_low")
     db_high = row.get("db_high")
@@ -148,15 +167,20 @@ def ingest_noise_normalized(
             )
             log.info("deleted prior noise_normalized rows for source_hash=%s", noise_source_hash)
 
-    # Phase 4A: use legacy loader (Python/Fiona/Shapely)
-    from noise.loader import iter_noise_candidate_rows
+    from noise.loader import iter_noise_candidate_rows_cached
 
-    # Collect all candidate rows so we can emit a count before batching.
-    candidate_rows = list(iter_noise_candidate_rows(data_dir=data_dir, study_area_wgs84=domain_wgs84))
-    _progress(progress_cb, f"ingest read {len(candidate_rows)} candidate rows")
+    total_read = 0
+    total_inserted = 0
+    rows_iter = iter_noise_candidate_rows_cached(
+        data_dir=data_dir,
+        study_area_wgs84=domain_wgs84,
+        progress_cb=progress_cb,
+        use_cache=True,
+    )
 
-    total = 0
-    for batch in _batched(candidate_rows, _BATCH_SIZE):
+    for batch in _batched(rows_iter, _BATCH_SIZE):
+        total_read += len(batch)
+
         # Pre-ingest validation before opening a DB transaction.
         for row in batch:
             _validate_noise_row(row)
@@ -171,12 +195,31 @@ def ingest_noise_normalized(
                         engine, conn, noise_source_hash, batch, exc
                     ) from exc
                 raise
-            total += n
-        log.debug("ingested %d rows (running total=%d)", n, total)
+            total_inserted += n
+        log.debug(
+            "ingested %d rows (running total=%d; read=%d)",
+            n,
+            total_inserted,
+            total_read,
+        )
 
-    _progress(progress_cb, f"ingest inserted {total} normalized rows")
-    log.info("ingest complete: source_hash=%s total_rows=%d", noise_source_hash, total)
-    return total
+        if total_read % 10_000 < _BATCH_SIZE:
+            _progress(
+                progress_cb,
+                f"ingest streamed {total_read:,} candidates; inserted {total_inserted:,} normalized rows",
+            )
+
+    _progress(
+        progress_cb,
+        f"ingest done: read {total_read:,}; inserted {total_inserted:,}",
+    )
+    log.info(
+        "ingest complete: source_hash=%s read_rows=%d inserted_rows=%d",
+        noise_source_hash,
+        total_read,
+        total_inserted,
+    )
+    return total_inserted
 
 
 def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:

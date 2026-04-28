@@ -185,6 +185,19 @@ class MarkFailedTests(TestCase):
         sql_text = str(conn.execute.call_args[0][0].text)
         self.assertIn("error_detail", sql_text)
 
+    def test_mark_failed_casts_error_detail_parameter_to_text(self) -> None:
+        engine, conn = _make_mock_engine()
+        mark_artifact_failed(engine, "abc123", error_detail="boom")
+        sql_text = str(conn.execute.call_args[0][0].text)
+        self.assertIn("COALESCE(manifest_json, '{}'::jsonb)", sql_text)
+        self.assertIn("CAST(:error_detail AS text)", sql_text)
+
+    def test_mark_failed_truncates_error_detail_to_4000_chars(self) -> None:
+        engine, conn = _make_mock_engine()
+        mark_artifact_failed(engine, "abc123", error_detail="x" * 5000)
+        params = conn.execute.call_args[0][1]
+        self.assertEqual(len(params["error_detail"]), 4000)
+
 
 class RecordLineageTests(TestCase):
 
@@ -867,6 +880,32 @@ class IngestValidationTests(TestCase):
         with self.assertRaises(NoiseIngestError):
             _validate_noise_row({"db_value": "59-55", "db_low": 59.0, "db_high": 55.0})
 
+    def test_validate_invalid_ni_band_error_contains_gridcode_and_source_ref(self) -> None:
+        from noise_artifacts.ingest import _validate_noise_row
+        from noise_artifacts.exceptions import NoiseIngestError
+
+        row = {
+            "jurisdiction": "ni",
+            "source_type": "airport",
+            "metric": "Lden",
+            "round_number": 1,
+            "db_value": "2-6",
+            "raw_gridcode": 1,
+            "source_dataset": "end_noisedata_round1.zip",
+            "source_layer": "END_NoiseData_Round1/Major_Airports/BIA/R1_bia_lden.shp",
+            "source_ref": "end_noisedata_round1.zip:...:1",
+            "wkb_hex": "deadbeef",
+        }
+        with self.assertRaises(NoiseIngestError) as ctx:
+            _validate_noise_row(row)
+        msg = str(ctx.exception)
+        self.assertIn("Invalid NI noise band:", msg)
+        self.assertIn("source_dataset=end_noisedata_round1.zip", msg)
+        self.assertIn("source_ref=end_noisedata_round1.zip:...:1", msg)
+        self.assertIn("raw_gridcode=1", msg)
+        self.assertIn("produced db_value='2-6'", msg)
+        self.assertNotIn("deadbeef", msg)
+
     def test_diagnose_identifies_70_plus_as_suspicious(self) -> None:
         # Simulate a batch with a row whose db_value is "70+" — which should NOT
         # be suspicious under the new constraint. This ensures the diagnostic
@@ -1021,14 +1060,72 @@ class BuilderProgressTests(TestCase):
         engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
         engine.begin.return_value.__exit__ = MagicMock(return_value=False)
 
-        # iter_noise_candidate_rows is imported inside ingest_noise_normalized,
+        # iter_noise_candidate_rows_cached is imported inside ingest_noise_normalized,
         # so patch it at its source module.
-        with patch("noise.loader.iter_noise_candidate_rows", return_value=iter(fake_rows)):
+        with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)):
             with patch("noise_artifacts.ingest._insert_batch", return_value=0):
                 ingest_noise_normalized(
                     engine, "srchash123", "/fake_dir", MagicMock(),
                     progress_cb=fake_progress,
                 )
 
-        self.assertTrue(any("ingest read" in m for m in messages), f"messages: {messages}")
-        self.assertTrue(any("ingest inserted" in m for m in messages), f"messages: {messages}")
+        self.assertTrue(any("ingest streamed" in m for m in messages), f"messages: {messages}")
+        self.assertTrue(any("ingest done: read" in m for m in messages), f"messages: {messages}")
+
+    def test_ingest_function_source_uses_streaming_cached_loader(self) -> None:
+        import inspect
+        from noise_artifacts import ingest as _ingest
+
+        src = inspect.getsource(_ingest.ingest_noise_normalized)
+        self.assertIn("iter_noise_candidate_rows_cached", src)
+        self.assertNotIn("candidate_rows = list(", src)
+
+    def test_ingest_invalid_first_batch_raises_before_generator_exhaustion(self) -> None:
+        from noise_artifacts.exceptions import NoiseIngestError
+        from noise_artifacts.ingest import ingest_noise_normalized
+
+        produced = {"count": 0}
+
+        def _row(db_value: str, raw_gridcode: int, idx: int) -> dict:
+            return {
+                "jurisdiction": "ni",
+                "source_type": "airport",
+                "metric": "Lden",
+                "round_number": 1,
+                "db_value": db_value,
+                "db_low": 55.0,
+                "db_high": 59.0,
+                "report_period": "Round 1",
+                "source_dataset": "end_noisedata_round1.zip",
+                "source_layer": "END_NoiseData_Round1/Major_Airports/BIA/R1_bia_lden.shp",
+                "source_ref": f"end_noisedata_round1.zip:layer:{idx}",
+                "raw_gridcode": raw_gridcode,
+                "geom": None,
+            }
+
+        valid = [_row("55-59", 3, i) for i in range(499)]
+        bad = _row("2-6", 1, 499)
+        tail = [_row("55-59", 3, i) for i in range(500, 1000)]
+
+        def _gen():
+            for row in valid:
+                produced["count"] += 1
+                yield row
+            produced["count"] += 1
+            yield bad
+            for row in tail:
+                produced["count"] += 1
+                yield row
+
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=_gen()):
+            with patch("noise_artifacts.ingest._insert_batch", return_value=0) as mock_insert:
+                with self.assertRaises(NoiseIngestError):
+                    ingest_noise_normalized(engine, "srchash123", "/fake_dir", MagicMock())
+
+        self.assertEqual(produced["count"], 500, "ingest must stop after the first invalid batch")
+        mock_insert.assert_not_called()

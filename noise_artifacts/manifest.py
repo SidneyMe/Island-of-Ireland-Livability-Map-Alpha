@@ -187,19 +187,24 @@ def mark_artifact_failed(
     *,
     error_detail: str,
 ) -> None:
+    error_detail_text = str(error_detail)[:4000]
     with engine.begin() as conn:
         conn.execute(
             text(
                 """
                 UPDATE noise_artifact_manifest
                 SET status = 'failed',
-                    manifest_json = manifest_json || jsonb_build_object('error_detail', :error_detail)
+                    manifest_json = COALESCE(manifest_json, '{}'::jsonb)
+                        || jsonb_build_object(
+                            'error_detail',
+                            CAST(:error_detail AS text)
+                        )
                 WHERE artifact_hash = :artifact_hash
                 """
             ),
             {
                 "artifact_hash": artifact_hash,
-                "error_detail": error_detail,
+                "error_detail": error_detail_text,
             },
         )
 
