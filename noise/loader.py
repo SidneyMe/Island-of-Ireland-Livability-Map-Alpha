@@ -1619,27 +1619,41 @@ def iter_noise_candidate_rows_cached(
         else:
             return
 
-    # Legacy single-file fallback (read-only compatibility path).
+    # Legacy single-file fallback (opt-in compatibility path only).
     cached = _load_cached_candidates(legacy_cache_path)
     if cached is not None:
-        _emit_progress(
-            progress_cb,
-            f"noise candidate legacy cache hit ({len(cached):,} rows) at {legacy_cache_path.name}",
-        )
-        try:
-            for row in cached:
-                yield _deserialize_candidate(row)
-        except Exception as exc:
+        allow_legacy = (os.getenv("NOISE_ALLOW_LEGACY_CANDIDATE_CACHE") or "").strip() == "1"
+        if not allow_legacy:
             _emit_progress(
                 progress_cb,
-                f"noise candidate legacy cache corrupt ({type(exc).__name__}: {exc}); deleting and rebuilding",
+                (
+                    "legacy noise candidate cache hit; deleting and rebuilding chunked cache "
+                    "(set NOISE_ALLOW_LEGACY_CANDIDATE_CACHE=1 to temporarily allow legacy reads)"
+                ),
             )
             try:
                 legacy_cache_path.unlink()
             except OSError:
                 pass
         else:
-            return
+            _emit_progress(
+                progress_cb,
+                f"noise candidate legacy cache hit ({len(cached):,} rows) at {legacy_cache_path.name}",
+            )
+            try:
+                for row in cached:
+                    yield _deserialize_candidate(row)
+            except Exception as exc:
+                _emit_progress(
+                    progress_cb,
+                    f"noise candidate legacy cache corrupt ({type(exc).__name__}: {exc}); deleting and rebuilding",
+                )
+                try:
+                    legacy_cache_path.unlink()
+                except OSError:
+                    pass
+            else:
+                return
 
     _emit_progress(
         progress_cb,

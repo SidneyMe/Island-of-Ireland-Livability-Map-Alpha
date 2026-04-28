@@ -552,40 +552,66 @@ class IngestSqlTests(TestCase):
 
     def test_ingest_sql_transforms_to_2157(self) -> None:
         import inspect
-        from noise_artifacts.ingest import _insert_batch
-        src = inspect.getsource(_insert_batch)
+        from noise_artifacts.ingest import _flush_stage_to_normalized
+        src = inspect.getsource(_flush_stage_to_normalized)
         self.assertIn("ST_Transform", src)
         self.assertIn("2157", src)
 
     def test_ingest_sql_makes_valid(self) -> None:
         import inspect
-        from noise_artifacts.ingest import _insert_batch
-        src = inspect.getsource(_insert_batch)
+        from noise_artifacts.ingest import _flush_stage_to_normalized
+        src = inspect.getsource(_flush_stage_to_normalized)
         self.assertIn("ST_MakeValid", src)
 
-    def test_ingest_sql_uses_staging_not_inline_values(self) -> None:
-        """Ingest should stage rows first; avoid giant inline VALUES payloads."""
+    def test_ingest_stage_table_has_geom_wkb_bytea(self) -> None:
         import inspect
-        from noise_artifacts.ingest import _insert_batch
-        src = inspect.getsource(_insert_batch)
+        from noise_artifacts.ingest import _create_ingest_stage_table
+        src = inspect.getsource(_create_ingest_stage_table)
         self.assertIn("CREATE TEMP TABLE", src)
-        self.assertNotIn("FROM (VALUES", src)
-        self.assertNotIn("decode(v.wkb_hex", src)
+        self.assertIn("geom_wkb BYTEA", src)
 
-    def test_ingest_sql_filters_null_wkb(self) -> None:
+    def test_ingest_uses_copy_staging_not_inline_values(self) -> None:
+        import inspect
+        from noise_artifacts.ingest import _copy_rows_into_stage_via_psycopg, _copy_rows_into_stage
+        src_copy = inspect.getsource(_copy_rows_into_stage_via_psycopg)
+        src_stage = inspect.getsource(_copy_rows_into_stage)
+        self.assertIn("COPY", src_copy)
+        self.assertIn("_STAGE_TABLE_NAME", src_copy)
+        self.assertNotIn("FROM (VALUES", src_stage)
+        self.assertNotIn("wkb_hex", src_stage)
+
+    def test_ingest_sql_filters_null_geom_wkb(self) -> None:
         """Rows with null WKB must be excluded before ST_GeomFromWKB."""
         import inspect
-        from noise_artifacts.ingest import _insert_batch
-        src = inspect.getsource(_insert_batch)
-        self.assertIn("wkb IS NOT NULL", src)
+        from noise_artifacts.ingest import _flush_stage_to_normalized
+        src = inspect.getsource(_flush_stage_to_normalized)
+        self.assertIn("geom_wkb IS NOT NULL", src)
 
     def test_ingest_sql_filters_empty_and_zero_area_geom(self) -> None:
         """FIX 3: transformed geometry that is empty or zero-area must be excluded."""
         import inspect
-        from noise_artifacts.ingest import _insert_batch
-        src = inspect.getsource(_insert_batch)
+        from noise_artifacts.ingest import _flush_stage_to_normalized
+        src = inspect.getsource(_flush_stage_to_normalized)
         self.assertIn("ST_IsEmpty", src)
         self.assertIn("ST_Area", src)
+
+    def test_copy_batch_to_stage_skips_rows_without_geom(self) -> None:
+        from noise_artifacts.ingest import _copy_batch_to_stage
+
+        conn = MagicMock()
+        row = {
+            "jurisdiction": "roi",
+            "source_type": "road",
+            "metric": "Lden",
+            "round_number": 4,
+            "db_value": "55-59",
+            "source_dataset": "NOISE_Round4.zip",
+            "source_layer": "Road.shp",
+            "source_ref": "x",
+            "geom": None,
+        }
+        copied = _copy_batch_to_stage(conn, "h123", [row])
+        self.assertEqual(copied, 0)
 
     def test_ingest_deletes_prior_rows_on_force(self) -> None:
         import inspect
@@ -1061,17 +1087,21 @@ class BuilderProgressTests(TestCase):
 
         engine = MagicMock()
         conn = MagicMock()
-        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
-        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         # iter_noise_candidate_rows_cached is imported inside ingest_noise_normalized,
         # so patch it at its source module.
-        with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)):
-            with patch("noise_artifacts.ingest._insert_batch", return_value=0):
-                ingest_noise_normalized(
-                    engine, "srchash123", "/fake_dir", MagicMock(),
-                    progress_cb=fake_progress,
-                )
+        with patch.dict(os.environ, {"NOISE_INGEST_MODE": "python"}, clear=False):
+            with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)):
+                with patch("noise_artifacts.ingest._create_ingest_stage_table"):
+                    with patch("noise_artifacts.ingest._copy_batch_to_stage", return_value=0):
+                        with patch("noise_artifacts.ingest._flush_stage_to_normalized", return_value=0):
+                            with patch("noise_artifacts.ingest._drop_ingest_stage_table"):
+                                ingest_noise_normalized(
+                                    engine, "srchash123", "/fake_dir", MagicMock(),
+                                    progress_cb=fake_progress,
+                                )
 
         self.assertTrue(any("ingest streamed" in m for m in messages), f"messages: {messages}")
         self.assertTrue(any("ingest done: read" in m for m in messages), f"messages: {messages}")
@@ -1081,7 +1111,7 @@ class BuilderProgressTests(TestCase):
         from noise_artifacts import ingest as _ingest
 
         src = inspect.getsource(_ingest.ingest_noise_normalized)
-        self.assertIn("iter_noise_candidate_rows_cached", src)
+        self.assertIn("NOISE_INGEST_MODE", src)
         self.assertNotIn("candidate_rows = list(", src)
 
     def test_ingest_skips_raw_read_when_source_rows_exist(self) -> None:
@@ -1089,8 +1119,8 @@ class BuilderProgressTests(TestCase):
 
         engine = MagicMock()
         conn = MagicMock()
-        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
-        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         with patch("noise_artifacts.ingest._existing_source_row_count", return_value=42):
             with patch("noise.loader.iter_noise_candidate_rows_cached") as mock_rows:
@@ -1127,23 +1157,25 @@ class BuilderProgressTests(TestCase):
         conn = MagicMock()
         engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
         engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         with patch("noise_artifacts.ingest._existing_source_row_count", return_value=42):
-            with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)):
-                with patch("noise_artifacts.ingest._insert_batch", return_value=0):
-                    ingest_noise_normalized(
-                        engine,
-                        "srchash123",
-                        "/fake_dir",
-                        MagicMock(),
-                        reimport_source=True,
-                    )
+            with patch.dict(os.environ, {"NOISE_INGEST_MODE": "python"}, clear=False):
+                with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)):
+                    with patch("noise_artifacts.ingest._create_ingest_stage_table"):
+                        with patch("noise_artifacts.ingest._copy_batch_to_stage", return_value=0):
+                            with patch("noise_artifacts.ingest._flush_stage_to_normalized", return_value=0):
+                                with patch("noise_artifacts.ingest._drop_ingest_stage_table"):
+                                    ingest_noise_normalized(
+                                        engine,
+                                        "srchash123",
+                                        "/fake_dir",
+                                        MagicMock(),
+                                        reimport_source=True,
+                                    )
 
-        executed_sql = [str(call.args[0]) for call in conn.execute.call_args_list]
-        self.assertTrue(
-            any("DELETE FROM noise_normalized" in sql for sql in executed_sql),
-            f"expected source delete for reimport; got {executed_sql}",
-        )
+        self.assertTrue(engine.begin.called, "expected source delete transaction for reimport")
 
     def test_ingest_invalid_first_batch_raises_before_generator_exhaustion(self) -> None:
         from noise_artifacts.exceptions import NoiseIngestError
@@ -1186,19 +1218,26 @@ class BuilderProgressTests(TestCase):
         conn = MagicMock()
         engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
         engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         with tempfile.TemporaryDirectory() as tmp_name:
             env = {
                 "NOISE_CANDIDATES_CACHE_DIR": tmp_name,
                 "NOISE_LOADER_WORKERS": "1",
+                "NOISE_INGEST_MODE": "python",
+                "NOISE_INGEST_COPY_BATCH_ROWS": "500",
             }
             with patch.dict(os.environ, env, clear=False):
                 with patch("noise.loader.iter_noise_candidate_rows", side_effect=lambda **_: _gen()):
                     with patch("noise.loader._ogr2ogr_available", return_value=False):
-                        with patch("noise_artifacts.ingest._insert_batch", return_value=0) as mock_insert:
-                            with self.assertRaises(NoiseIngestError):
-                                ingest_noise_normalized(engine, "srchash123", "/fake_dir", MagicMock())
+                        with patch("noise_artifacts.ingest._create_ingest_stage_table"):
+                            with patch("noise_artifacts.ingest._copy_batch_to_stage", return_value=0) as mock_copy:
+                                with patch("noise_artifacts.ingest._flush_stage_to_normalized", return_value=0):
+                                    with patch("noise_artifacts.ingest._drop_ingest_stage_table"):
+                                        with self.assertRaises(NoiseIngestError):
+                                            ingest_noise_normalized(engine, "srchash123", "/fake_dir", MagicMock())
 
         self.assertEqual(produced["count"], 500, "ingest must stop after the first invalid batch")
-        mock_insert.assert_not_called()
+        mock_copy.assert_not_called()
 

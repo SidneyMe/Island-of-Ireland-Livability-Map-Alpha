@@ -1,19 +1,17 @@
 """
 Source ingest for the noise artifact pipeline.
 
-PHASE 4A TEMPORARY: uses noise.loader (Python/Fiona/Shapely).
-Phase 4B / Phase 13 will replace this with GDAL/ogr2ogr + PostGIS import:
-  ogr2ogr -f PostgreSQL PG:"..." <source> -t_srs EPSG:2157 -nln noise_normalized ...
-
-This is the ONLY module in the noise_artifacts package that opens raw
-ZIP/FileGDB/SHP files. The builder calls this; the livability build does not.
+Primary path selection:
+- NOISE_INGEST_MODE=auto    -> prefer ogr2ogr when available; fallback to python COPY staging
+- NOISE_INGEST_MODE=ogr2ogr -> require ogr2ogr
+- NOISE_INGEST_MODE=python  -> force python COPY staging
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
-import uuid
 from binascii import unhexlify
 from decimal import Decimal
 from itertools import islice
@@ -26,7 +24,6 @@ from .exceptions import NoiseIngestError
 
 log = logging.getLogger(__name__)
 
-_BATCH_SIZE = 500
 # Schema version bump here forces re-ingest for all existing source hashes.
 INGEST_SCHEMA_VERSION = 1
 
@@ -38,6 +35,7 @@ _META_KEYS = (
     "source_dataset", "source_layer", "raw_gridcode",
 )
 
+_STAGE_TABLE_NAME = "noise_ingest_stage"
 _STAGE_COLUMNS = (
     "noise_source_hash",
     "jurisdiction",
@@ -52,8 +50,15 @@ _STAGE_COLUMNS = (
     "source_layer",
     "source_ref",
     "raw_gridcode",
-    "wkb",
+    "geom_wkb",
 )
+
+_INGEST_MODE_ENV = "NOISE_INGEST_MODE"
+_ALLOWED_INGEST_MODES = {"auto", "ogr2ogr", "python"}
+_COPY_BATCH_ROWS_ENV = "NOISE_INGEST_COPY_BATCH_ROWS"
+_FLUSH_ROWS_ENV = "NOISE_INGEST_FLUSH_ROWS"
+_DEFAULT_COPY_BATCH_ROWS = 5_000
+_DEFAULT_FLUSH_ROWS = 25_000
 
 
 def _progress(progress_cb, message: str) -> None:
@@ -65,6 +70,29 @@ def _progress(progress_cb, message: str) -> None:
 
 def _timing(progress_cb, label: str, seconds: float) -> None:
     _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
+
+
+def _resolve_ingest_mode() -> str:
+    raw = (os.getenv(_INGEST_MODE_ENV) or "auto").strip().lower()
+    if raw not in _ALLOWED_INGEST_MODES:
+        allowed = ", ".join(sorted(_ALLOWED_INGEST_MODES))
+        raise NoiseIngestError(
+            f"{_INGEST_MODE_ENV} must be one of {{{allowed}}}, got {raw!r}"
+        )
+    return raw
+
+
+def _resolve_positive_int_env(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(f"{name} must be an integer, got {raw!r}") from exc
+    if value <= 0:
+        raise NoiseIngestError(f"{name} must be > 0, got {value}")
+    return value
 
 
 def _existing_source_row_count(engine: Engine, noise_source_hash: str) -> int:
@@ -188,111 +216,37 @@ def _diagnose_ingest_integrity_error(
     return NoiseIngestError("\n".join(lines))
 
 
-def ingest_noise_normalized(
-    engine: Engine,
-    noise_source_hash: str,
-    data_dir,
-    domain_wgs84,
-    *,
-    force: bool = False,
-    reimport_source: bool = False,
-    progress_cb=None,
-) -> int:
-    """
-    Load raw noise source rows into noise_normalized (EPSG:2157).
-
-    If force=True or reimport_source=True, deletes existing rows for this source_hash first.
-    Returns total rows inserted.
-    """
-    reimport_source = bool(reimport_source or force)
-    total_started = time.perf_counter()
-    cache_lookup_started = time.perf_counter()
-    existing_rows = _existing_source_row_count(engine, noise_source_hash)
-    _timing(progress_cb, "ingest.cache_lookup", time.perf_counter() - cache_lookup_started)
-
-    if reimport_source:
-        with engine.begin() as conn:
-            conn.execute(
-                text("DELETE FROM noise_normalized WHERE noise_source_hash = :h"),
-                {"h": noise_source_hash},
+def _create_ingest_stage_table(conn) -> None:
+    conn.execute(
+        text(
+            f"""
+            CREATE TEMP TABLE IF NOT EXISTS {_STAGE_TABLE_NAME} (
+                noise_source_hash TEXT NOT NULL,
+                jurisdiction TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                round_number INTEGER NOT NULL,
+                report_period TEXT NULL,
+                db_low DOUBLE PRECISION NULL,
+                db_high DOUBLE PRECISION NULL,
+                db_value TEXT NOT NULL,
+                source_dataset TEXT NOT NULL,
+                source_layer TEXT NOT NULL,
+                source_ref TEXT NULL,
+                raw_gridcode TEXT NULL,
+                geom_wkb BYTEA NULL
             )
-            log.info("deleted prior noise_normalized rows for source_hash=%s", noise_source_hash)
-        existing_rows = 0
-    elif existing_rows > 0:
-        _progress(
-            progress_cb,
-            f"source normalized rows already exist for source={noise_source_hash}; skipping raw ingest",
+            """
         )
-        _timing(progress_cb, "ingest.total", time.perf_counter() - total_started)
-        return 0
-
-    from noise.loader import iter_noise_candidate_rows_cached
-
-    total_read = 0
-    total_inserted = 0
-    raw_read_seconds = 0.0
-    db_insert_seconds = 0.0
-    rows_iter = iter_noise_candidate_rows_cached(
-        data_dir=data_dir,
-        study_area_wgs84=domain_wgs84,
-        progress_cb=progress_cb,
-        use_cache=True,
     )
-
-    batch_pull_started = time.perf_counter()
-    for batch in _batched(rows_iter, _BATCH_SIZE):
-        batch_ready_at = time.perf_counter()
-        raw_read_seconds += batch_ready_at - batch_pull_started
-        total_read += len(batch)
-
-        # Pre-ingest validation before opening a DB transaction.
-        for row in batch:
-            _validate_noise_row(row)
-
-        db_started = time.perf_counter()
-        with engine.begin() as conn:
-            try:
-                n = _insert_batch(conn, noise_source_hash, batch)
-            except Exception as exc:
-                from sqlalchemy.exc import IntegrityError
-                if isinstance(exc, IntegrityError):
-                    raise _diagnose_ingest_integrity_error(
-                        engine, conn, noise_source_hash, batch, exc
-                    ) from exc
-                raise
-            total_inserted += n
-        db_insert_seconds += time.perf_counter() - db_started
-        log.debug(
-            "ingested %d rows (running total=%d; read=%d)",
-            n,
-            total_inserted,
-            total_read,
-        )
-        batch_pull_started = time.perf_counter()
-
-        if total_read % 10_000 < _BATCH_SIZE:
-            _progress(
-                progress_cb,
-                f"ingest streamed {total_read:,} candidates; inserted {total_inserted:,} normalized rows",
-            )
-
-    _progress(
-        progress_cb,
-        f"ingest done: read {total_read:,}; inserted {total_inserted:,}",
-    )
-    _timing(progress_cb, "ingest.raw_read", raw_read_seconds)
-    _timing(progress_cb, "ingest.db_insert", db_insert_seconds)
-    _timing(progress_cb, "ingest.total", time.perf_counter() - total_started)
-    log.info(
-        "ingest complete: source_hash=%s read_rows=%d inserted_rows=%d",
-        noise_source_hash,
-        total_read,
-        total_inserted,
-    )
-    return total_inserted
+    conn.execute(text(f"TRUNCATE TABLE {_STAGE_TABLE_NAME}"))
 
 
-def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
+def _drop_ingest_stage_table(conn) -> None:
+    conn.execute(text(f"DROP TABLE IF EXISTS {_STAGE_TABLE_NAME}"))
+
+
+def _copy_batch_to_stage(conn, noise_source_hash: str, batch: list[dict]) -> int:
     if not batch:
         return 0
 
@@ -331,38 +285,53 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
                 if row.get("raw_gridcode") is not None
                 else None
             ),
-            "wkb": wkb_bytes,
+            "geom_wkb": wkb_bytes,
         })
 
     if not rows:
         return 0
 
-    stage_table = f"noise_ingest_stage_{uuid.uuid4().hex}"
+    _copy_rows_into_stage(conn, rows)
+    return len(rows)
+
+
+def _copy_rows_into_stage(conn, rows: list[dict]) -> None:
+    copied = _copy_rows_into_stage_via_psycopg(conn, rows)
+    if copied:
+        return
+
+    cols = ", ".join(_STAGE_COLUMNS)
+    placeholders = ", ".join(f":{col}" for col in _STAGE_COLUMNS)
     conn.execute(
-        text(
-            f"""
-            CREATE TEMP TABLE {stage_table} (
-                noise_source_hash TEXT NOT NULL,
-                jurisdiction TEXT NOT NULL,
-                source_type TEXT NOT NULL,
-                metric TEXT NOT NULL,
-                round_number INTEGER NOT NULL,
-                report_period TEXT NULL,
-                db_low DOUBLE PRECISION NULL,
-                db_high DOUBLE PRECISION NULL,
-                db_value TEXT NOT NULL,
-                source_dataset TEXT NOT NULL,
-                source_layer TEXT NOT NULL,
-                source_ref TEXT NULL,
-                raw_gridcode TEXT NULL,
-                wkb BYTEA NULL
-            ) ON COMMIT DROP
-            """
-        )
+        text(f"INSERT INTO {_STAGE_TABLE_NAME} ({cols}) VALUES ({placeholders})"),
+        rows,
     )
 
-    _copy_rows_into_stage(conn, stage_table, rows)
-    conn.execute(
+
+def _copy_rows_into_stage_via_psycopg(conn, rows: list[dict]) -> bool:
+    try:
+        driver_conn = conn.connection.driver_connection
+    except Exception:
+        return False
+    if driver_conn is None:
+        return False
+
+    copy_sql = (
+        f"COPY {_STAGE_TABLE_NAME} ({', '.join(_STAGE_COLUMNS)}) "
+        "FROM STDIN"
+    )
+    try:
+        with driver_conn.cursor() as cur:
+            with cur.copy(copy_sql) as copy:
+                for row in rows:
+                    copy.write_row(tuple(row.get(col) for col in _STAGE_COLUMNS))
+        return True
+    except Exception:
+        return False
+
+
+def _flush_stage_to_normalized(conn) -> int:
+    result = conn.execute(
         text(
             f"""
             INSERT INTO noise_normalized (
@@ -381,11 +350,11 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
                     s.source_dataset, s.source_layer, s.source_ref,
                     ST_Multi(ST_CollectionExtract(
                         ST_MakeValid(
-                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(s.wkb), 4326), 2157)
+                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(s.geom_wkb), 4326), 2157)
                         ), 3
                     )) AS geom
-                FROM {stage_table} AS s
-                WHERE s.wkb IS NOT NULL
+                FROM {_STAGE_TABLE_NAME} AS s
+                WHERE s.geom_wkb IS NOT NULL
             ) AS converted
             WHERE geom IS NOT NULL
               AND NOT ST_IsEmpty(geom)
@@ -393,43 +362,174 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
             """
         )
     )
-    return len(rows)
+    return max(int(result.rowcount or 0), 0)
 
 
-def _copy_rows_into_stage(conn, stage_table: str, rows: list[dict]) -> None:
-    copied = _copy_rows_into_stage_via_psycopg(conn, stage_table, rows)
-    if copied:
-        return
+def _truncate_ingest_stage(conn) -> None:
+    conn.execute(text(f"TRUNCATE TABLE {_STAGE_TABLE_NAME}"))
 
-    # Fallback path for non-psycopg DBAPI implementations used in tests.
-    cols = ", ".join(_STAGE_COLUMNS)
-    placeholders = ", ".join(f":{col}" for col in _STAGE_COLUMNS)
-    conn.execute(
-        text(f"INSERT INTO {stage_table} ({cols}) VALUES ({placeholders})"),
-        rows,
+
+def _ingest_noise_normalized_python_copy(
+    engine: Engine,
+    noise_source_hash: str,
+    data_dir,
+    domain_wgs84,
+    *,
+    progress_cb=None,
+) -> int:
+    from noise.loader import iter_noise_candidate_rows_cached
+
+    copy_batch_rows = _resolve_positive_int_env(_COPY_BATCH_ROWS_ENV, _DEFAULT_COPY_BATCH_ROWS)
+    flush_rows = _resolve_positive_int_env(_FLUSH_ROWS_ENV, _DEFAULT_FLUSH_ROWS)
+
+    total_started = time.perf_counter()
+    total_read = 0
+    total_staged = 0
+    total_inserted = 0
+    staged_since_flush = 0
+
+    raw_extract_seconds = 0.0
+    copy_stage_seconds = 0.0
+    normalize_insert_seconds = 0.0
+
+    rows_iter = iter_noise_candidate_rows_cached(
+        data_dir=data_dir,
+        study_area_wgs84=domain_wgs84,
+        progress_cb=progress_cb,
+        use_cache=True,
     )
 
+    with engine.connect() as conn:
+        _create_ingest_stage_table(conn)
+        try:
+            batch_pull_started = time.perf_counter()
+            for batch in _batched(rows_iter, copy_batch_rows):
+                batch_ready_at = time.perf_counter()
+                raw_extract_seconds += batch_ready_at - batch_pull_started
+                total_read += len(batch)
 
-def _copy_rows_into_stage_via_psycopg(conn, stage_table: str, rows: list[dict]) -> bool:
-    try:
-        driver_conn = conn.connection.driver_connection
-    except Exception:
-        return False
-    if driver_conn is None:
-        return False
+                for row in batch:
+                    _validate_noise_row(row)
 
-    copy_sql = (
-        f"COPY {stage_table} ({', '.join(_STAGE_COLUMNS)}) "
-        "FROM STDIN"
+                copy_started = time.perf_counter()
+                copied = _copy_batch_to_stage(conn, noise_source_hash, batch)
+                copy_stage_seconds += time.perf_counter() - copy_started
+                total_staged += copied
+                staged_since_flush += copied
+
+                if total_read % 10_000 < copy_batch_rows:
+                    _progress(
+                        progress_cb,
+                        f"ingest streamed {total_read:,} candidates; staged {total_staged:,}",
+                    )
+
+                if staged_since_flush >= flush_rows:
+                    insert_started = time.perf_counter()
+                    inserted = _flush_stage_to_normalized(conn)
+                    normalize_insert_seconds += time.perf_counter() - insert_started
+                    total_inserted += inserted
+                    _truncate_ingest_stage(conn)
+                    conn.commit()
+                    _progress(progress_cb, f"ingest copied {total_staged:,} staged rows")
+                    _progress(progress_cb, f"ingest inserted {total_inserted:,} normalized rows")
+                    staged_since_flush = 0
+
+                batch_pull_started = time.perf_counter()
+
+            if staged_since_flush > 0:
+                insert_started = time.perf_counter()
+                inserted = _flush_stage_to_normalized(conn)
+                normalize_insert_seconds += time.perf_counter() - insert_started
+                total_inserted += inserted
+                _truncate_ingest_stage(conn)
+                conn.commit()
+                _progress(progress_cb, f"ingest copied {total_staged:,} staged rows")
+                _progress(progress_cb, f"ingest inserted {total_inserted:,} normalized rows")
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            try:
+                _drop_ingest_stage_table(conn)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+
+    _progress(progress_cb, f"ingest done: read {total_read:,}; inserted {total_inserted:,}")
+    _timing(progress_cb, "ingest.raw_extract", raw_extract_seconds)
+    _timing(progress_cb, "ingest.copy_stage", copy_stage_seconds)
+    _timing(progress_cb, "ingest.normalize_insert", normalize_insert_seconds)
+    _timing(progress_cb, "ingest.total", time.perf_counter() - total_started)
+    return total_inserted
+
+
+def ingest_noise_normalized(
+    engine: Engine,
+    noise_source_hash: str,
+    data_dir,
+    domain_wgs84,
+    *,
+    force: bool = False,
+    reimport_source: bool = False,
+    progress_cb=None,
+) -> int:
+    """
+    Load raw noise source rows into noise_normalized (EPSG:2157).
+
+    If force=True or reimport_source=True, deletes existing rows for this source_hash first.
+    Returns total rows inserted.
+    """
+    reimport_source = bool(reimport_source or force)
+
+    cache_lookup_started = time.perf_counter()
+    existing_rows = _existing_source_row_count(engine, noise_source_hash)
+    _timing(progress_cb, "ingest.cache_lookup", time.perf_counter() - cache_lookup_started)
+
+    if reimport_source:
+        with engine.begin() as conn:
+            conn.execute(
+                text("DELETE FROM noise_normalized WHERE noise_source_hash = :h"),
+                {"h": noise_source_hash},
+            )
+            log.info("deleted prior noise_normalized rows for source_hash=%s", noise_source_hash)
+        existing_rows = 0
+    elif existing_rows > 0:
+        _progress(
+            progress_cb,
+            f"source normalized rows already exist for source={noise_source_hash}; skipping raw ingest",
+        )
+        _timing(progress_cb, "ingest.total", 0.0)
+        return 0
+
+    mode = _resolve_ingest_mode()
+    _progress(progress_cb, f"ingest mode: {mode}")
+
+    if mode in {"auto", "ogr2ogr"}:
+        from .ogr_ingest import ingest_noise_normalized_ogr2ogr, ogr2ogr_available
+
+        if ogr2ogr_available():
+            return ingest_noise_normalized_ogr2ogr(
+                engine,
+                noise_source_hash,
+                data_dir,
+                domain_wgs84,
+                progress_cb=progress_cb,
+            )
+
+        if mode == "ogr2ogr":
+            raise NoiseIngestError(
+                "NOISE_INGEST_MODE=ogr2ogr but ogr2ogr was not found on PATH"
+            )
+
+        _progress(progress_cb, "ogr2ogr not available; falling back to python COPY staging")
+
+    return _ingest_noise_normalized_python_copy(
+        engine,
+        noise_source_hash,
+        data_dir,
+        domain_wgs84,
+        progress_cb=progress_cb,
     )
-    try:
-        with driver_conn.cursor() as cur:
-            with cur.copy(copy_sql) as copy:
-                for row in rows:
-                    copy.write_row(tuple(row.get(col) for col in _STAGE_COLUMNS))
-        return True
-    except Exception:
-        return False
 
 
 def _batched(iterable: Iterable, n: int) -> Iterator[list]:

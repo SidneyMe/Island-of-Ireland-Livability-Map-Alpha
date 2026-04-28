@@ -567,3 +567,38 @@ class NoiseCandidateCacheTests(TestCase):
         src = inspect.getsource(noise_loader.iter_noise_candidate_rows_cached)
         self.assertNotIn("serialized = [", src)
         self.assertNotIn("deserialized = [", src)
+
+    def test_legacy_single_file_cache_is_deleted_unless_explicitly_allowed(self) -> None:
+        rows = [
+            self._fake_candidate_row(source_type="road", round_number=4, geom=box(0, 0, 1, 1)),
+        ]
+        produced = {"count": 0}
+
+        def fake_iter(**_kwargs):
+            produced["count"] += 1
+            yield rows[0]
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            study_area = box(-1, -1, 2, 2)
+            key = candidates_cache_key(study_area)
+            legacy_cache_path = noise_loader._candidates_cache_path(cache_dir, key)
+            legacy_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            noise_loader._save_cached_candidates(
+                legacy_cache_path,
+                [noise_loader._serialize_candidate(rows[0])],
+            )
+            self.assertTrue(legacy_cache_path.exists())
+
+            with mock.patch.dict(os.environ, {"NOISE_ALLOW_LEGACY_CANDIDATE_CACHE": "0"}, clear=False):
+                with mock.patch.object(noise_loader, "iter_noise_candidate_rows", side_effect=fake_iter):
+                    out = list(
+                        iter_noise_candidate_rows_cached(
+                            study_area_wgs84=study_area,
+                            cache_dir=cache_dir,
+                            workers=1,
+                        )
+                    )
+
+        self.assertEqual(len(out), 1)
+        self.assertEqual(produced["count"], 1, "legacy cache should be ignored/deleted unless explicitly allowed")

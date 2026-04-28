@@ -327,6 +327,29 @@ class WorkflowArtifactHashTests(TestCase):
         src = inspect.getsource(workflow.run_precompute_impl)
         self.assertIn("resolved_noise_hash", src)
 
+    def test_force_noise_artifact_maps_to_resolved_rebuild_without_source_reimport(self) -> None:
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("_force_resolved = bool(force_noise_artifact or force_noise_all)", src)
+        self.assertIn("_reimport_source = bool(reimport_noise_source or force_noise_all)", src)
+
+    def test_reimport_noise_source_sets_reimport_flag(self) -> None:
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("reimport_source=_reimport_source", src)
+
+    def test_topology_grid_changes_resolved_hash_not_source_hash(self) -> None:
+        from noise_artifacts.manifest import noise_resolved_hash, noise_source_hash
+
+        src_hash = noise_source_hash("sig", 1, 1)
+        dom_hash = "domhash123"
+        res_a = noise_resolved_hash(src_hash, dom_hash, 1, 1, 1, 0.1)
+        res_b = noise_resolved_hash(src_hash, dom_hash, 1, 1, 1, 2.0)
+        self.assertEqual(src_hash, noise_source_hash("sig", 1, 1))
+        self.assertNotEqual(res_a, res_b)
+
 
 class MigrationArtifactRefTests(TestCase):
 
