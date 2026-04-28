@@ -154,14 +154,17 @@ def _insert_resolved_round(
                     s.round_number, s.report_period,
                     s.db_low, s.db_high, s.db_value,
                     ST_Multi(ST_CollectionExtract(
-                        ST_MakeValid(
-                            ST_Intersection(s.precise_geom, d.geom)
-                        ), 3
+                        ST_MakeValid(i.ix), 3
                     )) AS clipped_geom
                 FROM source_round s
                 CROSS JOIN domain_2157 d
+                JOIN LATERAL (
+                    SELECT ST_Intersection(s.precise_geom, d.geom) AS ix
+                ) i ON true
                 WHERE s.precise_geom && d.geom
-                  AND ST_Area(ST_Intersection(s.precise_geom, d.geom)) > 0
+                  AND i.ix IS NOT NULL
+                  AND NOT ST_IsEmpty(i.ix)
+                  AND ST_Area(i.ix) > 0
             ),
             masked AS (
                 SELECT

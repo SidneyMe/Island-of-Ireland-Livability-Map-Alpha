@@ -223,48 +223,13 @@ def run_precompute_impl(
     if not import_was_ready and not auto_refresh_import:
         raise _import_not_ready_error(source_state)
 
-    if transit_preflight is not None:
-        transit_preflight(engine)
-
-    tracker = tracker_factory(cache_dir / "precompute_timing_stats.json")
-    if import_was_ready:
-        tracker.start_phase("import", detail="checking raw OSM import manifest")
-        tracker.finish_phase("import", "cached", detail="raw OSM import ready")
-
-    study_area_metric, study_area_wgs84 = phase_geometry(tracker)
-    _print_geometry_bounds(study_area_metric)
-
-    if dispatch_noise_loader is not None:
-        try:
-            dispatch_noise_loader()
-        except Exception as exc:  # noqa: BLE001 - background dispatch must not block main pipeline
-            print(f"[noise] background dispatch failed: {exc}; falling back to inline load")
-
-    if not import_was_ready:
-        tracker.start_phase("import", detail="refreshing raw OSM import")
-        ensure_local_osm_import(
-            engine,
-            source_state,
-            study_area_wgs84=study_area_wgs84,
-            normalization_scope_hash=normalization_scope_hash,
-            force_refresh=False,
-            progress_cb=tracker.phase_callback("import"),
-        )
-        tracker.finish_phase("import", "completed", detail="raw OSM import ready")
-
-    if ensure_transit_reality is not None:
-        ensure_transit_reality(
-            engine,
-            import_fingerprint=source_state.import_fingerprint,
-            study_area_wgs84=study_area_wgs84,
-            progress_cb=tracker.phase_callback("transit"),
-        )
-        hashes = get_hashes()
-        _print_build_context(source_state, hashes)
-
-    # Noise mode preflight.
+    # Noise artifact preflight — run early so a missing/broken artifact fails
+    # before the expensive geometry and transit phases.
+    # build_default_noise_artifact loads its own full-island domain; it does not
+    # need the study area computed by phase_geometry below.
     if _config.NOISE_MODE == "artifact":
         from noise_artifacts.manifest import get_active_artifact as _get_active_artifact
+        print("[noise] checking active resolved artifact", flush=True)
         _active_artifact = _get_active_artifact(engine, "resolved")
 
         _need_build = _active_artifact is None or force_noise_artifact or refresh_noise_artifact
@@ -304,6 +269,45 @@ def run_precompute_impl(
             "The default (artifact mode) is much faster and does not read raw files.",
             flush=True,
         )
+
+    if transit_preflight is not None:
+        transit_preflight(engine)
+
+    tracker = tracker_factory(cache_dir / "precompute_timing_stats.json")
+    if import_was_ready:
+        tracker.start_phase("import", detail="checking raw OSM import manifest")
+        tracker.finish_phase("import", "cached", detail="raw OSM import ready")
+
+    study_area_metric, study_area_wgs84 = phase_geometry(tracker)
+    _print_geometry_bounds(study_area_metric)
+
+    if dispatch_noise_loader is not None:
+        try:
+            dispatch_noise_loader()
+        except Exception as exc:  # noqa: BLE001 - background dispatch must not block main pipeline
+            print(f"[noise] background dispatch failed: {exc}; falling back to inline load")
+
+    if not import_was_ready:
+        tracker.start_phase("import", detail="refreshing raw OSM import")
+        ensure_local_osm_import(
+            engine,
+            source_state,
+            study_area_wgs84=study_area_wgs84,
+            normalization_scope_hash=normalization_scope_hash,
+            force_refresh=False,
+            progress_cb=tracker.phase_callback("import"),
+        )
+        tracker.finish_phase("import", "completed", detail="raw OSM import ready")
+
+    if ensure_transit_reality is not None:
+        ensure_transit_reality(
+            engine,
+            import_fingerprint=source_state.import_fingerprint,
+            study_area_wgs84=study_area_wgs84,
+            progress_cb=tracker.phase_callback("transit"),
+        )
+        hashes = get_hashes()
+        _print_build_context(source_state, hashes)
 
     print("Cache:")
     print_cache_status()
@@ -457,6 +461,10 @@ def run_precompute_impl(
         if isinstance(noise_row_payload, _ArtifactNoiseReference)
         else None
     )
+    # Full-island profile: artifact already covers the whole island so clipping
+    # noise polygons to study_area_wgs84 with ST_Intersection is wasted work.
+    # Pass None to skip clipping; for county/bbox profiles keep the clip.
+    noise_study_area = None if build_profile == "full" else study_area_wgs84
     publish_precomputed_artifacts(
         engine,
         hashes=hashes,
@@ -470,6 +478,7 @@ def run_precompute_impl(
         service_desert_rows=service_desert_row_payload,
         noise_rows=noise_row_payload,
         study_area_wgs84=study_area_wgs84,
+        noise_study_area_wgs84=noise_study_area,
         noise_processing_hash=resolved_noise_hash,
         noise_artifact_hash=resolved_artifact_hash,
         progress_cb=publish_progress_cb,

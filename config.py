@@ -554,7 +554,7 @@ NOISE_MODE: str = _noise_mode()
 
 # Geometry precision / simplification in metres (EPSG:2157 only)
 NOISE_TOPOLOGY_GRID_METRES: float = float(
-    os.getenv("NOISE_TOPOLOGY_GRID_METRES") or "0.1"
+    os.getenv("NOISE_TOPOLOGY_GRID_METRES") or "1.0"
 )
 NOISE_QUERY_SIMPLIFY_METRES: float = float(
     os.getenv("NOISE_QUERY_SIMPLIFY_METRES") or "1.0"

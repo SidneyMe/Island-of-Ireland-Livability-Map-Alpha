@@ -86,17 +86,12 @@ def _run_build(args) -> int:
         )
 
     if getattr(args, "bake_pmtiles", False):
-        from .bake import bake_noise_artifact_pmtiles
-        from .manifest import noise_tile_hash
-        output_dir = Path(args.output_dir) if args.output_dir else Path(".")
-        tile_hash = noise_tile_hash(
-            result["artifact_hash"], 1, 8, getattr(config, "NOISE_MAX_ZOOM", 13),
-            ("metric", "source_type", "db_value", "db_low", "db_high",
-             "jurisdiction", "round_number", "report_period"),
-            (getattr(config, "NOISE_TILE_SIMPLIFY_METRES_LZ", 10.0),
-             getattr(config, "NOISE_TILE_SIMPLIFY_METRES_HZ", 5.0)),
+        print(
+            "Standalone noise artifact PMTiles bake is not yet implemented. "
+            "Use `python main.py --precompute` to bake livability PMTiles from noise_polygons.",
+            file=__import__("sys").stderr,
         )
-        bake_noise_artifact_pmtiles(engine, tile_hash, output_dir=output_dir)
+        return 1
 
     return 0
 

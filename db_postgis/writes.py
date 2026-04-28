@@ -1448,6 +1448,9 @@ def _publish_noise_polygons(
     )
 
 
+_UNSET = object()  # sentinel for noise_study_area_wgs84
+
+
 def publish_precomputed_artifacts(
     engine: Engine,
     *,
@@ -1462,10 +1465,18 @@ def publish_precomputed_artifacts(
     service_desert_rows: Iterable[dict[str, Any]] = (),
     noise_rows: Iterable[dict[str, Any]] = (),
     study_area_wgs84=None,
+    noise_study_area_wgs84=_UNSET,
     noise_processing_hash: str | None = None,
     noise_artifact_hash: str | None = None,
     progress_cb: ProgressCallback | None = None,
 ) -> None:
+    # If noise_study_area_wgs84 is explicitly provided (even as None), use it for
+    # noise polygon clipping; otherwise fall back to study_area_wgs84.
+    # Passing None disables clipping — correct for full-island profiles where the
+    # artifact already covers the whole island and ST_Intersection is wasted work.
+    effective_noise_area = (
+        study_area_wgs84 if noise_study_area_wgs84 is _UNSET else noise_study_area_wgs84
+    )
     created_at = datetime.now(timezone.utc)
     root = root_module()
 
@@ -1532,7 +1543,7 @@ def publish_precomputed_artifacts(
             noise_processing_hash=noise_processing_hash,
             noise_artifact_hash=noise_artifact_hash,
             created_at=created_at,
-            study_area_wgs84=study_area_wgs84,
+            study_area_wgs84=effective_noise_area,
             summary_json=summary_json,
             progress_cb=progress_cb,
         )

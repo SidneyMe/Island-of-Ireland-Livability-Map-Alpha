@@ -66,8 +66,10 @@ def dissolve_noise_into_staging(
             topology_grid_metres=topology_grid_metres,
             use_square_grid=use_square_grid,
         )
+        _add_staging_indexes(conn, dissolve_table)
         _create_round_staging(conn, round_table)
         _pass2_dissolve(conn, dissolve_table, round_table)
+        _add_staging_indexes(conn, round_table)
 
     log.info("dissolve complete: dissolve_table=%s round_table=%s", dissolve_table, round_table)
     return dissolve_table, round_table
@@ -163,14 +165,19 @@ def _pass1_dissolve(
                     g.tile_geom,
                     ST_ReducePrecision(
                         ST_Multi(ST_CollectionExtract(
-                            ST_MakeValid(ST_Intersection(n.geom, g.tile_geom)), 3
+                            ST_MakeValid(i.ix), 3
                         )),
                         :topology_grid_m
                     ) AS tiled_geom
                 FROM noise_normalized n
                 JOIN processing_grid g ON n.geom && g.tile_geom
+                JOIN LATERAL (
+                    SELECT ST_Intersection(n.geom, g.tile_geom) AS ix
+                ) i ON true
                 WHERE n.noise_source_hash = :source_hash
-                  AND ST_Area(ST_Intersection(n.geom, g.tile_geom)) > 0
+                  AND i.ix IS NOT NULL
+                  AND NOT ST_IsEmpty(i.ix)
+                  AND ST_Area(i.ix) > 0
             ),
             pass1 AS (
                 SELECT
@@ -214,6 +221,18 @@ def _pass1_dissolve(
         },
     )
     return max(int(result.rowcount or 0), 0)
+
+
+def _add_staging_indexes(conn, table_name: str) -> None:
+    """Add GiST geometry index and composite btree index to a staging table, then ANALYZE."""
+    conn.execute(text(
+        f'CREATE INDEX ON "{table_name}" '
+        f'(jurisdiction, source_type, metric, round_number)'
+    ))
+    conn.execute(text(
+        f'CREATE INDEX ON "{table_name}" USING GIST (geom)'
+    ))
+    conn.execute(text(f'ANALYZE "{table_name}"'))
 
 
 def _pass2_dissolve(conn, dissolve_table: str, round_table: str) -> int:
