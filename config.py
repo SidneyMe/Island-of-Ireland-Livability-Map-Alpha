@@ -531,19 +531,19 @@ NOISE_BACKGROUND_DISPATCH = _bool_env("NOISE_BACKGROUND_DISPATCH", True)
 
 
 def _noise_mode() -> str:
-    raw = (os.getenv("NOISE_MODE") or "legacy").strip().lower()
+    raw = (os.getenv("NOISE_MODE") or "artifact").strip().lower()
     if raw not in {"legacy", "artifact"}:
         raise ValueError(
-            f"NOISE_MODE must be 'legacy' or 'artifact', got {raw!r}. "
-            "Set NOISE_MODE=artifact after running: python -m noise_artifacts"
+            f"NOISE_MODE must be 'artifact' or 'legacy', got {raw!r}. "
+            "Default is 'artifact'. Set NOISE_MODE=legacy only for debugging."
         )
     if raw == "legacy":
         import warnings
         warnings.warn(
-            "NOISE_MODE=legacy is deprecated. The legacy noise loader reads raw ZIP files "
-            "on every build, which is slow and couples builds to raw source files. "
-            "Migrate to artifact mode: run 'python -m noise_artifacts' once, "
-            "then set NOISE_MODE=artifact.",
+            "NOISE_MODE=legacy is the slow debug path. It reads raw ZIP/FileGDB files "
+            "on every build and runs full PostGIS materialization. "
+            "The default is artifact mode, which is fast and does not read raw noise files. "
+            "To build the artifact: python -m noise_artifacts --force",
             DeprecationWarning,
             stacklevel=3,
         )

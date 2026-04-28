@@ -329,11 +329,15 @@ def run_precompute(
     *,
     auto_refresh_import: bool = False,
     profile: str = "full",
+    force_noise_artifact: bool = False,
+    refresh_noise_artifact: bool = False,
 ) -> str:
     normalized_profile = normalize_build_profile(profile)
     return _workflow.run_precompute_impl(
         force_precompute=force_precompute,
         auto_refresh_import=auto_refresh_import,
+        force_noise_artifact=force_noise_artifact,
+        refresh_noise_artifact=refresh_noise_artifact,
         cache_dir=CACHE_DIR,
         build_profile=normalized_profile,
         current_normalization_scope_hash=lambda: current_normalization_scope_hash(normalized_profile),

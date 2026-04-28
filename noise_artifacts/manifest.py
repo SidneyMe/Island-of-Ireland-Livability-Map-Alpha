@@ -118,7 +118,7 @@ def upsert_artifact(
                 """
                 INSERT INTO noise_artifact_manifest
                     (artifact_hash, artifact_type, manifest_json, status, created_at)
-                VALUES (:artifact_hash, :artifact_type, :manifest_json::jsonb, 'building', now())
+                VALUES (:artifact_hash, :artifact_type, CAST(:manifest_json AS jsonb), 'building', now())
                 ON CONFLICT (artifact_hash) DO NOTHING
                 """
             ),
@@ -145,7 +145,7 @@ def reset_artifact_for_retry(
                 """
                 UPDATE noise_artifact_manifest
                 SET status = 'building',
-                    manifest_json = :manifest_json::jsonb,
+                    manifest_json = CAST(:manifest_json AS jsonb),
                     completed_at = NULL
                 WHERE artifact_hash = :artifact_hash
                 """
@@ -170,7 +170,7 @@ def mark_artifact_complete(
                 UPDATE noise_artifact_manifest
                 SET status = 'complete',
                     completed_at = now(),
-                    manifest_json = :manifest_json::jsonb
+                    manifest_json = CAST(:manifest_json AS jsonb)
                 WHERE artifact_hash = :artifact_hash
                 """
             ),

@@ -158,6 +158,8 @@ def run_import_refresh_impl(
 def run_precompute_impl(
     force_precompute: bool = False,
     auto_refresh_import: bool = False,
+    force_noise_artifact: bool = False,
+    refresh_noise_artifact: bool = False,
     *,
     build_profile: str = "full",
     cache_dir: Path,
@@ -260,17 +262,48 @@ def run_precompute_impl(
         hashes = get_hashes()
         _print_build_context(source_state, hashes)
 
-    # Artifact mode preflight: verify active resolved artifact exists before any skip logic.
+    # Noise mode preflight.
     if _config.NOISE_MODE == "artifact":
         from noise_artifacts.manifest import get_active_artifact as _get_active_artifact
         _active_artifact = _get_active_artifact(engine, "resolved")
+
+        _need_build = _active_artifact is None or force_noise_artifact or refresh_noise_artifact
+        if _need_build:
+            if _active_artifact is None:
+                _build_reason = "no active resolved artifact"
+            elif force_noise_artifact:
+                _build_reason = "--force-noise-artifact"
+            else:
+                _build_reason = "--refresh-noise-artifact"
+            print(f"[noise] {_build_reason}; building noise artifact...", flush=True)
+            from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
+            _build_result = _build_artifact(engine, force=force_noise_artifact)
+            if _build_result["status"] == "built":
+                print(
+                    f"[noise] artifact built: {_build_result['artifact_hash']} "
+                    f"rows={_build_result.get('row_count', 0)}",
+                    flush=True,
+                )
+            elif _build_result["status"] == "up_to_date":
+                print(
+                    f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
+                    flush=True,
+                )
+            _active_artifact = _get_active_artifact(engine, "resolved")
+
         if _active_artifact is None:
             raise RuntimeError(
-                "NOISE_MODE=artifact but no active complete resolved noise artifact found. "
-                "Run first: python -m noise_artifacts --force\n"
-                "Then retry: NOISE_MODE=artifact python main.py --precompute --force-precompute"
+                "BUG: noise artifact build completed but no active resolved artifact exists. "
+                "Check noise_artifact_manifest for errors."
             )
         print(f"[noise] active resolved artifact: {_active_artifact.artifact_hash}", flush=True)
+    elif _config.NOISE_MODE == "legacy":
+        print(
+            "[noise] WARNING: NOISE_MODE=legacy is the slow debug path. "
+            "It reads raw noise ZIP/FileGDB files and runs full PostGIS materialization. "
+            "The default (artifact mode) is much faster and does not read raw files.",
+            flush=True,
+        )
 
     print("Cache:")
     print_cache_status()

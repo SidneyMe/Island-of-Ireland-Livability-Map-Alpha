@@ -25,12 +25,13 @@ def _make_fake_manifest(artifact_hash="res123"):
 
 class NoiseModeConfigTests(TestCase):
 
-    def test_noise_mode_defaults_to_legacy(self) -> None:
+    def test_noise_mode_defaults_to_artifact(self) -> None:
+        """FIX 1: default NOISE_MODE is now artifact (no env var needed)."""
         with patch.dict(os.environ, {}, clear=True):
             import importlib
             import config
             importlib.reload(config)
-            self.assertEqual(config.NOISE_MODE, "legacy")
+            self.assertEqual(config.NOISE_MODE, "artifact")
 
     def test_noise_mode_accepts_artifact(self) -> None:
         with patch.dict(os.environ, {"NOISE_MODE": "artifact"}):

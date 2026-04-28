@@ -126,6 +126,7 @@ class DbPostgisTransitArtifactWriteTests(TestCase):
             mock.patch.object(db_writes, "_materialize_noise_polygons_from_stage", return_value=1) as materialize,
             mock.patch.object(db_writes, "_update_noise_summary_from_database") as update_summary,
             mock.patch.object(db_writes, "_stage_noise_candidate_rows", return_value=1) as stage,
+            mock.patch("config.NOISE_MODE", "legacy"),
         ):
             db_writes._publish_noise_polygons(
                 connection,
@@ -166,6 +167,7 @@ class DbPostgisTransitArtifactWriteTests(TestCase):
             mock.patch.object(db_writes, "_stage_noise_candidate_rows") as stage,
             mock.patch.object(db_writes, "_materialize_noise_polygons_from_stage") as materialize,
             mock.patch.object(db_writes, "_update_noise_summary_from_database") as update_summary,
+            mock.patch("config.NOISE_MODE", "legacy"),
         ):
             db_writes._publish_noise_polygons(
                 connection,

@@ -600,3 +600,155 @@ class ExtractFingerprintTests(TestCase):
 
             self.assertEqual(first, second)
             content_hash_mock.assert_called_once_with(extract)
+
+
+class NoiseModeConfigTests(TestCase):
+    """FIX 1 / FIX 9: NOISE_MODE default and validation tests."""
+
+    def test_noise_mode_defaults_to_artifact_with_no_env_var(self) -> None:
+        """Default NOISE_MODE is artifact — users do not need to set the env var."""
+        with mock.patch.dict(os.environ, {}, clear=True):
+            import importlib
+            importlib.reload(config)
+            self.assertEqual(config.NOISE_MODE, "artifact")
+
+    def test_noise_mode_legacy_explicit_opt_in(self) -> None:
+        """NOISE_MODE=legacy is the debug escape hatch and must still work."""
+        with mock.patch.dict(os.environ, {"NOISE_MODE": "legacy"}, clear=True):
+            result = config._noise_mode()
+        self.assertEqual(result, "legacy")
+
+    def test_noise_mode_artifact_explicit_still_works(self) -> None:
+        with mock.patch.dict(os.environ, {"NOISE_MODE": "artifact"}, clear=True):
+            result = config._noise_mode()
+        self.assertEqual(result, "artifact")
+
+    def test_noise_mode_invalid_raises_value_error(self) -> None:
+        with mock.patch.dict(os.environ, {"NOISE_MODE": "banana"}, clear=True):
+            with self.assertRaises(ValueError) as ctx:
+                config._noise_mode()
+        self.assertIn("banana", str(ctx.exception))
+
+    def test_noise_mode_legacy_emits_deprecation_warning(self) -> None:
+        import warnings
+        with mock.patch.dict(os.environ, {"NOISE_MODE": "legacy"}, clear=True):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                config._noise_mode()
+        deprecation_warnings = [x for x in w if issubclass(x.category, DeprecationWarning)]
+        self.assertTrue(
+            deprecation_warnings,
+            "legacy mode must emit a DeprecationWarning",
+        )
+        self.assertIn("legacy", str(deprecation_warnings[0].message).lower())
+
+
+class ManifestCastSyntaxTests(TestCase):
+    """FIX 8: :manifest_json::jsonb (SQLAlchemy-breaking cast) must not appear in manifest.py."""
+
+    def test_manifest_has_no_postgres_cast_syntax(self) -> None:
+        import inspect
+        import noise_artifacts.manifest as _manifest
+        src = inspect.getsource(_manifest)
+        self.assertNotIn(":manifest_json::jsonb", src)
+
+    def test_manifest_uses_cast_function_syntax(self) -> None:
+        import inspect
+        import noise_artifacts.manifest as _manifest
+        src = inspect.getsource(_manifest)
+        self.assertIn("CAST(:manifest_json AS jsonb)", src)
+
+
+class RunnerModuleTests(TestCase):
+    """FIX 5: runner.py is the canonical home for build setup logic."""
+
+    def test_runner_module_importable(self) -> None:
+        from noise_artifacts.runner import build_default_noise_artifact
+        self.assertTrue(callable(build_default_noise_artifact))
+
+    def test_runner_has_version_constants(self) -> None:
+        import noise_artifacts.runner as _runner
+        for name in (
+            "PARSER_VERSION", "SOURCE_SCHEMA_VERSION", "TOPOLOGY_RULES_VERSION",
+            "DISSOLVE_RULES_VERSION", "ROUND_PRIORITY_VERSION", "EXTENT_VERSION",
+        ):
+            self.assertIsInstance(getattr(_runner, name), int)
+
+    def test_main_module_re_exports_version_constants(self) -> None:
+        """__main__.py must still expose version constants for CLI consumers."""
+        import noise_artifacts.__main__ as _main
+        for name in (
+            "PARSER_VERSION", "SOURCE_SCHEMA_VERSION", "TOPOLOGY_RULES_VERSION",
+        ):
+            self.assertIsInstance(getattr(_main, name), int)
+
+    def test_runner_build_default_noise_artifact_returns_dict(self) -> None:
+        """build_default_noise_artifact must return dict with status/artifact_hash."""
+        import inspect
+        import noise_artifacts.runner as _runner
+        src = inspect.getsource(_runner.build_default_noise_artifact)
+        self.assertIn("up_to_date", src)
+        self.assertIn("artifact_hash", src)
+        self.assertIn("status", src)
+
+
+class MainCliNoiseFlagsTests(TestCase):
+    """FIX 6: CLI flags --refresh-noise-artifact and --force-noise-artifact must be present."""
+
+    def _build_parser(self):
+        import main as _main
+        return _main.build_parser()
+
+    def test_refresh_noise_artifact_flag_exists(self) -> None:
+        parser = self._build_parser()
+        args = parser.parse_args(["--precompute", "--refresh-noise-artifact"])
+        self.assertTrue(args.refresh_noise_artifact)
+
+    def test_force_noise_artifact_flag_exists(self) -> None:
+        parser = self._build_parser()
+        args = parser.parse_args(["--precompute", "--force-noise-artifact"])
+        self.assertTrue(args.force_noise_artifact)
+
+    def test_force_noise_artifact_requires_precompute_is_validated(self) -> None:
+        """main() must validate that --force-noise-artifact requires a precompute flag."""
+        import inspect
+        import main as _main
+        src = inspect.getsource(_main.main)
+        self.assertIn("force_noise_artifact", src)
+        self.assertIn("requires --precompute", src)
+
+    def test_refresh_noise_artifact_requires_precompute_is_validated(self) -> None:
+        """main() must validate that --refresh-noise-artifact requires a precompute flag."""
+        import inspect
+        import main as _main
+        src = inspect.getsource(_main.main)
+        self.assertIn("refresh_noise_artifact", src)
+
+
+class WorkflowNoiseAutoBuildsTests(TestCase):
+    """FIX 3+4: precompute auto-builds artifact in workflow."""
+
+    def test_workflow_has_force_noise_artifact_param(self) -> None:
+        import inspect
+        from precompute import workflow
+        sig = inspect.signature(workflow.run_precompute_impl)
+        self.assertIn("force_noise_artifact", sig.parameters)
+
+    def test_workflow_has_refresh_noise_artifact_param(self) -> None:
+        import inspect
+        from precompute import workflow
+        sig = inspect.signature(workflow.run_precompute_impl)
+        self.assertIn("refresh_noise_artifact", sig.parameters)
+
+    def test_workflow_calls_build_default_noise_artifact(self) -> None:
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("build_default_noise_artifact", src)
+
+    def test_workflow_emits_legacy_warning(self) -> None:
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("NOISE_MODE=legacy", src)
+        self.assertIn("slow debug path", src)

@@ -590,30 +590,30 @@ class MainModuleTests(TestCase):
     def test_default_data_dir_comes_from_noise_loader_not_config(self) -> None:
         """FIX 1: default data_dir must use noise.loader.NOISE_DATA_DIR, not config.NOISE_DATA_DIR."""
         import inspect
-        import noise_artifacts.__main__ as _main
-        src = inspect.getsource(_main._run_build)
+        import noise_artifacts.runner as _runner
+        src = inspect.getsource(_runner.build_default_noise_artifact)
         self.assertIn("NOISE_DATA_DIR", src)
         self.assertNotIn("config.NOISE_DATA_DIR", src)
 
     def test_domain_loader_uses_load_island_geometry_metric(self) -> None:
-        """FIX 2: domain must cover the full island, not NI-only."""
+        """FIX 2: domain must cover the full island, not NI-only. Canonical home is runner.py."""
         import inspect
-        import noise_artifacts.__main__ as _main
-        src = inspect.getsource(_main._load_domain)
+        import noise_artifacts.runner as _runner
+        src = inspect.getsource(_runner._load_domain)
         self.assertIn("load_island_geometry_metric", src)
 
     def test_domain_loader_does_not_use_convex_hull(self) -> None:
         """FIX 2: convex_hull on NI boundary was wrong; real island geometry must be used."""
         import inspect
-        import noise_artifacts.__main__ as _main
-        src = inspect.getsource(_main._load_domain)
+        import noise_artifacts.runner as _runner
+        src = inspect.getsource(_runner._load_domain)
         self.assertNotIn("convex_hull", src)
 
     def test_domain_boundary_bytes_hashes_both_roi_and_ni(self) -> None:
         """FIX 2: domain boundary hash must cover both ROI and NI boundary files."""
         import inspect
-        import noise_artifacts.__main__ as _main
-        src = inspect.getsource(_main._load_domain_boundary_bytes)
+        import noise_artifacts.runner as _runner
+        src = inspect.getsource(_runner._load_domain_boundary_bytes)
         self.assertIn("ROI_BOUNDARY_PATH", src)
         self.assertIn("NI_BOUNDARY_PATH", src)
 

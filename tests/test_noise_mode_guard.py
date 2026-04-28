@@ -256,10 +256,12 @@ class NoiseModeArtifactGuardTests(TestCase):
         self.assertIn("[config] NOISE_MODE=", src)
         self.assertIn("NOISE_MODE", src)
 
-    def test_artifact_preflight_raises_when_no_active_artifact(self) -> None:
-        """FIX E: precompute must fail early if NOISE_MODE=artifact but no active artifact."""
+    def test_artifact_preflight_auto_builds_or_raises_with_clear_message(self) -> None:
+        """FIX E+3: precompute must auto-build artifact if missing, or raise with clear message."""
         import inspect
         from precompute import workflow
         src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("active complete resolved noise artifact", src)
-        self.assertIn("python -m noise_artifacts", src)
+        # The auto-build path must be present
+        self.assertIn("build_default_noise_artifact", src)
+        # A BUG fallback must still exist if auto-build mysteriously fails
+        self.assertIn("BUG: noise artifact build completed", src)

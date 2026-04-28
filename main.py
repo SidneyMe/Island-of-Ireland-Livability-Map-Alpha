@@ -76,6 +76,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rebuild and replace the current PostGIS build even if a complete manifest already exists.",
     )
     parser.add_argument(
+        "--refresh-noise-artifact",
+        action="store_true",
+        help=(
+            "Before precompute, rebuild the noise artifact if it is missing or stale "
+            "(source files changed). No-op if the artifact is already up to date. "
+            "Requires --precompute / --precompute-dev / --precompute-test."
+        ),
+    )
+    parser.add_argument(
+        "--force-noise-artifact",
+        action="store_true",
+        help=(
+            "Before precompute, force a full rebuild of the noise artifact even if one exists. "
+            "Implies --refresh-noise-artifact. "
+            "Requires --precompute / --precompute-dev / --precompute-test."
+        ),
+    )
+    parser.add_argument(
         "--auto-refresh-import",
         action="store_true",
         help="Allow --precompute/--precompute-dev/--precompute-test to refresh raw OSM import state when it is missing instead of failing fast.",
@@ -117,6 +135,10 @@ def main() -> int:
         )
     if args.force_precompute and not precompute_requested:
         parser.error("--force-precompute requires --precompute, --precompute-dev, or --precompute-test")
+    if args.refresh_noise_artifact and not precompute_requested:
+        parser.error("--refresh-noise-artifact requires --precompute, --precompute-dev, or --precompute-test")
+    if args.force_noise_artifact and not precompute_requested:
+        parser.error("--force-noise-artifact requires --precompute, --precompute-dev, or --precompute-test")
     if args.force_transit_refresh and not args.refresh_transit:
         parser.error("--force-transit-refresh requires --refresh-transit")
     if args.auto_refresh_import and not precompute_requested:
@@ -151,6 +173,8 @@ def main() -> int:
                 profile="dev" if args.precompute_dev else "test" if args.precompute_test else "full",
                 force_precompute=args.force_precompute,
                 auto_refresh_import=args.auto_refresh_import,
+                force_noise_artifact=args.force_noise_artifact,
+                refresh_noise_artifact=args.refresh_noise_artifact or args.force_noise_artifact,
             )
         if run_render:
             from render_from_db import run_render_from_db as _run_render_from_db
