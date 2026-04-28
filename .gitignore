@@ -59,6 +59,13 @@ overture/*.parquet
 # Private notes
 docs/notes.md
 
+# Research
+docs/data-sources.md
+docs/decision-log.md
+docs/limitations.md
+docs/methodology.md
+docs/validation.md
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

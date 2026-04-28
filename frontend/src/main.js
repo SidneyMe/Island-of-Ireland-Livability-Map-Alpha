@@ -20,7 +20,6 @@ import {
   defaultNoiseSelections,
   noiseBandOptions,
   noiseMetricOptions,
-  noiseSourceLabel,
   noiseSourceOptions
 } from "./noise_filters.js";
 import {
@@ -51,39 +50,22 @@ import {
   renderGridDebugCard
 } from "./grid_debug.js";
 import { transportRealityPopupHtml } from "./transport_reality_popup.js";
+import { fetchWithTimeout } from "./api_client.js";
+import { amenityPopupHtml } from "./popups/amenity_popup.js";
+import { noisePopupHtml } from "./popups/noise_popup.js";
+import { inspectPopupHtml, coarseGridPopupHtml } from "./popups/grid_popup.js";
+import { serviceDesertPopupHtml } from "./popups/service_desert_popup.js";
 
 const protocol = new Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
 
 const MIN_ZOOM = 5;
 const DEBUG_GRID_QUERY_PARAM = "debug-grid";
-const SCORE_SECTIONS = ["shops", "transport", "healthcare", "parks"];
 const RUNTIME_FETCH_TIMEOUT_MS = 10000;
 const INSPECT_FETCH_TIMEOUT_MS = 15000;
 const DEBUG_GRID_ENABLED = debugGridEnabledFromUrl(window.location.href, {
   paramName: DEBUG_GRID_QUERY_PARAM
 });
-
-function fetchWithTimeout(input, init, timeoutMs) {
-  const controller = new AbortController();
-  const externalSignal = init && init.signal;
-  if (externalSignal) {
-    if (externalSignal.aborted) {
-      controller.abort();
-    } else {
-      externalSignal.addEventListener("abort", function () {
-        controller.abort();
-      }, { once: true });
-    }
-  }
-  const timer = window.setTimeout(function () {
-    controller.abort();
-  }, timeoutMs);
-  const opts = Object.assign({}, init || {}, { signal: controller.signal });
-  return fetch(input, opts).finally(function () {
-    window.clearTimeout(timer);
-  });
-}
 
 const elements = {
   statusPill: document.getElementById("status-pill"),
@@ -156,13 +138,6 @@ const state = {
 
 function updateStatus(message) {
   elements.statusPill.textContent = message;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
 }
 
 function fineSurfaceEnabled() {
@@ -1138,142 +1113,6 @@ function maybeBuildDebugGridControl() {
   elements.gridDebug.controls.appendChild(label);
 }
 
-function amenityPopupHtml(properties) {
-  const title = properties.name || formatAmenityLabel(properties.category || "Amenity");
-  const details = [];
-  const categoryLabel = formatAmenityLabel(properties.category || "");
-  const tierLabel = formatAmenityLabel(properties.tier || "");
-  if (properties.name && categoryLabel) {
-    const categoryText = tierLabel
-      ? categoryLabel + " • " + tierLabel
-      : categoryLabel;
-    details.push("<p>" + escapeHtml(categoryText) + "</p>");
-  } else if (tierLabel) {
-    details.push("<p>" + escapeHtml(tierLabel) + "</p>");
-  }
-  if (properties.source_ref) {
-    details.push("<p>" + escapeHtml(properties.source_ref) + "</p>");
-  }
-  if (properties.source) {
-    details.push("<p>Source: " + escapeHtml(properties.source) + "</p>");
-  }
-  if (properties.conflict_class && properties.conflict_class !== "osm_only") {
-    details.push("<p>Merge: " + escapeHtml(properties.conflict_class) + "</p>");
-  }
-  return (
-    '<div class="popup-content">' +
-      "<h3>" + escapeHtml(title) + "</h3>" +
-      details.join("") +
-    "</div>"
-  );
-}
-
-function serviceDesertPopupHtml(properties) {
-  return (
-    '<div class="popup-content">' +
-      "<h3>Service desert candidate</h3>" +
-      "<p>Resolution: " + escapeHtml(formatResolutionLabel(properties.resolution_m || resolutionForZoom(state.map.getZoom()))) + "</p>" +
-      "<p>Baseline reachable GTFS stops: " + escapeHtml(String(properties.baseline_reachable_stop_count || 0)) + "</p>" +
-      "<p>Reachable public departures (7d): " + escapeHtml(String(properties.reachable_public_departures_7d || 0)) + "</p>" +
-    "</div>"
-  );
-}
-
-function noisePopupHtml(properties) {
-  const sourceLabel = noiseSourceLabel(properties.source_type || "noise");
-  const metricLabel = properties.metric === "Lnight" ? "Night" : "Day-evening-night";
-  const round = properties.round || properties.round_number || "";
-  const reportPeriod = properties.report_period || "";
-  const jurisdiction = properties.jurisdiction === "roi"
-    ? "Republic of Ireland"
-    : properties.jurisdiction === "ni"
-      ? "Northern Ireland"
-      : properties.jurisdiction || "";
-  const details = [
-    "<p>" + escapeHtml(metricLabel + ": " + (properties.db_value || "unknown") + " dB") + "</p>",
-    "<p>" + escapeHtml(sourceLabel + (jurisdiction ? " - " + jurisdiction : "")) + "</p>"
-  ];
-  if (round || reportPeriod) {
-    details.push("<p>Round: " + escapeHtml([round, reportPeriod].filter(Boolean).join(" - ")) + "</p>");
-  }
-  if (properties.source_dataset) {
-    details.push("<p>Source: " + escapeHtml(properties.source_dataset) + "</p>");
-  }
-  return (
-    '<div class="popup-content">' +
-      "<h3>Noise contour</h3>" +
-      details.join("") +
-    "</div>"
-  );
-}
-
-function formatEffectiveUnits(value) {
-  const numeric = Number(value || 0);
-  return numeric.toFixed(2).replace(/\.?0+$/, "");
-}
-
-function inspectPopupHtml(payload) {
-  if (!payload.valid_land) {
-    return (
-      '<div class="popup-content">' +
-        "<h3>No land cell</h3>" +
-        "<p>The canonical 50m surface is transparent at this location.</p>" +
-        "<p>Visible grid: " + escapeHtml(formatResolutionLabel(payload.visible_resolution_m || 50)) + "</p>" +
-      "</div>"
-    );
-  }
-
-  const listHtml = SCORE_SECTIONS.map(function (category) {
-    const title = category.charAt(0).toUpperCase() + category.slice(1);
-    const count = Number((payload.counts || {})[category] || 0);
-    const clusterCount = Number((payload.cluster_counts || {})[category] || 0);
-    const effectiveUnits = formatEffectiveUnits((payload.effective_units || {})[category] || 0);
-    const score = Number((payload.component_scores || {})[category] || 0).toFixed(1);
-    return (
-      "<li><strong>" + title + "</strong>: " +
-      count + " raw, " +
-      clusterCount + " clusters, " +
-      effectiveUnits + " effective units, " +
-      score + " points</li>"
-    );
-  }).join("");
-
-  return (
-    '<div class="popup-content">' +
-      "<h3>Walk score " + Number(payload.total_score || 0).toFixed(1) + " / 100</h3>" +
-      "<p>Exact surface: " + escapeHtml(formatResolutionLabel(payload.resolution_m || 50)) + "</p>" +
-      "<p>Visible grid: " + escapeHtml(formatResolutionLabel(payload.visible_resolution_m || payload.resolution_m || 50)) + "</p>" +
-      "<p>Land coverage: " + (Number(payload.effective_area_ratio || 0) * 100).toFixed(0) + "%</p>" +
-      "<ul>" + listHtml + "</ul>" +
-    "</div>"
-  );
-}
-
-function coarseGridPopupHtml(properties) {
-  const listHtml = SCORE_SECTIONS.map(function (category) {
-    const title = category.charAt(0).toUpperCase() + category.slice(1);
-    const count = Number(properties["count_" + category] || 0);
-    const clusterCount = Number(properties["cluster_" + category] || 0);
-    const effectiveUnits = formatEffectiveUnits(properties["effective_units_" + category] || 0);
-    const score = Number(properties["score_" + category] || 0).toFixed(1);
-    return (
-      "<li><strong>" + title + "</strong>: " +
-      count + " raw, " +
-      clusterCount + " clusters, " +
-      effectiveUnits + " effective units, " +
-      score + " points</li>"
-    );
-  }).join("");
-
-  return (
-    '<div class="popup-content">' +
-      "<h3>Walk score " + Number(properties.total_score || 0).toFixed(1) + " / 100</h3>" +
-      "<p>Visible grid: " + escapeHtml(formatResolutionLabel(properties.resolution_m || resolutionForZoom(state.map.getZoom()))) + "</p>" +
-      "<ul>" + listHtml + "</ul>" +
-    "</div>"
-  );
-}
-
 async function fetchInspect(lngLat) {
   if (state.pendingInspect) {
     state.pendingInspect.abort();
@@ -1468,7 +1307,7 @@ function initializeMap() {
     if (clickAction.type === CLICK_ACTIONS.SERVICE_DESERT) {
       state.popup
         .setLngLat(event.lngLat)
-        .setHTML(serviceDesertPopupHtml(clickAction.features[0].properties || {}))
+        .setHTML(serviceDesertPopupHtml(clickAction.features[0].properties || {}, resolutionForZoom(state.map.getZoom())))
         .addTo(state.map);
       return;
     }
@@ -1501,7 +1340,7 @@ function initializeMap() {
     if (clickAction.type === CLICK_ACTIONS.COARSE_GRID) {
       state.popup
         .setLngLat(event.lngLat)
-        .setHTML(coarseGridPopupHtml(clickAction.features[0].properties || {}))
+        .setHTML(coarseGridPopupHtml(clickAction.features[0].properties || {}, resolutionForZoom(state.map.getZoom())))
         .addTo(state.map);
     }
   });
