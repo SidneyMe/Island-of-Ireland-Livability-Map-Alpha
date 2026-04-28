@@ -449,6 +449,15 @@ def ensure_database_ready(engine: Engine) -> None:
                     "Grant permission for CREATE EXTENSION or enable postgis manually. "
                     f"Original error: {exc}"
                 ) from exc
+            try:
+                connection.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
+            except Exception as exc:
+                raise RuntimeError(
+                    "pgcrypto extension could not be created automatically. "
+                    "The noise artifact pipeline requires pgcrypto for sha256() in SQL. "
+                    "Grant permission or run: CREATE EXTENSION pgcrypto; manually. "
+                    f"Original error: {exc}"
+                ) from exc
             has_postgis = connection.execute(
                 text("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'postgis')")
             ).scalar_one()

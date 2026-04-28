@@ -95,7 +95,8 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
     if not rows:
         return 0
 
-    # Insert with ST_Transform from EPSG:4326 (loader output) to EPSG:2157 (canonical)
+    # Insert with ST_Transform from EPSG:4326 (loader output) to EPSG:2157 (canonical).
+    # Wrap in subquery so the computed geom alias can be filtered in the outer WHERE.
     conn.execute(
         text(
             """
@@ -105,24 +106,33 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
                 source_dataset, source_layer, source_ref, geom
             )
             SELECT
-                v.noise_source_hash, v.jurisdiction, v.source_type, v.metric,
-                v.round_number, v.report_period, v.db_low, v.db_high, v.db_value,
-                v.source_dataset, v.source_layer, v.source_ref,
-                ST_Multi(ST_CollectionExtract(
-                    ST_MakeValid(
-                        ST_Transform(ST_SetSRID(ST_GeomFromWKB(decode(v.wkb_hex, 'hex')), 4326), 2157)
-                    ), 3
-                )) AS geom
-            FROM (VALUES """ + ", ".join(
+                noise_source_hash, jurisdiction, source_type, metric,
+                round_number, report_period, db_low, db_high, db_value,
+                source_dataset, source_layer, source_ref, geom
+            FROM (
+                SELECT
+                    v.noise_source_hash, v.jurisdiction, v.source_type, v.metric,
+                    v.round_number, v.report_period, v.db_low, v.db_high, v.db_value,
+                    v.source_dataset, v.source_layer, v.source_ref,
+                    ST_Multi(ST_CollectionExtract(
+                        ST_MakeValid(
+                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(decode(v.wkb_hex, 'hex')), 4326), 2157)
+                        ), 3
+                    )) AS geom
+                FROM (VALUES """ + ", ".join(
                 "(:noise_source_hash_{i}, :jurisdiction_{i}, :source_type_{i}, :metric_{i}, "
                 ":round_number_{i}, :report_period_{i}, :db_low_{i}, :db_high_{i}, :db_value_{i}, "
                 ":source_dataset_{i}, :source_layer_{i}, :source_ref_{i}, :wkb_hex_{i})".format(i=i)
                 for i in range(len(rows))
             ) + """
-            ) AS v(noise_source_hash, jurisdiction, source_type, metric,
-                   round_number, report_period, db_low, db_high, db_value,
-                   source_dataset, source_layer, source_ref, wkb_hex)
-            WHERE v.geom IS NOT NULL
+                ) AS v(noise_source_hash, jurisdiction, source_type, metric,
+                       round_number, report_period, db_low, db_high, db_value,
+                       source_dataset, source_layer, source_ref, wkb_hex)
+                WHERE v.wkb_hex IS NOT NULL
+            ) AS converted
+            WHERE geom IS NOT NULL
+              AND NOT ST_IsEmpty(geom)
+              AND ST_Area(geom) > 0
             """
         ),
         {f"{k}_{i}": v for i, row in enumerate(rows) for k, v in row.items()},

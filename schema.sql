@@ -2,6 +2,7 @@
 -- Alembic migrations under db_postgis/migrations are the canonical managed-schema source of truth.
 
 CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE SCHEMA IF NOT EXISTS osm_raw;
 CREATE SCHEMA IF NOT EXISTS transit_raw;
 CREATE SCHEMA IF NOT EXISTS transit_derived;

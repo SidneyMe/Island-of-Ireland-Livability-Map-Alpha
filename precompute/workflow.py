@@ -257,36 +257,65 @@ def run_precompute_impl(
     print()
 
     if has_complete_build(engine, hashes.build_key) and not force_precompute:
-        bake_configured = _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path)
-        pmtiles_missing = bake_configured and not pmtiles_output_path.exists()
-        surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
-        if not pmtiles_missing and not surface_missing:
-            print(
-                f"Complete PostGIS precompute already exists for build_key={hashes.build_key}. "
-                "Skipping. Use --force-precompute to rebuild."
-            )
-            return hashes.build_key
-        if not surface_missing:
-            print(
-                f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
-                f"but PMTiles archive is missing at {pmtiles_output_path}. "
-                "Re-baking PMTiles only."
-            )
-            bake_seconds = _run_pmtiles_bake(
-                bake_pmtiles=bake_pmtiles,
-                engine=engine,
-                build_key=hashes.build_key,
-                pmtiles_output_path=pmtiles_output_path,
-                noise_max_zoom=noise_max_zoom,
-            )
-            print(
-                f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
-            )
-            return hashes.build_key
-        print(
-            f"Complete coarse PostGIS build exists for build_key={hashes.build_key}, "
-            "but the fine surface cache is missing. Rebuilding fine raster artifacts."
+        # Before skipping, verify the stored noise_processing_hash matches the current one.
+        # If the active artifact changed since the last build, we must rebuild.
+        _current_noise_hash = (
+            noise_processing_hash()
+            if callable(noise_processing_hash)
+            else noise_processing_hash
         )
+        _noise_hash_matches = True
+        if _current_noise_hash is not None:
+            try:
+                from sqlalchemy import text as _text
+                with engine.connect() as _conn:
+                    _stored_noise_hash = _conn.execute(
+                        _text(
+                            "SELECT noise_processing_hash FROM build_manifest "
+                            "WHERE build_key = :bk AND status = 'complete'"
+                        ),
+                        {"bk": hashes.build_key},
+                    ).scalar_one_or_none()
+                _noise_hash_matches = (_stored_noise_hash == _current_noise_hash)
+            except Exception:
+                _noise_hash_matches = True  # on query error, allow skip
+
+        if not _noise_hash_matches:
+            print(
+                f"Complete build exists for build_key={hashes.build_key} "
+                "but active noise artifact changed; rebuilding."
+            )
+        else:
+            bake_configured = _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path)
+            pmtiles_missing = bake_configured and not pmtiles_output_path.exists()
+            surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
+            if not pmtiles_missing and not surface_missing:
+                print(
+                    f"Complete PostGIS precompute already exists for build_key={hashes.build_key}. "
+                    "Skipping. Use --force-precompute to rebuild."
+                )
+                return hashes.build_key
+            if not surface_missing:
+                print(
+                    f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
+                    f"but PMTiles archive is missing at {pmtiles_output_path}. "
+                    "Re-baking PMTiles only."
+                )
+                bake_seconds = _run_pmtiles_bake(
+                    bake_pmtiles=bake_pmtiles,
+                    engine=engine,
+                    build_key=hashes.build_key,
+                    pmtiles_output_path=pmtiles_output_path,
+                    noise_max_zoom=noise_max_zoom,
+                )
+                print(
+                    f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
+                )
+                return hashes.build_key
+            print(
+                f"Complete coarse PostGIS build exists for build_key={hashes.build_key}, "
+                "but the fine surface cache is missing. Rebuilding fine raster artifacts."
+            )
 
     if score_grid_fast_path_candidate():
         tracker.set_phase_expected("networks", False)
@@ -367,6 +396,17 @@ def run_precompute_impl(
         force_log=True,
     )
     publish_write_started_at = time.perf_counter()
+    resolved_noise_hash = (
+        noise_processing_hash()
+        if callable(noise_processing_hash)
+        else noise_processing_hash
+    )
+    from precompute._rows import _ArtifactNoiseReference
+    resolved_artifact_hash = (
+        noise_row_payload.noise_resolved_hash
+        if isinstance(noise_row_payload, _ArtifactNoiseReference)
+        else None
+    )
     publish_precomputed_artifacts(
         engine,
         hashes=hashes,
@@ -380,7 +420,8 @@ def run_precompute_impl(
         service_desert_rows=service_desert_row_payload,
         noise_rows=noise_row_payload,
         study_area_wgs84=study_area_wgs84,
-        noise_processing_hash=noise_processing_hash() if callable(noise_processing_hash) else noise_processing_hash,
+        noise_processing_hash=resolved_noise_hash,
+        noise_artifact_hash=resolved_artifact_hash,
         progress_cb=publish_progress_cb,
     )
     walk_stats = getattr(walk_row_payload, "stats", None)

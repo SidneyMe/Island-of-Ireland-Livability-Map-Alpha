@@ -1236,27 +1236,59 @@ def copy_noise_artifact_to_noise_polygons(
     """
     Artifact mode direct copy: noise_resolved_display (EPSG:2157) → noise_polygons (EPSG:4326).
 
+    When study_area_wgs84 is provided, geometries are clipped (ST_Intersection) to the
+    study area rather than merely filtered with ST_Intersects, so sub-area profiles do not
+    publish polygons that extend beyond the bbox/county boundary.
+
     No candidate staging, no ST_Difference, no ST_Subdivide.
     source_dataset/source_layer/source_ref are lossy compatibility placeholders.
     Returns row count inserted.
     """
-    study_area_clause = ""
+    has_study_area = study_area_wgs84 is not None
     params: dict[str, Any] = {
         "build_key": build_key,
         "config_hash": config_hash,
         "import_fingerprint": import_fingerprint,
         "noise_resolved_hash": noise_resolved_hash,
+        "has_study_area": has_study_area,
+        "study_wkb": study_area_wgs84.wkb if has_study_area else None,
     }
-    if study_area_wgs84 is not None:
-        study_area_clause = (
-            "AND ST_Intersects(d.geom, "
-            "ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157))"
-        )
-        params["study_wkb"] = study_area_wgs84.wkb
 
     result = connection.execute(
         text(
-            f"""
+            """
+            WITH study_area_2157 AS (
+                SELECT
+                    CASE
+                        WHEN :has_study_area THEN
+                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
+                        ELSE NULL
+                    END AS geom
+            ),
+            display_rows AS (
+                SELECT
+                    d.noise_resolved_hash,
+                    d.noise_feature_id,
+                    d.jurisdiction, d.source_type, d.metric,
+                    d.round_number, d.report_period,
+                    d.db_low, d.db_high, d.db_value,
+                    CASE
+                        WHEN :has_study_area THEN
+                            ST_Multi(ST_CollectionExtract(
+                                ST_MakeValid(ST_Intersection(d.geom, s.geom)), 3
+                            ))
+                        ELSE d.geom
+                    END AS clipped_geom
+                FROM noise_resolved_display d
+                CROSS JOIN study_area_2157 s
+                WHERE d.noise_resolved_hash = :noise_resolved_hash
+                  AND d.geom IS NOT NULL
+                  AND NOT ST_IsEmpty(d.geom)
+                  AND (
+                      NOT :has_study_area
+                      OR ST_Intersects(d.geom, s.geom)
+                  )
+            )
             INSERT INTO noise_polygons (
                 build_key, config_hash, import_fingerprint,
                 jurisdiction, source_type, metric, round_number, report_period,
@@ -1266,28 +1298,29 @@ def copy_noise_artifact_to_noise_polygons(
             )
             SELECT
                 :build_key, :config_hash, :import_fingerprint,
-                d.jurisdiction, d.source_type, d.metric,
-                d.round_number, d.report_period,
-                d.db_low, d.db_high, d.db_value,
-                COALESCE(MIN(p.source_dataset), 'noise_artifact')  AS source_dataset,
-                COALESCE(MIN(p.source_layer),  :noise_resolved_hash) AS source_layer,
-                d.noise_feature_id::text                           AS source_ref,
-                ST_Transform(d.geom, 4326)                         AS geom,
+                dr.jurisdiction, dr.source_type, dr.metric,
+                dr.round_number, dr.report_period,
+                dr.db_low, dr.db_high, dr.db_value,
+                COALESCE(MIN(p.source_dataset), 'noise_artifact') AS source_dataset,
+                COALESCE(MIN(p.source_layer), :noise_resolved_hash) AS source_layer,
+                dr.noise_feature_id::text AS source_ref,
+                ST_Transform(dr.clipped_geom, 4326) AS geom,
                 now()
-            FROM noise_resolved_display d
+            FROM display_rows dr
             LEFT JOIN noise_resolved_provenance p
-                ON  p.noise_resolved_hash = d.noise_resolved_hash
-                AND p.jurisdiction        = d.jurisdiction
-                AND p.source_type         = d.source_type
-                AND p.metric              = d.metric
-                AND p.round_number        = d.round_number
-            WHERE d.noise_resolved_hash = :noise_resolved_hash
-            {study_area_clause}
+                ON  p.noise_resolved_hash = dr.noise_resolved_hash
+                AND p.jurisdiction        = dr.jurisdiction
+                AND p.source_type         = dr.source_type
+                AND p.metric              = dr.metric
+                AND p.round_number        = dr.round_number
+            WHERE dr.clipped_geom IS NOT NULL
+              AND NOT ST_IsEmpty(dr.clipped_geom)
+              AND ST_Area(dr.clipped_geom) > 0
             GROUP BY
-                d.noise_resolved_hash, d.noise_feature_id,
-                d.jurisdiction, d.source_type, d.metric,
-                d.round_number, d.report_period,
-                d.db_low, d.db_high, d.db_value, d.geom
+                dr.noise_resolved_hash, dr.noise_feature_id,
+                dr.jurisdiction, dr.source_type, dr.metric,
+                dr.round_number, dr.report_period,
+                dr.db_low, dr.db_high, dr.db_value, dr.clipped_geom
             """
         ),
         params,

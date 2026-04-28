@@ -207,6 +207,81 @@ class DirectCopyFunctionTests(TestCase):
         self.assertLess(first_return, stage_pos if stage_pos != -1 else len(sentinel_path))
 
 
+class ConfigArtifactModeTests(TestCase):
+    """FIX 7: build_config_hashes must not call raw noise functions in artifact mode."""
+
+    def test_artifact_mode_does_not_call_noise_dataset_signature(self) -> None:
+        import config
+        import noise.loader as noise_loader
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"NOISE_MODE": "artifact"}):
+            with patch.object(
+                noise_loader,
+                "dataset_signature",
+                side_effect=AssertionError("must not call dataset_signature in artifact mode"),
+            ) as guarded_sig:
+                with patch("config.NOISE_MODE", "artifact"):
+                    config.build_config_hashes()
+
+        guarded_sig.assert_not_called()
+
+    def test_artifact_mode_does_not_call_noise_dataset_info(self) -> None:
+        import config
+        import noise.loader as noise_loader
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {"NOISE_MODE": "artifact"}):
+            with patch.object(
+                noise_loader,
+                "dataset_info",
+                side_effect=AssertionError("must not call dataset_info in artifact mode"),
+            ) as guarded_info:
+                with patch("config.NOISE_MODE", "artifact"):
+                    config.build_config_hashes()
+
+        guarded_info.assert_not_called()
+
+    def test_artifact_mode_render_params_contains_noise_mode_key(self) -> None:
+        """render_params must include noise_mode so the render_hash encodes the mode."""
+        import inspect
+        import config
+        src = inspect.getsource(config.build_config_hashes)
+        self.assertIn("noise_mode", src)
+
+    def test_artifact_mode_render_params_does_not_include_raw_dataset_fields(self) -> None:
+        """In artifact mode, noise_dataset_signature and noise_dataset_files are not in render_params."""
+        import inspect
+        import config
+        src = inspect.getsource(config.build_config_hashes)
+        # The conditional must gate these on legacy mode
+        self.assertIn("NOISE_MODE == \"legacy\"", src)
+
+
+class WorkflowArtifactHashTests(TestCase):
+    """FIX 8: workflow must pass noise_artifact_hash to publish_precomputed_artifacts."""
+
+    def test_workflow_passes_noise_artifact_hash(self) -> None:
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("noise_artifact_hash", src)
+        self.assertIn("resolved_artifact_hash", src)
+
+    def test_workflow_detects_artifact_noise_reference(self) -> None:
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("_ArtifactNoiseReference", src)
+
+    def test_workflow_resolves_noise_processing_hash_once(self) -> None:
+        """resolved_noise_hash must be computed once before the publish call."""
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("resolved_noise_hash", src)
+
+
 class MigrationArtifactRefTests(TestCase):
 
     def test_migration_000016_correct_down_revision(self) -> None:

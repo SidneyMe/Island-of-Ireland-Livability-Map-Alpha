@@ -66,7 +66,7 @@ def main(argv: list[str] | None = None) -> int:
 def _run_build(args) -> int:
     import config
     from db_postgis.engine import build_engine
-    from noise.loader import dataset_info, dataset_signature
+    from noise.loader import NOISE_DATA_DIR, dataset_signature
 
     from .builder import build_noise_artifact
     from .manifest import (
@@ -76,7 +76,7 @@ def _run_build(args) -> int:
         noise_source_hash,
     )
 
-    data_dir = Path(args.data_dir) if args.data_dir else config.NOISE_DATA_DIR
+    data_dir = Path(args.data_dir) if args.data_dir else NOISE_DATA_DIR
     engine = build_engine()
 
     # Hash computation (only this module touches raw files / data_dir)
@@ -150,44 +150,36 @@ def _run_compare(args) -> int:
     print(f"groups_diverging={result['groups_diverging']}")
     if result["groups_diverging"]:
         for group, ratio in result["area_ratio_by_group"].items():
-            if abs(ratio - 1.0) > 0.01:
+            if ratio is None:
+                print(f"  MISSING {group}: no comparable legacy area")
+            elif abs(ratio - 1.0) > 0.01:
                 print(f"  DIVERGING {group}: ratio={ratio:.4f}")
         return 1
     return 0
 
 
 def _load_domain_boundary_bytes(config) -> bytes:
-    """Load the Island of Ireland domain boundary as raw bytes for hashing."""
-    try:
-        path = config.NI_BOUNDARY_PATH
-        return path.read_bytes()
-    except Exception:
-        return b""
+    """Hash content of both ROI and NI boundary files for deterministic domain hashing."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for path in (config.ROI_BOUNDARY_PATH, config.NI_BOUNDARY_PATH):
+        h.update(str(path).encode("utf-8"))
+        try:
+            h.update(path.read_bytes())
+        except OSError:
+            pass
+    return h.digest()
 
 
 def _load_domain(config):
-    """Return (domain_wgs84_shapely, domain_wkb_bytes) for the Island of Ireland."""
-    from shapely.geometry import shape
-    import json
+    """Return (domain_wgs84_shapely, domain_wkb_bytes) for the full Island of Ireland."""
+    from shapely.ops import transform
+    from study_area import load_island_geometry_metric
 
-    try:
-        with open(config.NI_BOUNDARY_PATH) as f:
-            geojson = json.load(f)
-        # Use a large bounding box that covers the whole island as the processing domain
-        from shapely.ops import unary_union
-        geoms = [shape(feat["geometry"]) for feat in geojson.get("features", [])]
-        domain_wgs84 = unary_union(geoms).convex_hull if geoms else _default_domain()
-    except Exception:
-        domain_wgs84 = _default_domain()
-
-    domain_wkb = domain_wgs84.wkb
-    return domain_wgs84, domain_wkb
-
-
-def _default_domain():
-    """Fallback: bounding box covering the Island of Ireland."""
-    from shapely.geometry import box
-    return box(-10.7, 51.3, -5.3, 55.4)
+    domain_2157 = load_island_geometry_metric()
+    domain_wgs84 = transform(config.TO_WGS84, domain_2157)
+    return domain_wgs84, domain_wgs84.wkb
 
 
 if __name__ == "__main__":

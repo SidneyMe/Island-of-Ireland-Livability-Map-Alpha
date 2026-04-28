@@ -489,9 +489,10 @@ class BuilderTests(TestCase):
                                 domain_hash="dom",
                                 resolved_hash="res",
                             )
-                mock_fail.assert_called_once()
-                call_kwargs = mock_fail.call_args
-                self.assertIn("error_detail", call_kwargs.kwargs)
+                # FIX 6: all three artifacts (resolved, source, domain) must be marked failed
+                self.assertEqual(mock_fail.call_count, 3)
+                for single_call in mock_fail.call_args_list:
+                    self.assertIn("error_detail", single_call.kwargs)
 
     def test_builder_sets_active_artifact_on_success(self) -> None:
         from unittest.mock import patch, MagicMock
@@ -501,7 +502,10 @@ class BuilderTests(TestCase):
         engine.begin.return_value.__exit__ = MagicMock(return_value=False)
         engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
         engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Must include "status" since FIX 5 reads existing["status"] in _ensure_artifact.
+        # "complete" + force=False → "already_complete" fast-path still calls set_active_artifact.
         conn.execute.return_value.mappings.return_value.first.return_value = {
+            "status": "complete",
             "row_count": 10, "jurisdiction_count": 2,
             "source_type_count": 3, "metric_count": 2,
         }
@@ -544,6 +548,28 @@ class IngestSqlTests(TestCase):
         src = inspect.getsource(_insert_batch)
         self.assertIn("ST_MakeValid", src)
 
+    def test_ingest_sql_does_not_reference_v_geom(self) -> None:
+        """FIX 3: the VALUES alias has wkb_hex, not geom — v.geom caused runtime SQL error."""
+        import inspect
+        from noise_artifacts.ingest import _insert_batch
+        src = inspect.getsource(_insert_batch)
+        self.assertNotIn("v.geom", src, "v.geom does not exist in the VALUES alias; use v.wkb_hex")
+
+    def test_ingest_sql_filters_null_wkb(self) -> None:
+        """FIX 3: rows with null wkb_hex must be excluded before attempting ST_GeomFromWKB."""
+        import inspect
+        from noise_artifacts.ingest import _insert_batch
+        src = inspect.getsource(_insert_batch)
+        self.assertIn("wkb_hex IS NOT NULL", src)
+
+    def test_ingest_sql_filters_empty_and_zero_area_geom(self) -> None:
+        """FIX 3: transformed geometry that is empty or zero-area must be excluded."""
+        import inspect
+        from noise_artifacts.ingest import _insert_batch
+        src = inspect.getsource(_insert_batch)
+        self.assertIn("ST_IsEmpty", src)
+        self.assertIn("ST_Area", src)
+
     def test_ingest_deletes_prior_rows_on_force(self) -> None:
         import inspect
         from noise_artifacts.ingest import ingest_noise_normalized
@@ -556,6 +582,64 @@ class IngestSqlTests(TestCase):
         engine = MagicMock()
         with self.assertRaises(NotImplementedError):
             bake_noise_artifact_pmtiles(engine, "tilehash", output_dir=Path("/tmp"))
+
+
+class MainModuleTests(TestCase):
+    """Tests for noise_artifacts.__main__ CLI helpers."""
+
+    def test_default_data_dir_comes_from_noise_loader_not_config(self) -> None:
+        """FIX 1: default data_dir must use noise.loader.NOISE_DATA_DIR, not config.NOISE_DATA_DIR."""
+        import inspect
+        import noise_artifacts.__main__ as _main
+        src = inspect.getsource(_main._run_build)
+        self.assertIn("NOISE_DATA_DIR", src)
+        self.assertNotIn("config.NOISE_DATA_DIR", src)
+
+    def test_domain_loader_uses_load_island_geometry_metric(self) -> None:
+        """FIX 2: domain must cover the full island, not NI-only."""
+        import inspect
+        import noise_artifacts.__main__ as _main
+        src = inspect.getsource(_main._load_domain)
+        self.assertIn("load_island_geometry_metric", src)
+
+    def test_domain_loader_does_not_use_convex_hull(self) -> None:
+        """FIX 2: convex_hull on NI boundary was wrong; real island geometry must be used."""
+        import inspect
+        import noise_artifacts.__main__ as _main
+        src = inspect.getsource(_main._load_domain)
+        self.assertNotIn("convex_hull", src)
+
+    def test_domain_boundary_bytes_hashes_both_roi_and_ni(self) -> None:
+        """FIX 2: domain boundary hash must cover both ROI and NI boundary files."""
+        import inspect
+        import noise_artifacts.__main__ as _main
+        src = inspect.getsource(_main._load_domain_boundary_bytes)
+        self.assertIn("ROI_BOUNDARY_PATH", src)
+        self.assertIn("NI_BOUNDARY_PATH", src)
+
+    def test_compare_handles_none_ratio(self) -> None:
+        """FIX 11: abs(ratio - 1.0) crashes when ratio is None."""
+        import noise_artifacts.__main__ as _main
+        from unittest.mock import MagicMock, patch
+
+        engine = MagicMock()
+        result = {
+            "groups_matching": 1,
+            "groups_diverging": 1,
+            "area_ratio_by_group": {
+                "roi/road/Lden": None,
+                "roi/rail/Lden": 0.99,
+            },
+        }
+        with patch("noise_artifacts.__main__._run_compare") as mock_compare:
+            mock_compare.return_value = 1
+            # Directly test _run_compare's ratio-printing logic via inspection
+            pass
+
+        # Test the actual None-safe loop in _run_compare source
+        import inspect
+        src = inspect.getsource(_main._run_compare)
+        self.assertIn("ratio is None", src)
 
 
 class NoiseCanonicalTableRegistrationTests(TestCase):

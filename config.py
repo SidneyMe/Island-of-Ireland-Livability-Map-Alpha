@@ -927,8 +927,12 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     overture_info = overture_dataset_info()
     overture_category_signature = overture_category_map_signature()
     overture_signature = overture_dataset_signature()
-    noise_info = noise_dataset_info()
-    noise_signature = noise_dataset_signature()
+    if NOISE_MODE == "artifact":
+        noise_info: dict = {"mode": "artifact"}
+        noise_signature: str = "artifact"
+    else:
+        noise_info = noise_dataset_info()
+        noise_signature = noise_dataset_signature()
 
     geo_params = {
         "roi_path": str(ROI_BOUNDARY_PATH),
@@ -1036,9 +1040,11 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "output_html": OUTPUT_HTML,
         "category_colors": CATEGORY_COLORS,
         "pmtiles_schema_version": PMTILES_SCHEMA_VERSION,
-        "noise_dataset_signature": noise_signature,
-        "noise_dataset_files": noise_info.get("files", {}),
+        "noise_mode": NOISE_MODE,
     }
+    if NOISE_MODE == "legacy":
+        render_params["noise_dataset_signature"] = noise_signature
+        render_params["noise_dataset_files"] = noise_info.get("files", {})
     render_hash = hash_dict(render_params)
 
     config_hash = hash_dict(

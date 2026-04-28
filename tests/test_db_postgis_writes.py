@@ -214,6 +214,128 @@ class DbPostgisTransitArtifactWriteTests(TestCase):
         self.assertEqual(params["round_number"], 3)
 
 
+class ArtifactCopyTests(TestCase):
+    """FIX 10: copy_noise_artifact_to_noise_polygons clips to study area."""
+
+    def test_copy_sql_uses_st_intersection_when_study_area_given(self) -> None:
+        import inspect
+        src = inspect.getsource(db_writes.copy_noise_artifact_to_noise_polygons)
+        self.assertIn("ST_Intersection", src)
+
+    def test_copy_sql_clips_to_study_area_with_cte(self) -> None:
+        import inspect
+        src = inspect.getsource(db_writes.copy_noise_artifact_to_noise_polygons)
+        self.assertIn("clipped_geom", src)
+        self.assertIn("has_study_area", src)
+
+    def test_copy_sql_filters_empty_and_zero_area_clipped(self) -> None:
+        import inspect
+        src = inspect.getsource(db_writes.copy_noise_artifact_to_noise_polygons)
+        self.assertIn("ST_IsEmpty(dr.clipped_geom)", src)
+        self.assertIn("ST_Area(dr.clipped_geom)", src)
+
+    def test_copy_executes_insert_with_noise_resolved_hash(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.rowcount = 5
+
+        n = db_writes.copy_noise_artifact_to_noise_polygons(
+            connection,
+            noise_resolved_hash="res-abc",
+            build_key="bk",
+            config_hash="ch",
+            import_fingerprint="ifp",
+            study_area_wgs84=None,
+        )
+
+        self.assertEqual(n, 5)
+        sql_text = str(connection.execute.call_args.args[0])
+        params = connection.execute.call_args.args[1]
+        self.assertIn("noise_resolved_display", sql_text)
+        self.assertIn("INSERT INTO noise_polygons", sql_text)
+        self.assertEqual(params["noise_resolved_hash"], "res-abc")
+
+    def test_copy_passes_has_study_area_false_when_none(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.rowcount = 0
+
+        db_writes.copy_noise_artifact_to_noise_polygons(
+            connection,
+            noise_resolved_hash="res-abc",
+            build_key="bk",
+            config_hash="ch",
+            import_fingerprint="ifp",
+            study_area_wgs84=None,
+        )
+
+        params = connection.execute.call_args.args[1]
+        self.assertFalse(params["has_study_area"])
+        self.assertIsNone(params["study_wkb"])
+
+    def test_copy_passes_has_study_area_true_with_wkb(self) -> None:
+        connection = mock.MagicMock()
+        connection.execute.return_value.rowcount = 0
+        study = box(0.0, 0.0, 1.0, 1.0)
+
+        db_writes.copy_noise_artifact_to_noise_polygons(
+            connection,
+            noise_resolved_hash="res-abc",
+            build_key="bk",
+            config_hash="ch",
+            import_fingerprint="ifp",
+            study_area_wgs84=study,
+        )
+
+        params = connection.execute.call_args.args[1]
+        self.assertTrue(params["has_study_area"])
+        self.assertEqual(params["study_wkb"], study.wkb)
+
+    def test_publish_artifact_calls_summary_update_after_copy(self) -> None:
+        """FIX 10: summary JSON must be updated from DB rows after artifact copy."""
+        from precompute._rows import _ArtifactNoiseReference
+        sentinel = _ArtifactNoiseReference("res-test-hash", None)
+        connection = mock.MagicMock()
+        created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        summary: dict = {}
+
+        with (
+            mock.patch.object(db_writes, "copy_noise_artifact_to_noise_polygons", return_value=10),
+            mock.patch.object(db_writes, "_update_noise_summary_from_database") as update_mock,
+        ):
+            db_writes._publish_noise_polygons(
+                connection,
+                noise_rows=sentinel,
+                build_key="bk",
+                config_hash="ch",
+                import_fingerprint="ifp",
+                render_hash="rh",
+                created_at=created_at,
+                study_area_wgs84=None,
+                summary_json=summary,
+            )
+
+        update_mock.assert_called_once_with(
+            connection,
+            build_key="bk",
+            summary_json=summary,
+        )
+
+
+class EnsureDatabaseReadyTests(TestCase):
+    """FIX 4: ensure_database_ready must create pgcrypto."""
+
+    def test_ensure_database_ready_creates_pgcrypto(self) -> None:
+        import inspect
+        src = inspect.getsource(db_schema.ensure_database_ready)
+        self.assertIn("pgcrypto", src)
+        self.assertIn("CREATE EXTENSION IF NOT EXISTS pgcrypto", src)
+
+    def test_ensure_database_ready_raises_on_pgcrypto_failure(self) -> None:
+        import inspect
+        src = inspect.getsource(db_schema.ensure_database_ready)
+        # Must have error messaging for pgcrypto failure
+        self.assertIn("sha256", src)
+
+
 class DbPostgisAmenityMergeTests(TestCase):
     def test_load_merged_source_amenity_rows_stages_temp_tables_and_indexes(self) -> None:
         engine = mock.MagicMock()

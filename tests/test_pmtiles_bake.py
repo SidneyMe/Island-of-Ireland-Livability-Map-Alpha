@@ -165,6 +165,25 @@ class PmtilesBakeContractTests(TestCase):
         self.assertNotIn("ST_Subdivide", sql)
         self.assertIn("'noise'", sql)
 
+    def test_noise_tile_sql_reads_from_noise_polygons(self) -> None:
+        """FIX 13: noise PMTiles layer must read from noise_polygons (compatibility table)."""
+        sql = str(bake_pmtiles._NOISE_TILE_SQL)
+        self.assertIn("noise_polygons", sql)
+
+    def test_noise_source_layer_id_is_noise(self) -> None:
+        """FIX 13: frontend source-layer name must remain 'noise'."""
+        metadata = bake_pmtiles._pmtiles_metadata(
+            min_zoom=5,
+            max_zoom=14,
+            grid_max_zoom=11,
+            service_desert_max_zoom=11,
+            amenity_min_zoom=9,
+            transport_reality_min_zoom=9,
+            noise_max_zoom=12,
+        )
+        layer_ids = [layer["id"] for layer in metadata["vector_layers"]]
+        self.assertIn("noise", layer_ids, "noise layer must be declared in PMTiles metadata")
+
     def test_amenity_tile_sql_exports_tier_name_and_conflict_class(self) -> None:
         sql = str(bake_pmtiles._AMENITY_TILE_SQL)
 

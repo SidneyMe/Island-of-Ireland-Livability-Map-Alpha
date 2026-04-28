@@ -53,9 +53,16 @@ def build_noise_artifact(
     Returns summary dict. The caller (livability build) never calls this.
     """
     # --- 1. Create/reset artifact rows (parent rows BEFORE lineage) ---
-    _ensure_artifact(engine, source_hash, "source", {}, force=force)
-    _ensure_artifact(engine, domain_hash, "domain", {}, force=force)
-    _ensure_artifact(engine, resolved_hash, "resolved", {}, force=force)
+    src_status = _ensure_artifact(engine, source_hash, "source", {}, force=force)
+    dom_status = _ensure_artifact(engine, domain_hash, "domain", {}, force=force)
+    res_status = _ensure_artifact(engine, resolved_hash, "resolved", {}, force=force)
+
+    # --- Fast path: resolved artifact is already complete and we're not forcing ---
+    if res_status == "already_complete":
+        log.info("resolved artifact already complete (resolved_hash=%s); skipping rebuild", resolved_hash)
+        set_active_artifact(engine, "resolved", resolved_hash)
+        counts = _compute_artifact_counts(engine, resolved_hash)
+        return {**counts, "resolved_hash": resolved_hash, "source_hash": source_hash}
 
     # --- 2. Lineage (parents already exist above) ---
     record_lineage(engine, resolved_hash, source_hash)
@@ -67,7 +74,7 @@ def build_noise_artifact(
         # --- 3. Ingest raw source ---
         log.info("ingesting raw source → noise_normalized (source_hash=%s)", source_hash)
         ingest_noise_normalized(
-            engine, source_hash, data_dir, domain_wgs84, force=force
+            engine, source_hash, data_dir, domain_wgs84, force=(force or src_status == "reset")
         )
 
         # --- 4. Two-pass dissolve ---
@@ -105,7 +112,11 @@ def build_noise_artifact(
     except Exception:
         detail = traceback.format_exc()
         log.error("artifact build failed: %s", detail)
-        mark_artifact_failed(engine, resolved_hash, error_detail=detail)
+        for h in (resolved_hash, source_hash, domain_hash):
+            try:
+                mark_artifact_failed(engine, h, error_detail=detail)
+            except Exception:
+                log.warning("failed to mark artifact failed: %s", h, exc_info=True)
         raise
 
     finally:
@@ -123,8 +134,15 @@ def _ensure_artifact(
     manifest_json: dict,
     *,
     force: bool,
-) -> None:
-    """Create or reset an artifact row, then clean up prior canonical rows on force."""
+) -> str:
+    """
+    Create or reset an artifact row.
+
+    Returns:
+        "created"          – new row inserted
+        "reset"            – existing row reset (force or non-complete status)
+        "already_complete" – existing complete row, force=False (caller may skip rebuild)
+    """
     with engine.connect() as conn:
         existing = conn.execute(
             text(
@@ -136,9 +154,16 @@ def _ensure_artifact(
 
     if existing is None:
         upsert_artifact(engine, artifact_hash, artifact_type, manifest_json)
-    elif force and existing["status"] != "complete":
+        return "created"
+
+    status = str(existing["status"])
+
+    if force or status != "complete":
         reset_artifact_for_retry(engine, artifact_hash, manifest_json)
         _delete_prior_canonical_rows(engine, artifact_hash, artifact_type)
+        return "reset"
+
+    return "already_complete"
 
 
 def _delete_prior_canonical_rows(
