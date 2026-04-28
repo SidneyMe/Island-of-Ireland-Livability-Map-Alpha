@@ -17,6 +17,13 @@ from sqlalchemy.engine import Engine
 log = logging.getLogger(__name__)
 
 
+def _progress(progress_cb, message: str) -> None:
+    if progress_cb:
+        progress_cb("detail", detail=message, force_log=True)
+    else:
+        print(f"[noise] {message}", flush=True)
+
+
 def materialize_resolved_display(
     engine: Engine,
     *,
@@ -24,6 +31,7 @@ def materialize_resolved_display(
     round_table: str,
     domain_wkb: bytes,
     topology_grid_metres: float = 0.1,
+    progress_cb=None,
 ) -> dict:
     """
     Populate noise_resolved_display and noise_resolved_provenance from round_table.
@@ -41,7 +49,13 @@ def materialize_resolved_display(
     with engine.connect() as conn:
         groups = _fetch_groups(conn, round_table)
 
+    total_groups = len(groups)
     for jurisdiction, source_type, metric in groups:
+        group_num = groups_processed + 1
+        _progress(
+            progress_cb,
+            f"resolve group {group_num}/{total_groups}: {jurisdiction} {source_type} {metric}",
+        )
         with engine.connect() as conn:
             rounds = _fetch_rounds(conn, round_table, jurisdiction, source_type, metric)
 

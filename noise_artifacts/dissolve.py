@@ -20,6 +20,13 @@ log = logging.getLogger(__name__)
 _POSTGIS_SQUAREGRID_MIN = (3, 1)
 
 
+def _progress(progress_cb, message: str) -> None:
+    if progress_cb:
+        progress_cb("detail", detail=message, force_log=True)
+    else:
+        print(f"[noise] {message}", flush=True)
+
+
 def _postgis_version(engine: Engine) -> tuple[int, int]:
     with engine.connect() as conn:
         raw = conn.execute(text("SELECT PostGIS_Lib_Version()")).scalar() or "0.0"
@@ -46,6 +53,7 @@ def dissolve_noise_into_staging(
     resolved_hash: str,
     tile_size_metres: float = 10_000.0,
     topology_grid_metres: float = 0.1,
+    progress_cb=None,
 ) -> tuple[str, str]:
     """
     Run two-pass chunked dissolve over noise_normalized for a given source_hash.
@@ -59,16 +67,20 @@ def dissolve_noise_into_staging(
 
     with engine.begin() as conn:
         _create_dissolve_staging(conn, dissolve_table)
-        _pass1_dissolve(
+        _progress(progress_cb, "dissolve pass 1 start")
+        n1 = _pass1_dissolve(
             conn, dissolve_table,
             source_hash=source_hash,
             tile_size_metres=tile_size_metres,
             topology_grid_metres=topology_grid_metres,
             use_square_grid=use_square_grid,
         )
+        _progress(progress_cb, f"dissolve pass 1 done: {n1} rows")
         _add_staging_indexes(conn, dissolve_table)
         _create_round_staging(conn, round_table)
-        _pass2_dissolve(conn, dissolve_table, round_table)
+        _progress(progress_cb, "dissolve pass 2 start")
+        n2 = _pass2_dissolve(conn, dissolve_table, round_table)
+        _progress(progress_cb, f"dissolve pass 2 done: {n2} rows")
         _add_staging_indexes(conn, round_table)
 
     log.info("dissolve complete: dissolve_table=%s round_table=%s", dissolve_table, round_table)

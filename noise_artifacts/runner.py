@@ -28,6 +28,13 @@ ROUND_PRIORITY_VERSION = 1
 EXTENT_VERSION = 1
 
 
+def _progress(progress_cb, message: str) -> None:
+    if progress_cb:
+        progress_cb("detail", detail=message, force_log=True)
+    else:
+        print(f"[noise] {message}", flush=True)
+
+
 def _load_domain_boundary_bytes(config) -> bytes:
     """SHA-256 over both ROI and NI boundary file contents for deterministic domain hashing."""
     h = hashlib.sha256()
@@ -84,19 +91,17 @@ def build_default_noise_artifact(
 
     resolved_data_dir = Path(data_dir) if data_dir is not None else NOISE_DATA_DIR
 
-    if progress_cb is not None:
-        progress_cb(
-            "detail",
-            detail=f"computing noise source signature from {resolved_data_dir}",
-            force_log=True,
-        )
+    _progress(progress_cb, f"computing raw noise source signature from {resolved_data_dir}")
     log.info("computing source signature from %s", resolved_data_dir)
 
     source_sig = dataset_signature(resolved_data_dir)
     src_hash = noise_source_hash(source_sig, PARSER_VERSION, SOURCE_SCHEMA_VERSION)
+    _progress(progress_cb, f"source hash: {src_hash}")
 
+    _progress(progress_cb, "loading island domain")
     domain_boundary_bytes = _load_domain_boundary_bytes(config)
     dom_hash = noise_domain_hash(domain_boundary_bytes, EXTENT_VERSION)
+    _progress(progress_cb, f"domain hash: {dom_hash}")
 
     topology_grid_m = float(getattr(config, "NOISE_TOPOLOGY_GRID_METRES", 0.1))
     res_hash = noise_resolved_hash(
@@ -104,20 +109,15 @@ def build_default_noise_artifact(
         TOPOLOGY_RULES_VERSION, DISSOLVE_RULES_VERSION, ROUND_PRIORITY_VERSION,
         topology_grid_m,
     )
+    _progress(progress_cb, f"resolved hash: {res_hash}")
 
     if not force:
         active = get_active_artifact(engine, "resolved")
         if active is not None and active.artifact_hash == res_hash:
             log.info("noise artifact already up to date (artifact_hash=%s)", res_hash)
-            if progress_cb is not None:
-                progress_cb(
-                    "detail",
-                    detail=f"noise artifact up to date: {res_hash}",
-                    force_log=True,
-                )
+            _progress(progress_cb, f"noise artifact up to date: {res_hash}")
             return {"status": "up_to_date", "artifact_hash": res_hash, "row_count": 0}
 
-    log.info("loading full-island domain geometry")
     domain_wgs84, domain_wkb = _load_domain(config)
     tile_size_m = float(getattr(config, "NOISE_DISSOLVE_TILE_SIZE_METRES", 10_000.0))
 
@@ -132,6 +132,7 @@ def build_default_noise_artifact(
         tile_size_metres=tile_size_m,
         topology_grid_metres=topology_grid_m,
         force=force,
+        progress_cb=progress_cb,
     )
 
     return {**result, "status": "built", "artifact_hash": res_hash}

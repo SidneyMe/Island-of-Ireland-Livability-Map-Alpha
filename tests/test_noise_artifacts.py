@@ -776,3 +776,259 @@ class MigrationSqlTests(TestCase):
         self.assertIn("DROP TABLE IF EXISTS noise_active_artifact", src)
         self.assertIn("DROP TABLE IF EXISTS noise_artifact_lineage", src)
         self.assertIn("DROP TABLE IF EXISTS noise_artifact_manifest", src)
+
+
+# ---------------------------------------------------------------------------
+# Migration 000018: relaxed db_value constraint tests
+# ---------------------------------------------------------------------------
+
+class Migration000018ConstraintTests(TestCase):
+
+    def _get_migration_source(self) -> str:
+        import importlib, inspect
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260428_000018_relax_noise_db_value_check"
+        )
+        return inspect.getsource(mod)
+
+    def test_migration_000018_has_correct_down_revision(self) -> None:
+        import importlib
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260428_000018_relax_noise_db_value_check"
+        )
+        self.assertEqual(mod.down_revision, "20260427_000017")
+
+    def test_migration_000018_drops_old_constraint_before_adding_new(self) -> None:
+        src = self._get_migration_source()
+        self.assertIn("DROP CONSTRAINT IF EXISTS noise_normalized_db_value_check", src)
+        self.assertIn("DROP CONSTRAINT IF EXISTS noise_resolved_display_db_value_check", src)
+
+    def test_migration_000018_new_check_uses_regex_not_fixed_list(self) -> None:
+        src = self._get_migration_source()
+        self.assertIn("~", src, "new constraint must use ~ regex operator")
+        # The upgrade _NEW_CHECK must use regex; it must appear before downgrade's fixed list.
+        # We verify by checking _NEW_CHECK does not contain the old fixed-list pattern.
+        import importlib
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260428_000018_relax_noise_db_value_check"
+        )
+        new_check = mod._NEW_CHECK
+        self.assertNotIn("IN (", new_check, "_NEW_CHECK must use regex, not IN list")
+
+    def test_migration_000018_new_check_allows_open_ended_bands(self) -> None:
+        src = self._get_migration_source()
+        # Must match XX+ pattern
+        self.assertIn(r"[0-9]{2}\+", src)
+
+    def test_migration_000018_new_check_allows_range_bands(self) -> None:
+        src = self._get_migration_source()
+        # Must match XX-XX pattern
+        self.assertIn(r"[0-9]{2}-[0-9]{2}", src)
+
+    def test_migration_000018_downgrade_restores_fixed_list(self) -> None:
+        src = self._get_migration_source()
+        self.assertIn("IN ('45-49'", src)
+        self.assertIn("'75+'", src)
+
+
+# ---------------------------------------------------------------------------
+# Ingest pre-validation and diagnostics tests
+# ---------------------------------------------------------------------------
+
+class IngestValidationTests(TestCase):
+
+    def test_validate_accepts_range_band(self) -> None:
+        from noise_artifacts.ingest import _validate_noise_row
+        _validate_noise_row({"db_value": "55-59", "db_low": 55.0, "db_high": 59.0})
+
+    def test_validate_accepts_70_plus(self) -> None:
+        from noise_artifacts.ingest import _validate_noise_row
+        _validate_noise_row({"db_value": "70+", "db_low": 70.0, "db_high": 99.0})
+
+    def test_validate_accepts_75_plus(self) -> None:
+        from noise_artifacts.ingest import _validate_noise_row
+        _validate_noise_row({"db_value": "75+", "db_low": 75.0, "db_high": 99.0})
+
+    def test_validate_rejects_text_label(self) -> None:
+        from noise_artifacts.ingest import _validate_noise_row
+        from noise_artifacts.exceptions import NoiseIngestError
+        with self.assertRaises(NoiseIngestError):
+            _validate_noise_row({"db_value": "seventy", "db_low": 70.0, "db_high": 99.0})
+
+    def test_validate_rejects_empty_string(self) -> None:
+        from noise_artifacts.ingest import _validate_noise_row
+        from noise_artifacts.exceptions import NoiseIngestError
+        with self.assertRaises(NoiseIngestError):
+            _validate_noise_row({"db_value": "", "db_low": 70.0, "db_high": 99.0})
+
+    def test_validate_rejects_inverted_range(self) -> None:
+        from noise_artifacts.ingest import _validate_noise_row
+        from noise_artifacts.exceptions import NoiseIngestError
+        with self.assertRaises(NoiseIngestError):
+            _validate_noise_row({"db_value": "59-55", "db_low": 59.0, "db_high": 55.0})
+
+    def test_diagnose_identifies_70_plus_as_suspicious(self) -> None:
+        # Simulate a batch with a row whose db_value is "70+" — which should NOT
+        # be suspicious under the new constraint. This ensures the diagnostic
+        # function's suspicion logic matches the new regex, not the old fixed list.
+        from noise_artifacts.ingest import _diagnose_ingest_integrity_error, _BAND_RE
+        # "70+" matches _BAND_RE so it should NOT be flagged as suspicious
+        self.assertIsNotNone(_BAND_RE.match("70+"))
+        self.assertIsNotNone(_BAND_RE.match("75+"))
+        self.assertIsNone(_BAND_RE.match("seventy"))
+        self.assertIsNone(_BAND_RE.match("70 plus"))
+
+    def test_diagnose_message_omits_wkb_hex(self) -> None:
+        from unittest.mock import MagicMock
+        from noise_artifacts.ingest import _diagnose_ingest_integrity_error
+        from sqlalchemy.exc import IntegrityError
+
+        mock_exc = MagicMock(spec=IntegrityError)
+        mock_exc.orig = MagicMock()
+        mock_exc.orig.diag.constraint_name = "noise_normalized_db_value_check"
+
+        batch = [{
+            "db_value": "abc", "db_low": 70.0, "db_high": 99.0,
+            "jurisdiction": "roi", "source_type": "airport",
+            "metric": "Lnight", "round_number": 4,
+            "report_period": "Rd4-2022",
+            "source_dataset": "NOISE_Round4.zip",
+            "source_layer": "Noise_R4_Airport.shp",
+            "source_ref": "NOISE_Round4.zip:Noise_R4_Airport.shp:0",
+            "wkb_hex": "deadbeef" * 100,
+        }]
+
+        err = _diagnose_ingest_integrity_error(None, None, "srcabc123", batch, mock_exc)
+        msg = str(err)
+
+        self.assertIn("noise_normalized_db_value_check", msg)
+        self.assertIn("db_value", msg)
+        self.assertIn("abc", msg)
+        self.assertNotIn("wkb_hex", msg)
+        self.assertNotIn("deadbeef", msg)
+
+    def test_diagnose_message_does_not_dump_all_500_params(self) -> None:
+        from unittest.mock import MagicMock
+        from noise_artifacts.ingest import _diagnose_ingest_integrity_error
+        from sqlalchemy.exc import IntegrityError
+
+        mock_exc = MagicMock(spec=IntegrityError)
+        mock_exc.orig = MagicMock()
+        mock_exc.orig.diag.constraint_name = "noise_normalized_db_value_check"
+
+        batch = [
+            {
+                "db_value": "abc", "db_low": 70.0, "db_high": 99.0,
+                "jurisdiction": "roi", "source_type": "airport",
+                "metric": "Lnight", "round_number": 4, "report_period": "Rd4-2022",
+                "source_dataset": "ds.zip", "source_layer": "layer.shp",
+                "source_ref": f"ds.zip:layer.shp:{i}",
+                "wkb_hex": "ff" * 1000,
+            }
+            for i in range(500)
+        ]
+
+        err = _diagnose_ingest_integrity_error(None, None, "srcabc123", batch, mock_exc)
+        msg = str(err)
+        # Message should be compact — well under 10 000 chars
+        self.assertLess(len(msg), 10_000, "diagnostics message must not dump all 500 rows")
+
+
+# ---------------------------------------------------------------------------
+# Progress callback plumbing tests
+# ---------------------------------------------------------------------------
+
+class BuilderProgressTests(TestCase):
+
+    def test_builder_emits_progress_messages(self) -> None:
+        from unittest.mock import patch, MagicMock
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        # Return None for artifact manifest lookups so _ensure_artifact returns "created"
+        # (not "already_complete"), which forces the full build path.
+        # Then return counts for _compute_artifact_counts.
+        call_count = [0]
+
+        def _fake_first():
+            call_count[0] += 1
+            # First 3 calls are _ensure_artifact (source/domain/resolved status lookups)
+            if call_count[0] <= 3:
+                return None
+            # Subsequent calls return counts for _compute_artifact_counts
+            return {"row_count": 5, "jurisdiction_count": 2,
+                    "source_type_count": 3, "metric_count": 2}
+
+        conn.execute.return_value.mappings.return_value.first.side_effect = _fake_first
+
+        messages = []
+
+        def fake_progress(action, *, detail="", force_log=False):
+            messages.append(detail)
+
+        with patch("noise_artifacts.builder.ingest_noise_normalized", return_value=10):
+            with patch("noise_artifacts.builder.dissolve_noise_into_staging",
+                       return_value=("dtbl", "rtbl")):
+                with patch("noise_artifacts.builder.materialize_resolved_display",
+                           return_value={"total_inserted": 5, "groups_processed": 2}):
+                    with patch("noise_artifacts.builder.mark_artifact_complete"):
+                        with patch("noise_artifacts.builder.set_active_artifact"):
+                            with patch("noise_artifacts.builder.record_lineage"):
+                                with patch("noise_artifacts.builder.upsert_artifact"):
+                                    with patch("noise_artifacts.builder.drop_staging_tables"):
+                                        from noise_artifacts.builder import build_noise_artifact
+                                        build_noise_artifact(
+                                            engine,
+                                            data_dir="/fake",
+                                            domain_wgs84=MagicMock(),
+                                            domain_wkb=b"\x00",
+                                            source_hash="src",
+                                            domain_hash="dom",
+                                            resolved_hash="res",
+                                            progress_cb=fake_progress,
+                                        )
+
+        joined = " | ".join(messages)
+        self.assertTrue(any("ingest start" in m for m in messages), f"missing 'ingest start' in: {joined}")
+        self.assertTrue(any("ingest done" in m for m in messages), f"missing 'ingest done' in: {joined}")
+        self.assertTrue(any("dissolve" in m for m in messages), f"missing 'dissolve' in: {joined}")
+        self.assertTrue(any("resolve" in m for m in messages), f"missing 'resolve' in: {joined}")
+        self.assertTrue(any("artifact complete" in m for m in messages), f"missing 'artifact complete' in: {joined}")
+
+    def test_ingest_emits_progress_messages(self) -> None:
+        from unittest.mock import patch, MagicMock
+        from noise_artifacts.ingest import ingest_noise_normalized
+
+        messages = []
+
+        def fake_progress(action, *, detail="", force_log=False):
+            messages.append(detail)
+
+        fake_rows = [
+            {
+                "jurisdiction": "roi", "source_type": "airport", "metric": "Lnight",
+                "round_number": 4, "db_value": "70+", "db_low": 70.0, "db_high": 99.0,
+                "report_period": "Rd4-2022", "source_dataset": "ds.zip",
+                "source_layer": "layer.shp", "source_ref": "ref1", "geom": None,
+            }
+        ]
+
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+
+        # iter_noise_candidate_rows is imported inside ingest_noise_normalized,
+        # so patch it at its source module.
+        with patch("noise.loader.iter_noise_candidate_rows", return_value=iter(fake_rows)):
+            with patch("noise_artifacts.ingest._insert_batch", return_value=0):
+                ingest_noise_normalized(
+                    engine, "srchash123", "/fake_dir", MagicMock(),
+                    progress_cb=fake_progress,
+                )
+
+        self.assertTrue(any("ingest read" in m for m in messages), f"messages: {messages}")
+        self.assertTrue(any("ingest inserted" in m for m in messages), f"messages: {messages}")

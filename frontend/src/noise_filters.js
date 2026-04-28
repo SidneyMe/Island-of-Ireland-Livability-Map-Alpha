@@ -1,6 +1,6 @@
 const NOISE_METRIC_ORDER = ["Lden", "Lnight"];
 const NOISE_SOURCE_ORDER = ["road", "rail", "airport", "industry", "consolidated"];
-const NOISE_BAND_ORDER = ["45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "75+"];
+const NOISE_BAND_ORDER = ["45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "70+", "75+"];
 
 const NOISE_METRIC_LABELS = {
   Lden: "Day-evening-night",

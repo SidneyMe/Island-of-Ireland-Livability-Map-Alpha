@@ -27,6 +27,13 @@ from .resolve import materialize_resolved_display
 log = logging.getLogger(__name__)
 
 
+def _progress(progress_cb, message: str) -> None:
+    if progress_cb:
+        progress_cb("detail", detail=message, force_log=True)
+    else:
+        print(f"[noise] {message}", flush=True)
+
+
 def build_noise_artifact(
     engine: Engine,
     *,
@@ -39,6 +46,7 @@ def build_noise_artifact(
     tile_size_metres: float = 10_000.0,
     topology_grid_metres: float = 0.1,
     force: bool = False,
+    progress_cb=None,
 ) -> dict[str, Any]:
     """
     Run the full noise artifact pipeline:
@@ -52,7 +60,10 @@ def build_noise_artifact(
 
     Returns summary dict. The caller (livability build) never calls this.
     """
+    _progress(progress_cb, f"artifact build start: source={source_hash} resolved={resolved_hash}")
+
     # --- 1. Create/reset artifact rows (parent rows BEFORE lineage) ---
+    _progress(progress_cb, "ensuring artifact manifests")
     src_status = _ensure_artifact(engine, source_hash, "source", {}, force=force)
     dom_status = _ensure_artifact(engine, domain_hash, "domain", {}, force=force)
     res_status = _ensure_artifact(engine, resolved_hash, "resolved", {}, force=force)
@@ -72,12 +83,20 @@ def build_noise_artifact(
     round_table = None
     try:
         # --- 3. Ingest raw source ---
+        _progress(progress_cb, "ingest start")
         log.info("ingesting raw source → noise_normalized (source_hash=%s)", source_hash)
-        ingest_noise_normalized(
-            engine, source_hash, data_dir, domain_wgs84, force=(force or src_status == "reset")
+        n_ingested = ingest_noise_normalized(
+            engine, source_hash, data_dir, domain_wgs84,
+            force=(force or src_status == "reset"),
+            progress_cb=progress_cb,
         )
+        _progress(progress_cb, f"ingest done: {n_ingested} rows")
 
         # --- 4. Two-pass dissolve ---
+        _progress(
+            progress_cb,
+            f"dissolve start: tile_size={tile_size_metres}m grid={topology_grid_metres}m",
+        )
         log.info("running two-pass dissolve (source_hash=%s resolved_hash=%s)",
                  source_hash, resolved_hash)
         dissolve_table, round_table = dissolve_noise_into_staging(
@@ -86,9 +105,11 @@ def build_noise_artifact(
             resolved_hash=resolved_hash,
             tile_size_metres=tile_size_metres,
             topology_grid_metres=topology_grid_metres,
+            progress_cb=progress_cb,
         )
 
         # --- 5. Round-priority resolve ---
+        _progress(progress_cb, "resolve start")
         log.info("materializing resolved display (resolved_hash=%s)", resolved_hash)
         resolve_result = materialize_resolved_display(
             engine,
@@ -96,7 +117,9 @@ def build_noise_artifact(
             round_table=round_table,
             domain_wkb=domain_wkb,
             topology_grid_metres=topology_grid_metres,
+            progress_cb=progress_cb,
         )
+        _progress(progress_cb, f"resolve done: {resolve_result['total_inserted']} rows")
         log.info("resolved: %s", resolve_result)
 
         # --- 6. Compute counts and mark complete ---
@@ -106,6 +129,10 @@ def build_noise_artifact(
         mark_artifact_complete(engine, domain_hash, updated_manifest_json={})
         set_active_artifact(engine, "resolved", resolved_hash)
 
+        _progress(
+            progress_cb,
+            f"artifact complete: resolved_hash={resolved_hash} rows={counts}",
+        )
         log.info("artifact complete: resolved_hash=%s rows=%s", resolved_hash, counts)
         return {**counts, "resolved_hash": resolved_hash, "source_hash": source_hash}
 

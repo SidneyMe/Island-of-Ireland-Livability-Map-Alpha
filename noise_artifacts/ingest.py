@@ -11,17 +11,118 @@ ZIP/FileGDB/SHP files. The builder calls this; the livability build does not.
 from __future__ import annotations
 
 import logging
+import re
 from itertools import islice
 from typing import Iterable, Iterator
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .exceptions import NoiseIngestError
+
 log = logging.getLogger(__name__)
 
 _BATCH_SIZE = 500
 # Schema version bump here forces re-ingest for all existing source hashes.
 INGEST_SCHEMA_VERSION = 1
+
+_BAND_RE = re.compile(r"^\d{2}-\d{2}$|^\d{2}\+$")
+
+_META_KEYS = (
+    "source_ref", "jurisdiction", "source_type", "metric",
+    "round_number", "report_period", "db_low", "db_high", "db_value",
+    "source_dataset", "source_layer",
+)
+
+
+def _progress(progress_cb, message: str) -> None:
+    if progress_cb:
+        progress_cb("detail", detail=message, force_log=True)
+    else:
+        print(f"[noise] {message}", flush=True)
+
+
+def _validate_noise_row(row: dict) -> None:
+    db_value = str(row.get("db_value") or "")
+    if not _BAND_RE.match(db_value):
+        raise NoiseIngestError(
+            f"invalid db_value {db_value!r}: expected 'NN-NN' or 'NN+' "
+            f"(jurisdiction={row.get('jurisdiction')!r}, "
+            f"source_type={row.get('source_type')!r}, "
+            f"metric={row.get('metric')!r}, "
+            f"source_dataset={row.get('source_dataset')!r})"
+        )
+    db_low = row.get("db_low")
+    db_high = row.get("db_high")
+    if db_low is not None and db_high is not None:
+        try:
+            if float(db_high) < float(db_low):
+                raise NoiseIngestError(
+                    f"db_high ({db_high}) < db_low ({db_low}) "
+                    f"for db_value={db_value!r} "
+                    f"(jurisdiction={row.get('jurisdiction')!r})"
+                )
+        except (TypeError, ValueError):
+            pass
+
+
+def _diagnose_ingest_integrity_error(
+    engine: Engine,
+    conn,
+    noise_source_hash: str,
+    batch: list[dict],
+    exc,
+) -> NoiseIngestError:
+    constraint_name = None
+    try:
+        constraint_name = exc.orig.diag.constraint_name
+    except AttributeError:
+        pass
+
+    suspicious = []
+    for row in batch:
+        db_value = str(row.get("db_value") or "")
+        db_low = row.get("db_low")
+        db_high = row.get("db_high")
+        is_bad = not _BAND_RE.match(db_value)
+        if not is_bad and db_low is not None and db_high is not None:
+            try:
+                if float(db_high) < float(db_low):
+                    is_bad = True
+            except (TypeError, ValueError):
+                pass
+        if is_bad:
+            suspicious.append(row)
+
+    lines = [
+        f"Noise ingest failed: DB constraint "
+        f"{constraint_name or '(unknown)'} rejected a row."
+    ]
+
+    if suspicious:
+        first = suspicious[0]
+        lines.append("First suspicious row:")
+        for key in _META_KEYS:
+            val = first.get(key)
+            if val is not None:
+                lines.append(f"  {key}={val}")
+        if constraint_name == "noise_normalized_db_value_check":
+            lines.append("")
+            lines.append(
+                "This usually means schema allowed bands are too narrow. "
+                "Do not relabel open-ended bands; relax DB constraint."
+            )
+    else:
+        lines.append(
+            f"No obviously suspicious rows found "
+            f"(batch size: {len(batch)}, source_hash: {noise_source_hash})."
+        )
+        lines.append("First 5 rows (metadata only, no geometry):")
+        for row in batch[:5]:
+            meta = {k: row[k] for k in _META_KEYS if k in row}
+            lines.append(f"  {meta!r}")
+
+    return NoiseIngestError("\n".join(lines))
 
 
 def ingest_noise_normalized(
@@ -31,6 +132,7 @@ def ingest_noise_normalized(
     domain_wgs84,
     *,
     force: bool = False,
+    progress_cb=None,
 ) -> int:
     """
     Load raw noise source rows into noise_normalized (EPSG:2157).
@@ -49,13 +151,30 @@ def ingest_noise_normalized(
     # Phase 4A: use legacy loader (Python/Fiona/Shapely)
     from noise.loader import iter_noise_candidate_rows
 
+    # Collect all candidate rows so we can emit a count before batching.
+    candidate_rows = list(iter_noise_candidate_rows(data_dir=data_dir, study_area_wgs84=domain_wgs84))
+    _progress(progress_cb, f"ingest read {len(candidate_rows)} candidate rows")
+
     total = 0
-    for batch in _batched(iter_noise_candidate_rows(data_dir=data_dir, study_area_wgs84=domain_wgs84), _BATCH_SIZE):
+    for batch in _batched(candidate_rows, _BATCH_SIZE):
+        # Pre-ingest validation before opening a DB transaction.
+        for row in batch:
+            _validate_noise_row(row)
+
         with engine.begin() as conn:
-            n = _insert_batch(conn, noise_source_hash, batch)
+            try:
+                n = _insert_batch(conn, noise_source_hash, batch)
+            except Exception as exc:
+                from sqlalchemy.exc import IntegrityError
+                if isinstance(exc, IntegrityError):
+                    raise _diagnose_ingest_integrity_error(
+                        engine, conn, noise_source_hash, batch, exc
+                    ) from exc
+                raise
             total += n
         log.debug("ingested %d rows (running total=%d)", n, total)
 
+    _progress(progress_cb, f"ingest inserted {total} normalized rows")
     log.info("ingest complete: source_hash=%s total_rows=%d", noise_source_hash, total)
     return total
 

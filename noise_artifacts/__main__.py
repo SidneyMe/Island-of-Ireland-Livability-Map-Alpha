@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -48,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
                          help="Also bake standalone PMTiles (Phase 8B stub)")
     build_p.add_argument("--output-dir", default=None,
                          help="Output directory for PMTiles (required with --bake-pmtiles)")
+    build_p.add_argument("--debug", action="store_true",
+                         help="Print full tracebacks on error")
 
     # compare subcommand
     compare_p = subparsers.add_parser("compare", help="Compare artifact to legacy build")
@@ -70,12 +73,26 @@ def _run_build(args) -> int:
     from db_postgis.engine import build_engine
     from noise.loader import NOISE_DATA_DIR
 
+    from .exceptions import NoiseArtifactError
     from .runner import build_default_noise_artifact
 
     data_dir = Path(args.data_dir) if args.data_dir else NOISE_DATA_DIR
     engine = build_engine()
 
-    result = build_default_noise_artifact(engine, force=args.force, data_dir=data_dir)
+    debug = getattr(args, "debug", False) or os.getenv("LIVABILITY_DEBUG") == "1"
+
+    try:
+        result = build_default_noise_artifact(engine, force=args.force, data_dir=data_dir)
+    except NoiseArtifactError as exc:
+        print(f"\n[noise:error] {exc}", file=sys.stderr)
+        if debug:
+            raise
+        return 1
+    except RuntimeError as exc:
+        print(f"\n[noise:error] {exc}", file=sys.stderr)
+        if debug:
+            raise
+        return 1
 
     if result["status"] == "up_to_date":
         print(f"noise artifact already up to date (artifact_hash={result['artifact_hash']})")

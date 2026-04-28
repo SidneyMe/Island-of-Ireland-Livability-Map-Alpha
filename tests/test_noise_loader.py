@@ -129,6 +129,29 @@ class NoiseLoaderNormalizationTests(TestCase):
         self.assertEqual(high, 99)
         self.assertEqual(label, "75+")
 
+    def test_noise_band_allows_70_plus(self) -> None:
+        low, high, label = normalize_noise_band("70+", db_low=70, db_high=99)
+
+        self.assertEqual(low, 70)
+        self.assertEqual(high, 99)
+        self.assertEqual(label, "70+")
+
+    def test_noise_band_does_not_relabel_70_plus_to_75_plus(self) -> None:
+        # Explicit string label "70+"
+        _, _, label = normalize_noise_band("70+")
+        self.assertEqual(label, "70+")
+        self.assertNotEqual(label, "75+")
+
+        # Numeric bounds low=70, high=99 also produce "70+", not "75+"
+        _, _, label = normalize_noise_band(db_low=70, db_high=99)
+        self.assertEqual(label, "70+")
+        self.assertNotEqual(label, "75+")
+
+        # Range string "70-99" normalises to "70+", not "75+"
+        _, _, label = normalize_noise_band("70-99")
+        self.assertEqual(label, "70+")
+        self.assertNotEqual(label, "75+")
+
     def test_roi_noise_band_normalization_handles_numeric_bounds(self) -> None:
         low, high, label = normalize_noise_band(db_low=55, db_high=59)
 

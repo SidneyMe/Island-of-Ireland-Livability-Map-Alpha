@@ -242,7 +242,14 @@ def run_precompute_impl(
                 _build_reason = "--refresh-noise-artifact"
             print(f"[noise] {_build_reason}; building noise artifact...", flush=True)
             from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
-            _build_result = _build_artifact(engine, force=force_noise_artifact)
+
+            def _noise_progress_cb(action, *, detail="", force_log=False):
+                if detail:
+                    print(f"[noise] {detail}", flush=True)
+
+            _build_result = _build_artifact(
+                engine, force=force_noise_artifact, progress_cb=_noise_progress_cb
+            )
             if _build_result["status"] == "built":
                 print(
                     f"[noise] artifact built: {_build_result['artifact_hash']} "
