@@ -40,7 +40,13 @@ def main(argv: list[str] | None = None) -> int:
     # Default command: build
     build_p = argparse.ArgumentParser(add_help=False)
     build_p.add_argument("--force", action="store_true",
-                         help="Re-run even if a current artifact exists")
+                         help="Legacy alias for --force-all (force source re-import + resolved rebuild)")
+    build_p.add_argument("--force-resolved", action="store_true",
+                         help="Force resolved rebuild while reusing existing source rows")
+    build_p.add_argument("--reimport-source", action="store_true",
+                         help="Re-import source rows into noise_normalized before rebuild")
+    build_p.add_argument("--force-all", action="store_true",
+                         help="Force source re-import and resolved rebuild")
     build_p.add_argument("--profile", default=None,
                          help="Build profile (full|dev|test)")
     build_p.add_argument("--data-dir", default=None,
@@ -82,7 +88,14 @@ def _run_build(args) -> int:
     debug = getattr(args, "debug", False) or os.getenv("LIVABILITY_DEBUG") == "1"
 
     try:
-        result = build_default_noise_artifact(engine, force=args.force, data_dir=data_dir)
+        result = build_default_noise_artifact(
+            engine,
+            force=args.force,
+            force_resolved=getattr(args, "force_resolved", False),
+            reimport_source=getattr(args, "reimport_source", False),
+            force_all=getattr(args, "force_all", False),
+            data_dir=data_dir,
+        )
     except NoiseArtifactError as exc:
         print(f"\n[noise:error] {exc}", file=sys.stderr)
         if debug:

@@ -10,6 +10,7 @@ Staging tables are UNLOGGED (rebuildable; WAL durability not needed).
 from __future__ import annotations
 
 import logging
+import time
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -25,6 +26,10 @@ def _progress(progress_cb, message: str) -> None:
         progress_cb("detail", detail=message, force_log=True)
     else:
         print(f"[noise] {message}", flush=True)
+
+
+def _timing(progress_cb, label: str, seconds: float) -> None:
+    _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
 
 
 def _postgis_version(engine: Engine) -> tuple[int, int]:
@@ -61,13 +66,16 @@ def dissolve_noise_into_staging(
     Returns (dissolve_staging_name, round_staging_name) — the caller is responsible
     for dropping these tables after noise_resolved_display is populated.
     """
+    total_started = time.perf_counter()
     use_square_grid = _has_square_grid(engine)
     dissolve_table = _staging_table_name(source_hash, "dissolve_staging")
     round_table = _staging_table_name(resolved_hash, "round_staging")
 
+    indexes_seconds = 0.0
     with engine.begin() as conn:
         _create_dissolve_staging(conn, dissolve_table)
         _progress(progress_cb, "dissolve pass 1 start")
+        pass1_started = time.perf_counter()
         n1 = _pass1_dissolve(
             conn, dissolve_table,
             source_hash=source_hash,
@@ -75,14 +83,23 @@ def dissolve_noise_into_staging(
             topology_grid_metres=topology_grid_metres,
             use_square_grid=use_square_grid,
         )
+        _timing(progress_cb, "dissolve.pass1", time.perf_counter() - pass1_started)
         _progress(progress_cb, f"dissolve pass 1 done: {n1} rows")
+        indexes_started = time.perf_counter()
         _add_staging_indexes(conn, dissolve_table)
+        indexes_seconds += time.perf_counter() - indexes_started
         _create_round_staging(conn, round_table)
         _progress(progress_cb, "dissolve pass 2 start")
+        pass2_started = time.perf_counter()
         n2 = _pass2_dissolve(conn, dissolve_table, round_table)
+        _timing(progress_cb, "dissolve.pass2", time.perf_counter() - pass2_started)
         _progress(progress_cb, f"dissolve pass 2 done: {n2} rows")
+        indexes_started = time.perf_counter()
         _add_staging_indexes(conn, round_table)
+        indexes_seconds += time.perf_counter() - indexes_started
 
+    _timing(progress_cb, "dissolve.indexes", indexes_seconds)
+    _timing(progress_cb, "dissolve.total", time.perf_counter() - total_started)
     log.info("dissolve complete: dissolve_table=%s round_table=%s", dissolve_table, round_table)
     return dissolve_table, round_table
 
@@ -299,3 +316,4 @@ def _pass2_dissolve(conn, dissolve_table: str, round_table: str) -> int:
         ),
     )
     return max(int(result.rowcount or 0), 0)
+

@@ -9,6 +9,7 @@ Provenance is group-level aggregate — no expensive per-polygon spatial joins.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import text
@@ -22,6 +23,10 @@ def _progress(progress_cb, message: str) -> None:
         progress_cb("detail", detail=message, force_log=True)
     else:
         print(f"[noise] {message}", flush=True)
+
+
+def _timing(progress_cb, label: str, seconds: float) -> None:
+    _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
 
 
 def materialize_resolved_display(
@@ -42,16 +47,21 @@ def materialize_resolved_display(
 
     Returns dict(total_inserted, groups_processed).
     """
+    total_started = time.perf_counter()
     created_at = datetime.now(timezone.utc)
     total_inserted = 0
     groups_processed = 0
 
+    group_fetch_started = time.perf_counter()
     with engine.connect() as conn:
         groups = _fetch_groups(conn, round_table)
 
     total_groups = len(groups)
+    _timing(progress_cb, "resolve.group_count", time.perf_counter() - group_fetch_started)
+    _progress(progress_cb, f"resolve groups discovered: {total_groups}")
     for jurisdiction, source_type, metric in groups:
         group_num = groups_processed + 1
+        group_started = time.perf_counter()
         _progress(
             progress_cb,
             f"resolve group {group_num}/{total_groups}: {jurisdiction} {source_type} {metric}",
@@ -85,11 +95,17 @@ def materialize_resolved_display(
                 )
 
         groups_processed += 1
+        _timing(
+            progress_cb,
+            f"resolve.group_{group_num}",
+            time.perf_counter() - group_started,
+        )
         log.debug(
             "resolved group %s/%s/%s: %d total rows so far",
             jurisdiction, source_type, metric, total_inserted,
         )
 
+    _timing(progress_cb, "resolve.total", time.perf_counter() - total_started)
     return {"total_inserted": total_inserted, "groups_processed": groups_processed}
 
 

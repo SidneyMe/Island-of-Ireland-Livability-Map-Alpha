@@ -159,6 +159,8 @@ def run_precompute_impl(
     force_precompute: bool = False,
     auto_refresh_import: bool = False,
     force_noise_artifact: bool = False,
+    reimport_noise_source: bool = False,
+    force_noise_all: bool = False,
     refresh_noise_artifact: bool = False,
     *,
     build_profile: str = "full",
@@ -232,10 +234,24 @@ def run_precompute_impl(
         print("[noise] checking active resolved artifact", flush=True)
         _active_artifact = _get_active_artifact(engine, "resolved")
 
-        _need_build = _active_artifact is None or force_noise_artifact or refresh_noise_artifact
+        _force_resolved = bool(force_noise_artifact or force_noise_all)
+        _reimport_source = bool(reimport_noise_source or force_noise_all)
+        if _reimport_source:
+            _force_resolved = True
+
+        _need_build = (
+            _active_artifact is None
+            or refresh_noise_artifact
+            or _force_resolved
+            or _reimport_source
+        )
         if _need_build:
             if _active_artifact is None:
                 _build_reason = "no active resolved artifact"
+            elif force_noise_all:
+                _build_reason = "--force-noise-all"
+            elif reimport_noise_source:
+                _build_reason = "--reimport-noise-source"
             elif force_noise_artifact:
                 _build_reason = "--force-noise-artifact"
             else:
@@ -248,7 +264,10 @@ def run_precompute_impl(
                     print(f"[noise] {detail}", flush=True)
 
             _build_result = _build_artifact(
-                engine, force=force_noise_artifact, progress_cb=_noise_progress_cb
+                engine,
+                force_resolved=_force_resolved,
+                reimport_source=_reimport_source,
+                progress_cb=_noise_progress_cb,
             )
             if _build_result["status"] == "built":
                 print(

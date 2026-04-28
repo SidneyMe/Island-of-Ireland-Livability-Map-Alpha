@@ -88,8 +88,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--force-noise-artifact",
         action="store_true",
         help=(
-            "Before precompute, force a full rebuild of the noise artifact even if one exists. "
-            "Implies --refresh-noise-artifact. "
+            "Before precompute, force a resolved artifact rebuild even if one exists, "
+            "reusing existing source rows when available (no raw source re-import). "
+            "Requires --precompute / --precompute-dev / --precompute-test."
+        ),
+    )
+    parser.add_argument(
+        "--reimport-noise-source",
+        action="store_true",
+        help=(
+            "Before precompute, re-import raw noise source rows into noise_normalized "
+            "for the current source hash, then rebuild resolved artifact. "
+            "Requires --precompute / --precompute-dev / --precompute-test."
+        ),
+    )
+    parser.add_argument(
+        "--force-noise-all",
+        action="store_true",
+        help=(
+            "Before precompute, force both source re-import and resolved rebuild. "
+            "Equivalent to --force-noise-artifact + --reimport-noise-source. "
             "Requires --precompute / --precompute-dev / --precompute-test."
         ),
     )
@@ -139,6 +157,10 @@ def main() -> int:
         parser.error("--refresh-noise-artifact requires --precompute, --precompute-dev, or --precompute-test")
     if args.force_noise_artifact and not precompute_requested:
         parser.error("--force-noise-artifact requires --precompute, --precompute-dev, or --precompute-test")
+    if args.reimport_noise_source and not precompute_requested:
+        parser.error("--reimport-noise-source requires --precompute, --precompute-dev, or --precompute-test")
+    if args.force_noise_all and not precompute_requested:
+        parser.error("--force-noise-all requires --precompute, --precompute-dev, or --precompute-test")
     if args.force_transit_refresh and not args.refresh_transit:
         parser.error("--force-transit-refresh requires --refresh-transit")
     if args.auto_refresh_import and not precompute_requested:
@@ -174,7 +196,14 @@ def main() -> int:
                 force_precompute=args.force_precompute,
                 auto_refresh_import=args.auto_refresh_import,
                 force_noise_artifact=args.force_noise_artifact,
-                refresh_noise_artifact=args.refresh_noise_artifact or args.force_noise_artifact,
+                reimport_noise_source=args.reimport_noise_source,
+                force_noise_all=args.force_noise_all,
+                refresh_noise_artifact=(
+                    args.refresh_noise_artifact
+                    or args.force_noise_artifact
+                    or args.reimport_noise_source
+                    or args.force_noise_all
+                ),
             )
         if run_render:
             from render_from_db import run_render_from_db as _run_render_from_db

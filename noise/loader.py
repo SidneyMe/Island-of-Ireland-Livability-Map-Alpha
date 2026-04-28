@@ -13,7 +13,9 @@ import sys
 import tempfile
 import time
 import zipfile
+from datetime import datetime, timezone
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 from typing import Any, Iterable, Iterator
 
@@ -29,7 +31,10 @@ NO_DATA_GRIDCODE = 1000
 NOISE_FILEGDB_CHUNKS = 4
 NOISE_FILEGDB_ALLOWED_CHUNKS = frozenset({2, 4})
 
-NOISE_CANDIDATES_CACHE_VERSION = 3
+NOISE_CANDIDATES_CACHE_VERSION = 4
+NOISE_CANDIDATE_CACHE_SCHEMA_VERSION = 1
+NOISE_CANDIDATES_CACHE_PART_ROWS = 2000
+NOISE_CANDIDATES_CACHE_SUBDIR = "noise_candidates"
 NOISE_CANDIDATES_CACHE_DIR_ENV = "NOISE_CANDIDATES_CACHE_DIR"
 DEFAULT_NOISE_CANDIDATES_CACHE_DIR = (
     Path(__file__).resolve().parent.parent / ".livability_cache"
@@ -530,6 +535,92 @@ def _source_type_from_ni_member(member: str) -> str | None:
     return None
 
 
+def _find_noise_class_column(columns: Iterable[str]) -> str | None:
+    for name in columns:
+        lowered = str(name).lower()
+        if lowered in {"noise_cl", "noiseclass", "noise_class"}:
+            return str(name)
+        if lowered.startswith("noise_cl"):
+            return str(name)
+    return None
+
+
+def ni_round1_class_snapshot(
+    *,
+    data_dir: Path = NOISE_DATA_DIR,
+) -> list[dict[str, Any]]:
+    """
+    Return NI Round 1 class-coded grid metadata rows.
+
+    Reads only attributes (no geometries) and returns rows with:
+      source_layer, source_type, metric, raw_gridcode, noise_class_label, row_count
+    """
+    try:
+        import pyogrio
+    except ImportError as exc:  # pragma: no cover - depends on installed deps
+        raise RuntimeError("pyogrio is required to inspect NI Round 1 class metadata.") from exc
+
+    zip_name = NI_ZIP_BY_ROUND[1]
+    zip_path = Path(data_dir) / zip_name
+    if not zip_path.exists():
+        raise FileNotFoundError(f"NI Round 1 archive not found: {zip_path}")
+
+    with zipfile.ZipFile(zip_path) as zip_file:
+        members = [
+            entry.filename
+            for entry in zip_file.infolist()
+            if not entry.is_dir() and entry.filename.lower().endswith(".shp")
+        ]
+
+    rows: list[dict[str, Any]] = []
+    for member in _preferred_ni_entries(members):
+        metric = _metric_from_ni_member(member)
+        source_type = _source_type_from_ni_member(member)
+        if metric not in SUPPORTED_METRICS or source_type is None:
+            continue
+
+        src = f"/vsizip/{zip_path.resolve().as_posix()}/{member}"
+        frame = pyogrio.read_dataframe(src, read_geometry=False)
+        if frame.empty:
+            continue
+
+        grid_col = "gridcode" if "gridcode" in frame.columns else ("GRIDCODE" if "GRIDCODE" in frame.columns else None)
+        class_col = _find_noise_class_column(frame.columns)
+        if grid_col is None or class_col is None:
+            continue
+
+        pairs = (
+            frame[[grid_col, class_col]]
+            .dropna()
+            .groupby([grid_col, class_col], dropna=False)
+            .size()
+            .reset_index(name="row_count")
+            .sort_values([grid_col, class_col])
+        )
+        for _, item in pairs.iterrows():
+            rows.append(
+                {
+                    "source_dataset": zip_name,
+                    "source_layer": member,
+                    "source_type": source_type,
+                    "metric": metric,
+                    "raw_gridcode": int(item[grid_col]),
+                    "noise_class_label": str(item[class_col]).strip(),
+                    "row_count": int(item["row_count"]),
+                }
+            )
+
+    rows.sort(
+        key=lambda item: (
+            item["source_layer"],
+            item["metric"],
+            int(item["raw_gridcode"]),
+            item["noise_class_label"],
+        )
+    )
+    return rows
+
+
 def _extract_member_family(zip_file: zipfile.ZipFile, member: str, target_dir: Path) -> Path:
     member_path = Path(member)
     if member_path.suffix.lower() == ".shp":
@@ -944,12 +1035,19 @@ def _ni_round_candidate_rows(
             raw_gridcode = row.get("gridcode")
             if raw_gridcode is None:
                 raw_gridcode = row.get("GRIDCODE")
-            db_low, db_high, db_value = normalize_ni_gridcode_band(
-                raw_gridcode,
-                round_number=round_number,
-                source_type=source_type,
-                metric=metric,
-            )
+            try:
+                db_low, db_high, db_value = normalize_ni_gridcode_band(
+                    raw_gridcode,
+                    round_number=round_number,
+                    source_type=source_type,
+                    metric=metric,
+                )
+            except ValueError as exc:
+                source_ref = f"{zip_name}:{member}:{index}"
+                raise ValueError(
+                    f"{exc} (source_dataset={zip_name}, source_layer={member}, "
+                    f"source_ref={source_ref}, raw_gridcode={raw_gridcode})"
+                ) from exc
             if db_value is None:
                 continue
             geom = row.geometry
@@ -1032,6 +1130,13 @@ def _study_area_signature(study_area_wgs84) -> str:
     except Exception:
         bounds = getattr(study_area_wgs84, "bounds", None)
         payload = repr(bounds).encode("utf-8")
+    else:
+        if isinstance(payload, memoryview):
+            payload = payload.tobytes()
+        elif isinstance(payload, bytearray):
+            payload = bytes(payload)
+        elif not isinstance(payload, bytes):
+            payload = repr(payload).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
@@ -1064,7 +1169,111 @@ def candidates_cache_key(
 
 
 def _candidates_cache_path(cache_dir: Path, key: str) -> Path:
+    # Legacy single-file cache format (kept for backward-compatible reads only).
     return Path(cache_dir) / f"noise_candidates_{key}.pkl.gz"
+
+
+def _candidates_cache_entry_dir(cache_dir: Path, key: str) -> Path:
+    return Path(cache_dir) / NOISE_CANDIDATES_CACHE_SUBDIR / key
+
+
+def _candidates_cache_manifest_path(entry_dir: Path) -> Path:
+    return entry_dir / "manifest.json"
+
+
+def _load_chunked_cache_manifest(entry_dir: Path) -> dict[str, Any] | None:
+    manifest_path = _candidates_cache_manifest_path(entry_dir)
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    parts = payload.get("parts")
+    if not isinstance(parts, list):
+        return None
+    return payload
+
+
+def _iter_chunked_cached_candidates(
+    entry_dir: Path,
+    manifest: dict[str, Any],
+) -> Iterator[dict[str, Any]]:
+    parts = manifest.get("parts") or []
+    for part_name in parts:
+        if not isinstance(part_name, str):
+            raise ValueError("invalid cache manifest: part name must be a string")
+        part_path = entry_dir / part_name
+        with gzip.open(part_path, "rb") as handle:
+            payload = pickle.load(handle)
+        if not isinstance(payload, list):
+            raise ValueError(f"invalid cache part payload (expected list): {part_path.name}")
+        for row in payload:
+            if not isinstance(row, dict):
+                raise ValueError(f"invalid cache row payload (expected dict): {part_path.name}")
+            yield row
+
+
+def _delete_chunked_cache(entry_dir: Path) -> None:
+    try:
+        shutil.rmtree(entry_dir)
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+
+
+class _CandidateCacheWriter:
+    def __init__(
+        self,
+        *,
+        entry_dir: Path,
+        cache_key: str,
+        source_signature: str,
+        study_area_signature: str,
+    ) -> None:
+        self.entry_dir = Path(entry_dir)
+        self.tmp_dir = self.entry_dir.parent / f"{self.entry_dir.name}.tmp"
+        self.cache_key = str(cache_key)
+        self.source_signature = str(source_signature)
+        self.study_area_signature = str(study_area_signature)
+        self.parts: list[str] = []
+        self.row_count = 0
+
+        _delete_chunked_cache(self.tmp_dir)
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_batch(self, serialized_rows: list[dict[str, Any]]) -> None:
+        if not serialized_rows:
+            return
+        part_name = f"part-{len(self.parts) + 1:06d}.pkl.gz"
+        part_path = self.tmp_dir / part_name
+        with gzip.open(part_path, "wb", compresslevel=6) as handle:
+            pickle.dump(serialized_rows, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        self.parts.append(part_name)
+        self.row_count += len(serialized_rows)
+
+    def finalize(self) -> Path:
+        manifest = {
+            "cache_schema_version": NOISE_CANDIDATE_CACHE_SCHEMA_VERSION,
+            "cache_version": NOISE_CANDIDATES_CACHE_VERSION,
+            "cache_key": self.cache_key,
+            "source_signature": self.source_signature,
+            "study_area_signature": self.study_area_signature,
+            "row_count": int(self.row_count),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "parts": list(self.parts),
+        }
+        manifest_path = _candidates_cache_manifest_path(self.tmp_dir)
+        manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+
+        self.entry_dir.parent.mkdir(parents=True, exist_ok=True)
+        if self.entry_dir.exists():
+            shutil.rmtree(self.entry_dir)
+        self.tmp_dir.replace(self.entry_dir)
+        return self.entry_dir
 
 
 def _serialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
@@ -1084,6 +1293,7 @@ def _deserialize_candidate(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_cached_candidates(path: Path) -> list[dict[str, Any]] | None:
+    # Legacy single-file cache reader.
     if not path.exists():
         return None
     try:
@@ -1101,6 +1311,7 @@ def _load_cached_candidates(path: Path) -> list[dict[str, Any]] | None:
 
 
 def _save_cached_candidates(path: Path, serialized_rows: list[dict[str, Any]]) -> None:
+    # Legacy single-file cache writer retained for compatibility helpers/tests.
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
@@ -1115,6 +1326,17 @@ def _save_cached_candidates(path: Path, serialized_rows: list[dict[str, Any]]) -
         except OSError:
             pass
         raise
+
+
+def _batched(iterable: Iterable[Any], size: int) -> Iterator[list[Any]]:
+    if size <= 0:
+        raise ValueError("batch size must be > 0")
+    it = iter(iterable)
+    while True:
+        batch = list(islice(it, size))
+        if not batch:
+            break
+        yield batch
 
 
 def _study_area_wkb_or_none(study_area_wgs84) -> bytes | None:
@@ -1375,64 +1597,115 @@ def iter_noise_candidate_rows_cached(
         return
 
     key = candidates_cache_key(study_area_wgs84, data_dir)
-    cache_path = _candidates_cache_path(resolved_cache_dir, key)
-    cached = _load_cached_candidates(cache_path)
-    if cached is not None:
+    entry_dir = _candidates_cache_entry_dir(resolved_cache_dir, key)
+    legacy_cache_path = _candidates_cache_path(resolved_cache_dir, key)
+
+    manifest = _load_chunked_cache_manifest(entry_dir)
+    if manifest is not None:
+        row_count = int(manifest.get("row_count") or 0)
         _emit_progress(
             progress_cb,
-            f"noise candidate cache hit ({len(cached):,} rows) at {cache_path.name}",
+            f"noise candidate cache hit ({row_count:,} rows) at {entry_dir}",
         )
         try:
-            deserialized = [_deserialize_candidate(row) for row in cached]
+            for row in _iter_chunked_cached_candidates(entry_dir, manifest):
+                yield _deserialize_candidate(row)
         except Exception as exc:
             _emit_progress(
                 progress_cb,
                 f"noise candidate cache corrupt ({type(exc).__name__}: {exc}); deleting and rebuilding",
             )
+            _delete_chunked_cache(entry_dir)
+        else:
+            return
+
+    # Legacy single-file fallback (read-only compatibility path).
+    cached = _load_cached_candidates(legacy_cache_path)
+    if cached is not None:
+        _emit_progress(
+            progress_cb,
+            f"noise candidate legacy cache hit ({len(cached):,} rows) at {legacy_cache_path.name}",
+        )
+        try:
+            for row in cached:
+                yield _deserialize_candidate(row)
+        except Exception as exc:
+            _emit_progress(
+                progress_cb,
+                f"noise candidate legacy cache corrupt ({type(exc).__name__}: {exc}); deleting and rebuilding",
+            )
             try:
-                cache_path.unlink()
+                legacy_cache_path.unlink()
             except OSError:
                 pass
         else:
-            yield from deserialized
             return
 
     _emit_progress(
         progress_cb,
-        f"noise candidate cache miss; rebuilding ({cache_path.name})",
+        f"noise candidate cache miss; rebuilding ({entry_dir})",
     )
 
     effective_workers = workers if workers is not None else _resolve_loader_workers()
     if effective_workers > 1:
-        serialized = _parallel_collect_serialized_candidates(
+        _emit_progress(
+            progress_cb,
+            (
+                "noise candidate cache rebuild: using serial streaming path to avoid "
+                f"full-list buffering (requested workers={effective_workers})"
+            ),
+        )
+
+    source_signature = dataset_signature(data_dir)
+    study_sig = _study_area_signature(study_area_wgs84)
+    writer = _CandidateCacheWriter(
+        entry_dir=entry_dir,
+        cache_key=key,
+        source_signature=source_signature,
+        study_area_signature=study_sig,
+    )
+
+    emitted = 0
+    try:
+        source_iter = iter_noise_candidate_rows(
             data_dir=data_dir,
             study_area_wgs84=study_area_wgs84,
             progress_cb=progress_cb,
-            workers=effective_workers,
             gpkg_cache_dir=gpkg_cache_dir,
         )
-    else:
-        serialized = [
-            _serialize_candidate(row)
-            for row in iter_noise_candidate_rows(
-                data_dir=data_dir,
-                study_area_wgs84=study_area_wgs84,
-                progress_cb=progress_cb,
-                gpkg_cache_dir=gpkg_cache_dir,
-            )
-        ]
+        pending_part: list[dict[str, Any]] = []
+        for source_row in source_iter:
+            serialized_row = _serialize_candidate(source_row)
+            pending_part.append(serialized_row)
+            emitted += 1
+            yield _deserialize_candidate(serialized_row)
+            if len(pending_part) >= NOISE_CANDIDATES_CACHE_PART_ROWS:
+                writer.write_batch(pending_part)
+                pending_part = []
+            if emitted % 10_000 == 0:
+                _emit_progress(
+                    progress_cb,
+                    f"noise candidate cache rebuild streamed {emitted:,} rows",
+                )
+        if pending_part:
+            writer.write_batch(pending_part)
+    except Exception:
+        _delete_chunked_cache(writer.tmp_dir)
+        raise
 
     try:
-        _save_cached_candidates(cache_path, serialized)
+        writer.finalize()
         _emit_progress(
             progress_cb,
-            f"saved noise candidate cache ({len(serialized):,} rows) -> {cache_path.name}",
+            f"saved noise candidate cache ({emitted:,} rows) -> {entry_dir}",
         )
+        if legacy_cache_path.exists():
+            try:
+                legacy_cache_path.unlink()
+            except OSError:
+                pass
     except OSError as exc:
         _emit_progress(progress_cb, f"failed to save noise candidate cache: {exc}")
-
-    for row in serialized:
-        yield _deserialize_candidate(row)
 
 
 def _make_valid(geom):
@@ -1529,3 +1802,48 @@ def load_noise_rows(study_area_wgs84, *, data_dir: Path = NOISE_DATA_DIR, progre
         return []
     _emit_progress(progress_cb, f"materializing newest-round noise fallback for {len(candidates):,} polygons")
     return materialize_effective_noise_rows(candidates, study_area_wgs84)
+
+
+def _print_ni_round1_class_snapshot(data_dir: Path) -> None:
+    rows = ni_round1_class_snapshot(data_dir=data_dir)
+    if not rows:
+        print("No NI Round 1 class rows found.", flush=True)
+        return
+    print(
+        "source_layer\tmetric\tsource_type\traw_gridcode\tnoise_class_label\trow_count",
+        flush=True,
+    )
+    for row in rows:
+        print(
+            f"{row['source_layer']}\t{row['metric']}\t{row['source_type']}\t"
+            f"{row['raw_gridcode']}\t{row['noise_class_label']}\t{row['row_count']}",
+            flush=True,
+        )
+
+
+def _main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Noise loader diagnostics")
+    parser.add_argument(
+        "--dump-ni-round1-classes",
+        action="store_true",
+        help="Dump NI Round 1 GRIDCODE/Noise_Cl class pairs from raw archive attributes.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=str(NOISE_DATA_DIR),
+        help="Path to noise_datasets directory.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.dump_ni_round1_classes:
+        _print_ni_round1_class_snapshot(Path(args.data_dir))
+        return 0
+
+    parser.print_help()
+    return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

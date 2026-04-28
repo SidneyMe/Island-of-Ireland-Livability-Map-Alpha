@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import logging
 import re
+import time
+import uuid
+from binascii import unhexlify
+from decimal import Decimal
 from itertools import islice
 from typing import Iterable, Iterator
 
@@ -34,12 +38,52 @@ _META_KEYS = (
     "source_dataset", "source_layer", "raw_gridcode",
 )
 
+_STAGE_COLUMNS = (
+    "noise_source_hash",
+    "jurisdiction",
+    "source_type",
+    "metric",
+    "round_number",
+    "report_period",
+    "db_low",
+    "db_high",
+    "db_value",
+    "source_dataset",
+    "source_layer",
+    "source_ref",
+    "raw_gridcode",
+    "wkb",
+)
+
 
 def _progress(progress_cb, message: str) -> None:
     if progress_cb:
         progress_cb("detail", detail=message, force_log=True)
     else:
         print(f"[noise] {message}", flush=True)
+
+
+def _timing(progress_cb, label: str, seconds: float) -> None:
+    _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
+
+
+def _existing_source_row_count(engine: Engine, noise_source_hash: str) -> int:
+    with engine.connect() as conn:
+        value = conn.execute(
+            text("SELECT COUNT(*) FROM noise_normalized WHERE noise_source_hash = :h"),
+            {"h": noise_source_hash},
+        ).scalar_one()
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (int, float, Decimal, str)):
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        return parsed if parsed > 0 else 0
+    return 0
 
 
 def _validate_noise_row(row: dict) -> None:
@@ -151,26 +195,43 @@ def ingest_noise_normalized(
     domain_wgs84,
     *,
     force: bool = False,
+    reimport_source: bool = False,
     progress_cb=None,
 ) -> int:
     """
     Load raw noise source rows into noise_normalized (EPSG:2157).
 
-    If force=True, deletes any existing rows for this source_hash first.
+    If force=True or reimport_source=True, deletes existing rows for this source_hash first.
     Returns total rows inserted.
     """
-    if force:
+    reimport_source = bool(reimport_source or force)
+    total_started = time.perf_counter()
+    cache_lookup_started = time.perf_counter()
+    existing_rows = _existing_source_row_count(engine, noise_source_hash)
+    _timing(progress_cb, "ingest.cache_lookup", time.perf_counter() - cache_lookup_started)
+
+    if reimport_source:
         with engine.begin() as conn:
             conn.execute(
                 text("DELETE FROM noise_normalized WHERE noise_source_hash = :h"),
                 {"h": noise_source_hash},
             )
             log.info("deleted prior noise_normalized rows for source_hash=%s", noise_source_hash)
+        existing_rows = 0
+    elif existing_rows > 0:
+        _progress(
+            progress_cb,
+            f"source normalized rows already exist for source={noise_source_hash}; skipping raw ingest",
+        )
+        _timing(progress_cb, "ingest.total", time.perf_counter() - total_started)
+        return 0
 
     from noise.loader import iter_noise_candidate_rows_cached
 
     total_read = 0
     total_inserted = 0
+    raw_read_seconds = 0.0
+    db_insert_seconds = 0.0
     rows_iter = iter_noise_candidate_rows_cached(
         data_dir=data_dir,
         study_area_wgs84=domain_wgs84,
@@ -178,13 +239,17 @@ def ingest_noise_normalized(
         use_cache=True,
     )
 
+    batch_pull_started = time.perf_counter()
     for batch in _batched(rows_iter, _BATCH_SIZE):
+        batch_ready_at = time.perf_counter()
+        raw_read_seconds += batch_ready_at - batch_pull_started
         total_read += len(batch)
 
         # Pre-ingest validation before opening a DB transaction.
         for row in batch:
             _validate_noise_row(row)
 
+        db_started = time.perf_counter()
         with engine.begin() as conn:
             try:
                 n = _insert_batch(conn, noise_source_hash, batch)
@@ -196,12 +261,14 @@ def ingest_noise_normalized(
                     ) from exc
                 raise
             total_inserted += n
+        db_insert_seconds += time.perf_counter() - db_started
         log.debug(
             "ingested %d rows (running total=%d; read=%d)",
             n,
             total_inserted,
             total_read,
         )
+        batch_pull_started = time.perf_counter()
 
         if total_read % 10_000 < _BATCH_SIZE:
             _progress(
@@ -213,6 +280,9 @@ def ingest_noise_normalized(
         progress_cb,
         f"ingest done: read {total_read:,}; inserted {total_inserted:,}",
     )
+    _timing(progress_cb, "ingest.raw_read", raw_read_seconds)
+    _timing(progress_cb, "ingest.db_insert", db_insert_seconds)
+    _timing(progress_cb, "ingest.total", time.perf_counter() - total_started)
     log.info(
         "ingest complete: source_hash=%s read_rows=%d inserted_rows=%d",
         noise_source_hash,
@@ -226,17 +296,22 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
     if not batch:
         return 0
 
-    rows = []
+    rows: list[dict] = []
     for row in batch:
         geom = row.get("geom")
         if geom is None:
             continue
         try:
-            wkb_hex = geom.wkb_hex
+            wkb_bytes = bytes(geom.wkb)
         except AttributeError:
-            # shapely geometry: use .wkb
-            import binascii
-            wkb_hex = binascii.hexlify(geom.wkb).decode()
+            wkb_hex = getattr(geom, "wkb_hex", None)
+            if isinstance(wkb_hex, str):
+                try:
+                    wkb_bytes = unhexlify(wkb_hex)
+                except Exception:
+                    continue
+            else:
+                continue
 
         rows.append({
             "noise_source_hash": noise_source_hash,
@@ -251,17 +326,45 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
             "source_dataset": str(row.get("source_dataset") or ""),
             "source_layer": str(row.get("source_layer") or ""),
             "source_ref": row.get("source_ref"),
-            "wkb_hex": wkb_hex,
+            "raw_gridcode": (
+                str(row.get("raw_gridcode"))
+                if row.get("raw_gridcode") is not None
+                else None
+            ),
+            "wkb": wkb_bytes,
         })
 
     if not rows:
         return 0
 
-    # Insert with ST_Transform from EPSG:4326 (loader output) to EPSG:2157 (canonical).
-    # Wrap in subquery so the computed geom alias can be filtered in the outer WHERE.
+    stage_table = f"noise_ingest_stage_{uuid.uuid4().hex}"
     conn.execute(
         text(
+            f"""
+            CREATE TEMP TABLE {stage_table} (
+                noise_source_hash TEXT NOT NULL,
+                jurisdiction TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                round_number INTEGER NOT NULL,
+                report_period TEXT NULL,
+                db_low DOUBLE PRECISION NULL,
+                db_high DOUBLE PRECISION NULL,
+                db_value TEXT NOT NULL,
+                source_dataset TEXT NOT NULL,
+                source_layer TEXT NOT NULL,
+                source_ref TEXT NULL,
+                raw_gridcode TEXT NULL,
+                wkb BYTEA NULL
+            ) ON COMMIT DROP
             """
+        )
+    )
+
+    _copy_rows_into_stage(conn, stage_table, rows)
+    conn.execute(
+        text(
+            f"""
             INSERT INTO noise_normalized (
                 noise_source_hash, jurisdiction, source_type, metric,
                 round_number, report_period, db_low, db_high, db_value,
@@ -273,33 +376,60 @@ def _insert_batch(conn, noise_source_hash: str, batch: list[dict]) -> int:
                 source_dataset, source_layer, source_ref, geom
             FROM (
                 SELECT
-                    v.noise_source_hash, v.jurisdiction, v.source_type, v.metric,
-                    v.round_number, v.report_period, v.db_low, v.db_high, v.db_value,
-                    v.source_dataset, v.source_layer, v.source_ref,
+                    s.noise_source_hash, s.jurisdiction, s.source_type, s.metric,
+                    s.round_number, s.report_period, s.db_low, s.db_high, s.db_value,
+                    s.source_dataset, s.source_layer, s.source_ref,
                     ST_Multi(ST_CollectionExtract(
                         ST_MakeValid(
-                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(decode(v.wkb_hex, 'hex')), 4326), 2157)
+                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(s.wkb), 4326), 2157)
                         ), 3
                     )) AS geom
-                FROM (VALUES """ + ", ".join(
-                "(:noise_source_hash_{i}, :jurisdiction_{i}, :source_type_{i}, :metric_{i}, "
-                ":round_number_{i}, :report_period_{i}, :db_low_{i}, :db_high_{i}, :db_value_{i}, "
-                ":source_dataset_{i}, :source_layer_{i}, :source_ref_{i}, :wkb_hex_{i})".format(i=i)
-                for i in range(len(rows))
-            ) + """
-                ) AS v(noise_source_hash, jurisdiction, source_type, metric,
-                       round_number, report_period, db_low, db_high, db_value,
-                       source_dataset, source_layer, source_ref, wkb_hex)
-                WHERE v.wkb_hex IS NOT NULL
+                FROM {stage_table} AS s
+                WHERE s.wkb IS NOT NULL
             ) AS converted
             WHERE geom IS NOT NULL
               AND NOT ST_IsEmpty(geom)
               AND ST_Area(geom) > 0
             """
-        ),
-        {f"{k}_{i}": v for i, row in enumerate(rows) for k, v in row.items()},
+        )
     )
     return len(rows)
+
+
+def _copy_rows_into_stage(conn, stage_table: str, rows: list[dict]) -> None:
+    copied = _copy_rows_into_stage_via_psycopg(conn, stage_table, rows)
+    if copied:
+        return
+
+    # Fallback path for non-psycopg DBAPI implementations used in tests.
+    cols = ", ".join(_STAGE_COLUMNS)
+    placeholders = ", ".join(f":{col}" for col in _STAGE_COLUMNS)
+    conn.execute(
+        text(f"INSERT INTO {stage_table} ({cols}) VALUES ({placeholders})"),
+        rows,
+    )
+
+
+def _copy_rows_into_stage_via_psycopg(conn, stage_table: str, rows: list[dict]) -> bool:
+    try:
+        driver_conn = conn.connection.driver_connection
+    except Exception:
+        return False
+    if driver_conn is None:
+        return False
+
+    copy_sql = (
+        f"COPY {stage_table} ({', '.join(_STAGE_COLUMNS)}) "
+        "FROM STDIN"
+    )
+    try:
+        with driver_conn.cursor() as cur:
+            with cur.copy(copy_sql) as copy:
+                for row in rows:
+                    copy.write_row(tuple(row.get(col) for col in _STAGE_COLUMNS))
+        return True
+    except Exception:
+        return False
 
 
 def _batched(iterable: Iterable, n: int) -> Iterator[list]:

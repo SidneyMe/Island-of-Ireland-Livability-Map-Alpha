@@ -6,6 +6,7 @@ from .loader import (
     dataset_signature,
     load_noise_rows,
     materialize_effective_noise_rows,
+    ni_round1_class_snapshot,
     normalize_ni_gridcode_band,
     normalize_noise_band,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "dataset_signature",
     "load_noise_rows",
     "materialize_effective_noise_rows",
+    "ni_round1_class_snapshot",
     "normalize_ni_gridcode_band",
     "normalize_noise_band",
 ]

@@ -6,6 +6,7 @@ Called only by `python -m noise_artifacts`. The livability build does NOT call t
 from __future__ import annotations
 
 import logging
+import time
 import traceback
 from typing import Any
 
@@ -34,6 +35,10 @@ def _progress(progress_cb, message: str) -> None:
         print(f"[noise] {message}", flush=True)
 
 
+def _timing(progress_cb, label: str, seconds: float) -> None:
+    _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
+
+
 def build_noise_artifact(
     engine: Engine,
     *,
@@ -46,6 +51,8 @@ def build_noise_artifact(
     tile_size_metres: float = 10_000.0,
     topology_grid_metres: float = 0.1,
     force: bool = False,
+    force_resolved: bool = False,
+    reimport_source: bool = False,
     progress_cb=None,
 ) -> dict[str, Any]:
     """
@@ -58,15 +65,26 @@ def build_noise_artifact(
     5. Round-priority resolve into noise_resolved_display
     6. Mark artifacts complete and set noise_active_artifact pointer
 
+    Force semantics:
+      - force_resolved=True: rebuild resolved artifact while reusing source rows.
+      - reimport_source=True: re-import source rows, then rebuild resolved artifact.
+      - legacy force=True: same as enabling both flags.
+
     Returns summary dict. The caller (livability build) never calls this.
     """
+    total_started = time.perf_counter()
+    force_resolved = bool(force_resolved or force)
+    reimport_source = bool(reimport_source or force)
+    if reimport_source:
+        force_resolved = True
+
     _progress(progress_cb, f"artifact build start: source={source_hash} resolved={resolved_hash}")
 
     # --- 1. Create/reset artifact rows (parent rows BEFORE lineage) ---
     _progress(progress_cb, "ensuring artifact manifests")
-    src_status = _ensure_artifact(engine, source_hash, "source", {}, force=force)
-    dom_status = _ensure_artifact(engine, domain_hash, "domain", {}, force=force)
-    res_status = _ensure_artifact(engine, resolved_hash, "resolved", {}, force=force)
+    src_status = _ensure_artifact(engine, source_hash, "source", {}, force=reimport_source)
+    _ensure_artifact(engine, domain_hash, "domain", {}, force=False)
+    res_status = _ensure_artifact(engine, resolved_hash, "resolved", {}, force=force_resolved)
 
     # --- Fast path: resolved artifact is already complete and we're not forcing ---
     if res_status == "already_complete":
@@ -85,11 +103,13 @@ def build_noise_artifact(
         # --- 3. Ingest raw source ---
         _progress(progress_cb, "ingest start")
         log.info("ingesting raw source → noise_normalized (source_hash=%s)", source_hash)
+        ingest_started = time.perf_counter()
         n_ingested = ingest_noise_normalized(
             engine, source_hash, data_dir, domain_wgs84,
-            force=(force or src_status == "reset"),
+            reimport_source=(reimport_source or src_status == "reset"),
             progress_cb=progress_cb,
         )
+        _timing(progress_cb, "ingest.total", time.perf_counter() - ingest_started)
         _progress(progress_cb, f"ingest done: {n_ingested} rows")
 
         # --- 4. Two-pass dissolve ---
@@ -99,6 +119,7 @@ def build_noise_artifact(
         )
         log.info("running two-pass dissolve (source_hash=%s resolved_hash=%s)",
                  source_hash, resolved_hash)
+        dissolve_started = time.perf_counter()
         dissolve_table, round_table = dissolve_noise_into_staging(
             engine,
             source_hash=source_hash,
@@ -107,10 +128,12 @@ def build_noise_artifact(
             topology_grid_metres=topology_grid_metres,
             progress_cb=progress_cb,
         )
+        _timing(progress_cb, "dissolve.total", time.perf_counter() - dissolve_started)
 
         # --- 5. Round-priority resolve ---
         _progress(progress_cb, "resolve start")
         log.info("materializing resolved display (resolved_hash=%s)", resolved_hash)
+        resolve_started = time.perf_counter()
         resolve_result = materialize_resolved_display(
             engine,
             noise_resolved_hash=resolved_hash,
@@ -119,6 +142,7 @@ def build_noise_artifact(
             topology_grid_metres=topology_grid_metres,
             progress_cb=progress_cb,
         )
+        _timing(progress_cb, "resolve.total", time.perf_counter() - resolve_started)
         _progress(progress_cb, f"resolve done: {resolve_result['total_inserted']} rows")
         log.info("resolved: %s", resolve_result)
 
@@ -133,6 +157,7 @@ def build_noise_artifact(
             progress_cb,
             f"artifact complete: resolved_hash={resolved_hash} rows={counts}",
         )
+        _timing(progress_cb, "build.total", time.perf_counter() - total_started)
         log.info("artifact complete: resolved_hash=%s rows=%s", resolved_hash, counts)
         return {**counts, "resolved_hash": resolved_hash, "source_hash": source_hash}
 
@@ -237,3 +262,7 @@ def _compute_artifact_counts(engine: Engine, resolved_hash: str) -> dict:
         "source_type_count": int(row["source_type_count"] or 0),
         "metric_count": int(row["metric_count"] or 0),
     }
+
+
+
+

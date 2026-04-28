@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from itertools import islice
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from noise.loader import (
     candidates_cache_key,
     iter_noise_candidate_rows_cached,
     materialize_effective_noise_rows,
+    ni_round1_class_snapshot,
     normalize_ni_gridcode_band,
     normalize_noise_band,
 )
@@ -229,6 +231,66 @@ class NoiseLoaderNormalizationTests(TestCase):
                 metric="Lden",
             )
 
+    def test_ni_round1_snapshot_has_known_bia_pairs_when_dataset_available(self) -> None:
+        zip_path = noise_loader.NOISE_DATA_DIR / noise_loader.NI_ZIP_BY_ROUND[1]
+        if not zip_path.exists():
+            self.skipTest(f"dataset not available: {zip_path}")
+        try:
+            rows = ni_round1_class_snapshot()
+        except RuntimeError as exc:
+            self.skipTest(str(exc))
+
+        bia_lden = {
+            (row["raw_gridcode"], row["noise_class_label"])
+            for row in rows
+            if "major_airports/bia/r1_bia_lden.shp" in row["source_layer"].lower()
+        }
+        bia_lnight = {
+            (row["raw_gridcode"], row["noise_class_label"])
+            for row in rows
+            if "major_airports/bia/r1_bia_lngt.shp" in row["source_layer"].lower()
+        }
+        self.assertIn((1, "< 50"), bia_lden)
+        self.assertIn((2, "50 - 54"), bia_lden)
+        self.assertIn((7, ">= 75"), bia_lden)
+        self.assertIn((1, "< 45"), bia_lnight)
+        self.assertIn((2, "45 - 49"), bia_lnight)
+        self.assertIn((7, ">= 70"), bia_lnight)
+
+    def test_ni_unknown_class_error_includes_source_layer_ref_and_gridcode(self) -> None:
+        fake_gdf = gpd.GeoDataFrame(
+            {
+                "GRIDCODE": [99],
+                "geometry": [box(0, 0, 1, 1)],
+            },
+            geometry="geometry",
+            crs=4326,
+            index=[123],
+        )
+        with mock.patch.object(
+            noise_loader,
+            "_preferred_ni_entries",
+            return_value=["END_NoiseData_Round1/Major_Airports/BIA/R1_bia_lden.shp"],
+        ):
+            with mock.patch.object(noise_loader, "_read_vector_member", return_value=fake_gdf):
+                with mock.patch.object(Path, "exists", return_value=True):
+                    with mock.patch("noise.loader.zipfile.ZipFile") as _zipfile_mock:
+                        _zipfile_mock.return_value.__enter__.return_value.infolist.return_value = [
+                            mock.Mock(is_dir=lambda: False, filename="END_NoiseData_Round1/Major_Airports/BIA/R1_bia_lden.shp")
+                        ]
+                        with self.assertRaises(ValueError) as ctx:
+                            list(
+                                noise_loader._ni_round_candidate_rows(
+                                    data_dir=Path("."),
+                                    round_number=1,
+                                    zip_name="end_noisedata_round1.zip",
+                                )
+                            )
+        msg = str(ctx.exception)
+        self.assertIn("source_layer=END_NoiseData_Round1/Major_Airports/BIA/R1_bia_lden.shp", msg)
+        self.assertIn("source_ref=end_noisedata_round1.zip:END_NoiseData_Round1/Major_Airports/BIA/R1_bia_lden.shp:123", msg)
+        self.assertIn("raw_gridcode=99", msg)
+
 
 class NoiseFallbackTests(TestCase):
     def test_newer_round_geometry_masks_older_round_geometry(self) -> None:
@@ -329,6 +391,8 @@ class NoiseCandidateCacheTests(TestCase):
         with tempfile.TemporaryDirectory() as tmp_name:
             cache_dir = Path(tmp_name)
             study_area = box(-1, -1, 3, 3)
+            key = candidates_cache_key(study_area)
+            cache_entry_dir = noise_loader._candidates_cache_entry_dir(cache_dir, key)
 
             with mock.patch.object(
                 noise_loader,
@@ -345,8 +409,9 @@ class NoiseCandidateCacheTests(TestCase):
             self.assertEqual(call_count["value"], 1)
             self.assertEqual(len(first), 2)
 
-            cache_files = list(cache_dir.glob("noise_candidates_*.pkl.gz"))
-            self.assertEqual(len(cache_files), 1)
+            self.assertTrue(cache_entry_dir.exists())
+            self.assertTrue((cache_entry_dir / "manifest.json").exists())
+            self.assertTrue(any(cache_entry_dir.glob("part-*.pkl.gz")))
 
             with mock.patch.object(
                 noise_loader,
@@ -393,9 +458,9 @@ class NoiseCandidateCacheTests(TestCase):
             cache_dir = Path(tmp_name)
             study_area = box(-1, -1, 2, 2)
             key = candidates_cache_key(study_area)
-            cache_path = noise_loader._candidates_cache_path(cache_dir, key)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_bytes(b"not a valid gzip pickle")
+            cache_entry_dir = noise_loader._candidates_cache_entry_dir(cache_dir, key)
+            cache_entry_dir.mkdir(parents=True, exist_ok=True)
+            (cache_entry_dir / "manifest.json").write_text("{bad json", encoding="utf-8")
 
             with mock.patch.object(
                 noise_loader,
@@ -411,4 +476,94 @@ class NoiseCandidateCacheTests(TestCase):
                 )
 
             self.assertEqual(len(rebuilt), 1)
-            self.assertTrue(cache_path.exists())
+            self.assertTrue((cache_entry_dir / "manifest.json").exists())
+
+    def test_cache_hit_streams_without_full_deserialize(self) -> None:
+        rows = [
+            self._fake_candidate_row(source_type="road", round_number=4, geom=box(0, 0, 1, 1)),
+            self._fake_candidate_row(source_type="rail", round_number=3, geom=box(1, 1, 2, 2)),
+            self._fake_candidate_row(source_type="airport", round_number=2, geom=box(2, 2, 3, 3)),
+        ]
+        with tempfile.TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            study_area = box(-1, -1, 4, 4)
+            with mock.patch.object(
+                noise_loader,
+                "iter_noise_candidate_rows",
+                side_effect=lambda **_: iter(rows),
+            ):
+                # Warm cache.
+                list(
+                    iter_noise_candidate_rows_cached(
+                        study_area_wgs84=study_area,
+                        cache_dir=cache_dir,
+                        workers=1,
+                    )
+                )
+
+            call_count = {"count": 0}
+            original_deserialize = noise_loader._deserialize_candidate
+
+            def _counting_deserialize(payload):
+                call_count["count"] += 1
+                return original_deserialize(payload)
+
+            with mock.patch.object(noise_loader, "_deserialize_candidate", side_effect=_counting_deserialize):
+                it = iter(
+                    iter_noise_candidate_rows_cached(
+                        study_area_wgs84=study_area,
+                        cache_dir=cache_dir,
+                        workers=1,
+                    )
+                )
+                first = next(it)
+
+            self.assertEqual(call_count["count"], 1)
+            self.assertEqual(first["source_type"], "road")
+
+    def test_cache_miss_streams_before_source_exhausted(self) -> None:
+        produced = {"count": 0}
+
+        def fake_iter(**_kwargs):
+            for idx in range(10_000):
+                produced["count"] += 1
+                yield {
+                    "jurisdiction": "roi",
+                    "source_type": "road",
+                    "metric": "Lden",
+                    "round_number": 4,
+                    "report_period": "Round 4",
+                    "db_low": 55.0,
+                    "db_high": 59.0,
+                    "db_value": "55-59",
+                    "source_dataset": "road.zip",
+                    "source_layer": "road",
+                    "source_ref": f"road-{idx}",
+                    "geom": box(0, 0, 1, 1),
+                }
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            study_area = box(-1, -1, 2, 2)
+            with mock.patch.object(noise_loader, "_ogr2ogr_available", return_value=False):
+                with mock.patch.object(noise_loader, "iter_noise_candidate_rows", side_effect=fake_iter):
+                    it = iter_noise_candidate_rows_cached(
+                        study_area_wgs84=study_area,
+                        cache_dir=cache_dir,
+                        workers=1,
+                    )
+                    first_500 = list(islice(it, 500))
+
+        self.assertEqual(len(first_500), 500)
+        self.assertLess(
+            produced["count"],
+            10_000,
+            "cache miss must yield before fully exhausting source generator",
+        )
+
+    def test_cached_loader_source_has_no_full_list_materialization(self) -> None:
+        import inspect
+
+        src = inspect.getsource(noise_loader.iter_noise_candidate_rows_cached)
+        self.assertNotIn("serialized = [", src)
+        self.assertNotIn("deserialized = [", src)
