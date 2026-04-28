@@ -250,6 +250,12 @@ def _service_desert_rows(engine, created_at, *, progress_cb=None):
 
 def _noise_rows(engine, created_at, *, progress_cb=None):
     if NOISE_MODE == "artifact":
+        if progress_cb is not None:
+            progress_cb(
+                "detail",
+                detail="NOISE_MODE=artifact: resolving active noise artifact (no raw file reads)",
+                force_log=True,
+            )
         return _noise_rows_from_artifact(engine, progress_cb=progress_cb)
 
     # Legacy path — unchanged
@@ -314,18 +320,28 @@ def _noise_rows_from_artifact(engine, *, progress_cb=None) -> "_ArtifactNoiseRef
 
 
 
-def _noise_processing_hash() -> str | None:
+def _noise_processing_hash(engine=None) -> str | None:
     """Stable hash over noise-specific inputs only (not walk/transit config).
 
-    In artifact mode: returns _CURRENT_ARTIFACT_HASH, which is set by
-    _noise_rows_from_artifact() before this function is called in the workflow.
-    No file I/O, no data_dir access.
+    In artifact mode: returns the active resolved artifact hash.
+    First checks _CURRENT_ARTIFACT_HASH (set by _noise_rows_from_artifact after
+    _noise_rows() runs). If that is not yet set (e.g. when called before _noise_rows
+    for the skip-build check), falls back to querying the active artifact from DB
+    when engine is provided.
+    No raw file I/O in artifact mode.
 
     In legacy mode: hashes file inventory + study area + loader config.
     Used as a DB-level clone key so unchanged noise inputs skip re-processing.
     """
     if NOISE_MODE == "artifact":
-        return _CURRENT_ARTIFACT_HASH
+        if _CURRENT_ARTIFACT_HASH:
+            return _CURRENT_ARTIFACT_HASH
+        if engine is not None:
+            from noise_artifacts.manifest import get_active_artifact
+            artifact = get_active_artifact(engine, "resolved")
+            if artifact is not None:
+                return artifact.artifact_hash
+        return None
 
     # Legacy path — compute from raw file inventory
     if _STATE.study_area_wgs84 is None:

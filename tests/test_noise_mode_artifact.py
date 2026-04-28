@@ -139,6 +139,51 @@ class ArtifactSentinelTests(TestCase):
 
         self.assertEqual(result, "res-hash-abc")
 
+    def test_noise_processing_hash_reads_active_artifact_from_engine_before_noise_rows(self) -> None:
+        """FIX C: _noise_processing_hash(engine) must return active artifact hash without _noise_rows running first."""
+        from precompute._rows import _noise_processing_hash
+        import precompute._rows as _rows_mod
+
+        fake_manifest = _make_fake_manifest("pre-noise-rows-hash")
+        engine = MagicMock()
+
+        # Reset _CURRENT_ARTIFACT_HASH to None to simulate pre-_noise_rows state
+        original = _rows_mod._CURRENT_ARTIFACT_HASH
+        _rows_mod._CURRENT_ARTIFACT_HASH = None
+        try:
+            with patch("precompute._rows.NOISE_MODE", "artifact"):
+                with patch(
+                    "noise_artifacts.manifest.get_active_artifact",
+                    return_value=fake_manifest,
+                ) as mock_get:
+                    result = _noise_processing_hash(engine)
+
+            self.assertEqual(result, "pre-noise-rows-hash")
+            mock_get.assert_called_once_with(engine, "resolved")
+        finally:
+            _rows_mod._CURRENT_ARTIFACT_HASH = original
+
+    def test_noise_processing_hash_returns_none_in_artifact_mode_without_engine_or_prior_run(self) -> None:
+        """FIX C: if no engine and _CURRENT_ARTIFACT_HASH not set, return None gracefully."""
+        from precompute._rows import _noise_processing_hash
+        import precompute._rows as _rows_mod
+
+        original = _rows_mod._CURRENT_ARTIFACT_HASH
+        _rows_mod._CURRENT_ARTIFACT_HASH = None
+        try:
+            with patch("precompute._rows.NOISE_MODE", "artifact"):
+                result = _noise_processing_hash()  # no engine
+            self.assertIsNone(result)
+        finally:
+            _rows_mod._CURRENT_ARTIFACT_HASH = original
+
+    def test_noise_rows_logs_artifact_mode_entry(self) -> None:
+        """FIX D: _noise_rows must log that it is entering artifact mode."""
+        import inspect
+        from precompute._rows import _noise_rows
+        src = inspect.getsource(_noise_rows)
+        self.assertIn("NOISE_MODE=artifact", src)
+
     def test_dispatch_background_is_noop_in_artifact_mode(self) -> None:
         import threading
         from precompute._rows import _dispatch_noise_in_background

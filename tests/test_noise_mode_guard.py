@@ -226,3 +226,40 @@ class NoiseModeArtifactGuardTests(TestCase):
         kwargs = mock_copy.call_args.kwargs
         self.assertEqual(kwargs["noise_resolved_hash"], "res-guard-hash")
         self.assertEqual(kwargs["build_key"], "bk")
+
+    def test_artifact_mode_raises_if_publish_gets_non_sentinel(self) -> None:
+        """FIX B: if NOISE_MODE=artifact but noise_rows is not a sentinel, raise RuntimeError."""
+        from db_postgis import writes as _writes
+
+        conn = MagicMock()
+        with patch("config.NOISE_MODE", "artifact"):
+            with self.assertRaises(RuntimeError) as ctx:
+                _writes._publish_noise_polygons(
+                    conn,
+                    noise_rows=iter([]),  # not a sentinel
+                    build_key="bk",
+                    config_hash="ch",
+                    import_fingerprint="if",
+                    render_hash="rh",
+                    created_at=datetime.now(timezone.utc),
+                    study_area_wgs84=None,
+                    summary_json={},
+                )
+        self.assertIn("BUG", str(ctx.exception))
+        self.assertIn("NOISE_MODE=artifact", str(ctx.exception))
+
+    def test_noise_mode_printed_in_precompute_log(self) -> None:
+        """FIX A: run_precompute_impl must print [config] NOISE_MODE=... at startup."""
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("[config] NOISE_MODE=", src)
+        self.assertIn("NOISE_MODE", src)
+
+    def test_artifact_preflight_raises_when_no_active_artifact(self) -> None:
+        """FIX E: precompute must fail early if NOISE_MODE=artifact but no active artifact."""
+        import inspect
+        from precompute import workflow
+        src = inspect.getsource(workflow.run_precompute_impl)
+        self.assertIn("active complete resolved noise artifact", src)
+        self.assertIn("python -m noise_artifacts", src)

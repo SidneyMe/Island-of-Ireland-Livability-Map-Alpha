@@ -55,6 +55,16 @@ def _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path) -> bool:
     return bake_pmtiles is not None and pmtiles_output_path is not None
 
 
+def _resolve_noise_processing_hash(noise_processing_hash, engine):
+    """Call noise_processing_hash with engine if supported, else without."""
+    if not callable(noise_processing_hash):
+        return noise_processing_hash
+    try:
+        return noise_processing_hash(engine)
+    except TypeError:
+        return noise_processing_hash()
+
+
 def _run_pmtiles_bake(
     *,
     bake_pmtiles,
@@ -189,6 +199,8 @@ def run_precompute_impl(
 ) -> str:
     total_started_at = time.perf_counter()
     print(f"=== Livability Score Map Precompute ({build_profile}) ===\n")
+    import config as _config
+    print(f"[config] NOISE_MODE={_config.NOISE_MODE}", flush=True)
 
     engine, source_state, hashes = _bootstrap_workflow_context(
         build_engine=build_engine,
@@ -248,6 +260,18 @@ def run_precompute_impl(
         hashes = get_hashes()
         _print_build_context(source_state, hashes)
 
+    # Artifact mode preflight: verify active resolved artifact exists before any skip logic.
+    if _config.NOISE_MODE == "artifact":
+        from noise_artifacts.manifest import get_active_artifact as _get_active_artifact
+        _active_artifact = _get_active_artifact(engine, "resolved")
+        if _active_artifact is None:
+            raise RuntimeError(
+                "NOISE_MODE=artifact but no active complete resolved noise artifact found. "
+                "Run first: python -m noise_artifacts --force\n"
+                "Then retry: NOISE_MODE=artifact python main.py --precompute --force-precompute"
+            )
+        print(f"[noise] active resolved artifact: {_active_artifact.artifact_hash}", flush=True)
+
     print("Cache:")
     print_cache_status()
 
@@ -259,11 +283,8 @@ def run_precompute_impl(
     if has_complete_build(engine, hashes.build_key) and not force_precompute:
         # Before skipping, verify the stored noise_processing_hash matches the current one.
         # If the active artifact changed since the last build, we must rebuild.
-        _current_noise_hash = (
-            noise_processing_hash()
-            if callable(noise_processing_hash)
-            else noise_processing_hash
-        )
+        # Use engine-aware helper so artifact hash can be read from DB before _noise_rows() runs.
+        _current_noise_hash = _resolve_noise_processing_hash(noise_processing_hash, engine)
         _noise_hash_matches = True
         if _current_noise_hash is not None:
             try:
@@ -396,11 +417,7 @@ def run_precompute_impl(
         force_log=True,
     )
     publish_write_started_at = time.perf_counter()
-    resolved_noise_hash = (
-        noise_processing_hash()
-        if callable(noise_processing_hash)
-        else noise_processing_hash
-    )
+    resolved_noise_hash = _resolve_noise_processing_hash(noise_processing_hash, engine)
     from precompute._rows import _ArtifactNoiseReference
     resolved_artifact_hash = (
         noise_row_payload.noise_resolved_hash

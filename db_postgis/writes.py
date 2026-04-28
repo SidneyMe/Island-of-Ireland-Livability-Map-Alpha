@@ -1370,6 +1370,17 @@ def _publish_noise_polygons(
             progress_cb("detail", detail=f"copied {n:,} noise polygons from artifact", force_log=True)
         return
 
+    from config import NOISE_MODE as _NOISE_MODE
+    if _NOISE_MODE == "artifact":
+        raise RuntimeError(
+            "BUG: NOISE_MODE=artifact but _publish_noise_polygons received "
+            f"{type(noise_rows).__name__!r}, not _ArtifactNoiseReference. "
+            "Artifact mode must direct-copy from noise_resolved_display and must "
+            "never stage raw noise candidate rows. "
+            "Ensure NOISE_MODE=artifact is set before Python starts (not after import). "
+            "Check: python -c \"import config; print(config.NOISE_MODE)\""
+        )
+
     cloned = _clone_noise_polygons_from_prior_build(
         connection,
         new_build_key=build_key,
