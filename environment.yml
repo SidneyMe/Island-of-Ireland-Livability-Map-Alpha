@@ -1,0 +1,27 @@
+name: livability-gdal
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - gdal
+  - libgdal-pg
+  - proj
+  - geos
+  - libpq
+  - postgresql
+  - shapely
+  - pyproj
+  - geopandas
+  - pyogrio
+  - numpy
+  - scikit-learn
+  - python-igraph
+  - sqlalchemy
+  - alembic
+  - geoalchemy2
+  - psycopg
+  - python-dotenv
+  - pip:
+      - pmtiles
+      - mapbox-vector-tile

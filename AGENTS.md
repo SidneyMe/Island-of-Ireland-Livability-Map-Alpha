@@ -27,3 +27,12 @@ Do not open these unless directly required by the task:
 - Preserve public/runtime behaviour unless the task explicitly asks for a behaviour change.
 - Do not reformat unrelated files.
 - Do not add dependencies.
+
+## Windows GDAL/Noise execution
+- For Windows GDAL/noise work, run through:
+  - `scripts\win\check_geo_env.cmd`
+  - `scripts\win\precompute_noise_dev.cmd`
+  - `scripts\win\test_noise.cmd`
+- Do not run raw `python main.py ...` for noise/GDAL tasks on Windows.
+- Do not rely on random shell env state; use the launcher wrappers.
+- Do not commit Miniforge installs, conda env directories, `.venv`, `.env`, local dataset zips, `.livability_cache`, generated PMTiles, or generated local DB/cache files.

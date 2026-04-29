@@ -26,6 +26,9 @@ log = logging.getLogger(__name__)
 _GDAL_CACHE_ENV = "NOISE_GDAL_CACHE_DIR"
 _DEFAULT_GDAL_CACHE_DIR = Path(".livability_cache") / "noise_gdal"
 _OGR2OGR_TIMEOUT_ENV = "NOISE_OGR2OGR_TIMEOUT_SECONDS"
+_DEFAULT_OGR2OGR_TIMEOUT_SECONDS = 300
+_SMALL_SOURCE_OGR2OGR_TIMEOUT_SECONDS = 120
+_STALE_IMPORT_BACKEND_MIN_AGE_SECONDS = 300
 _OGR2OGR_GDB_CHUNK_SIZE_ENV = "NOISE_OGR2OGR_GDB_CHUNK_SIZE"
 _DEFAULT_OGR2OGR_GDB_CHUNK_SIZE = 25
 _OGR2OGR_FID_START_ENV = "NOISE_OGR2OGR_FID_START"
@@ -47,6 +50,8 @@ _SQL_LOCK_TIMEOUT_SECONDS_ENV = "NOISE_SQL_LOCK_TIMEOUT_SECONDS"
 _DEFAULT_ROAD_NORMALIZE_BATCH_SIZE = 5000
 _DEFAULT_SQL_STATEMENT_TIMEOUT_SECONDS = 900
 _DEFAULT_SQL_LOCK_TIMEOUT_SECONDS = 30
+_TERMINATE_STALE_IMPORT_BACKENDS_ENV = "NOISE_TERMINATE_STALE_IMPORT_BACKENDS"
+_TERMINATE_STALE_STAGE_LOCKS_ENV = "NOISE_TERMINATE_STALE_STAGE_LOCKS"
 _ROAD_GDB_CANONICAL_VERSION = "road-gdb-canonical-v1"
 _ACTIVE_OGR_PROCS_LOCK = threading.Lock()
 _ACTIVE_OGR_PROCS: dict[int, tuple[subprocess.Popen, str]] = {}
@@ -128,15 +133,15 @@ def _env_int(name: str, default: int) -> int:
     return value
 
 
-def _ogr2ogr_timeout_seconds(*, road_gdb_chunk: bool = False) -> float | None:
+def _ogr2ogr_timeout_seconds(*, default: int = _DEFAULT_OGR2OGR_TIMEOUT_SECONDS, road_gdb_chunk: bool = False) -> float:
     raw = (os.getenv(_OGR2OGR_TIMEOUT_ENV) or "").strip()
     if raw:
         value = _env_int(_OGR2OGR_TIMEOUT_ENV, 0)
         if value <= 0:
-            return None
+            raise NoiseIngestError(f"{_OGR2OGR_TIMEOUT_ENV} must be > 0; got {value}")
         return float(value)
     if not road_gdb_chunk:
-        return None
+        return float(default)
     return float(
         _WINDOWS_ROAD_GDB_TIMEOUT_SECONDS
         if os.name == "nt"
@@ -189,6 +194,14 @@ def _min_free_disk_gb() -> float:
 
 def _keep_failed_stage_tables() -> bool:
     return (os.getenv(_KEEP_FAILED_STAGE_TABLES_ENV) or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _terminate_stale_import_backends_enabled() -> bool:
+    return (os.getenv(_TERMINATE_STALE_IMPORT_BACKENDS_ENV) or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _terminate_stale_stage_locks_enabled() -> bool:
+    return (os.getenv(_TERMINATE_STALE_STAGE_LOCKS_ENV) or "").strip().lower() in {"1", "true", "yes"}
 
 
 def _road_gdb_canonical_cache_enabled() -> bool:
@@ -282,6 +295,34 @@ def _format_elapsed(seconds: float) -> str:
     minutes = (total % 3600) // 60
     secs = total % 60
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _ogr_source_feature_count(source_path: Path, layer_name: str | None) -> int | None:
+    try:
+        import pyogrio
+    except ImportError:
+        return None
+    try:
+        info = pyogrio.read_info(str(source_path), layer=layer_name, force_feature_count=True)
+    except TypeError:
+        info = pyogrio.read_info(str(source_path), layer=layer_name)
+    except Exception:
+        return None
+    if not isinstance(info, dict):
+        return None
+    try:
+        return int((info.get("features", 0) or 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ogr2ogr_timeout_for_source(*, source_path: Path, layer_name: str | None) -> float:
+    if source_path.suffix.lower() != ".shp":
+        return _ogr2ogr_timeout_seconds()
+    feature_count = _ogr_source_feature_count(source_path, layer_name)
+    if feature_count is not None and feature_count < 1000:
+        return min(float(_SMALL_SOURCE_OGR2OGR_TIMEOUT_SECONDS), _ogr2ogr_timeout_seconds())
+    return _ogr2ogr_timeout_seconds()
 
 
 def ogr2ogr_available() -> bool:
@@ -861,13 +902,15 @@ def _run_ogr2ogr_command(
         f"starting ogr2ogr import: source={source_name} target={target_label} context={context_label} cmd={safe_cmd}",
     )
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
+    popen_kwargs: dict[str, Any] = {
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "bufsize": 1,
+    }
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+    proc = subprocess.Popen(cmd, **popen_kwargs)
     with _ACTIVE_OGR_PROCS_LOCK:
         _ACTIVE_OGR_PROCS[id(proc)] = (proc, context_label)
     if proc.stdout is None:
@@ -890,7 +933,13 @@ def _run_ogr2ogr_command(
     start = time.monotonic()
     last_line_log = start
     last_heartbeat = start
+    last_output_at = start
     lines: list[str] = []
+    effective_timeout = (
+        float(timeout_seconds)
+        if timeout_seconds is not None and float(timeout_seconds) > 0.0
+        else _ogr2ogr_timeout_seconds()
+    )
 
     try:
         while True:
@@ -906,39 +955,38 @@ def _run_ogr2ogr_command(
                 stripped = line.strip()
                 if stripped:
                     lines.append(stripped)
+                    last_output_at = now
                     if "ERROR" in stripped.upper() or (now - last_line_log) >= 15.0:
                         _progress(progress_cb, f"ogr2ogr {target_label}: {stripped}")
                         last_line_log = now
 
             if (now - last_heartbeat) >= 30.0 and proc.poll() is None:
+                last_output_age = max(now - last_output_at, 0.0)
+                pid = getattr(proc, "pid", "unknown")
                 _progress(
                     progress_cb,
-                    f"ogr2ogr still running: source={source_name} target={target_label} elapsed={_format_elapsed(elapsed)}",
+                    "ogr2ogr still running: "
+                    f"pid={pid} source={source_name} target={target_label} "
+                    f"elapsed={_format_elapsed(elapsed)} timeout={_format_elapsed(effective_timeout)} "
+                    f"last_output_age={int(last_output_age)}s context={context_label}",
                 )
                 last_heartbeat = now
 
-            if timeout_seconds is not None and elapsed > timeout_seconds and proc.poll() is None:
-                proc.kill()
-                proc.wait()
+            if elapsed > effective_timeout and proc.poll() is None:
+                _terminate_ogr_process(proc, context_label=context_label, progress_cb=progress_cb)
                 _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
                 raise NoiseIngestError(
                     "ogr2ogr import timed out "
                     f"for source={source_name} target={target_label} context={context_label} "
-                    f"after {_format_elapsed(elapsed)}; cmd={safe_cmd}"
+                    f"pid={getattr(proc, 'pid', 'unknown')} "
+                    f"after {_format_elapsed(elapsed)} timeout={_format_elapsed(effective_timeout)}; cmd={safe_cmd}"
                 )
 
             if proc.poll() is not None and output_queue.empty():
                 break
     except BaseException:
         if proc.poll() is None:
-            _progress(progress_cb, f"terminating ogr2ogr after interrupt/error: target={target_label}")
-            proc.terminate()
-            try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                _progress(progress_cb, f"killing ogr2ogr after terminate timeout: target={target_label}")
-                proc.kill()
-                proc.wait()
+            _terminate_ogr_process(proc, context_label=context_label, progress_cb=progress_cb)
         raise
     finally:
         with _ACTIVE_OGR_PROCS_LOCK:
@@ -985,6 +1033,70 @@ def _run_ogr2ogr_import(
         timeout_seconds=timeout_seconds,
         operation_context=f"{context_label} layer={layer_name or '(default)'} where={where_clause or '(none)'}",
     )
+
+
+def _source_is_small_shapefile(*, source_path: Path, layer_name: str | None) -> bool:
+    if source_path.suffix.lower() != ".shp":
+        return False
+    feature_count = _ogr_source_feature_count(source_path, layer_name)
+    if feature_count is None:
+        return False
+    return feature_count < 1000
+
+
+def _run_small_shapefile_fallback_import(
+    *,
+    engine: Engine,
+    source_path: Path,
+    stage_table: str,
+    selected_fields: list[str] | None,
+    progress_cb=None,
+) -> None:
+    with tempfile.TemporaryDirectory(prefix="noise_ogr2ogr_fallback_") as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        gpkg_path = tmp_path / f"{source_path.stem}_fallback.gpkg"
+        gpkg_layer = "noise_raw_fallback"
+        cmd = [
+            "ogr2ogr",
+            "-f",
+            "GPKG",
+            str(gpkg_path),
+            str(source_path),
+            "-nln",
+            gpkg_layer,
+            "-overwrite",
+            "-t_srs",
+            "EPSG:2157",
+            "-nlt",
+            "PROMOTE_TO_MULTI",
+            "-progress",
+        ]
+        if selected_fields:
+            cmd.extend(["-select", ",".join(selected_fields)])
+        _progress(
+            progress_cb,
+            "ogr2ogr fallback: converting small shapefile to local gpkg "
+            f"source={source_path.name} gpkg={gpkg_path.name}",
+        )
+        _run_ogr2ogr_command(
+            cmd=cmd,
+            source_name=source_path.name,
+            target_label=str(gpkg_path),
+            progress_cb=progress_cb,
+            timeout_seconds=_ogr2ogr_timeout_seconds(default=_DEFAULT_OGR2OGR_TIMEOUT_SECONDS),
+            operation_context="small-shapefile-fallback-extract",
+        )
+        _progress(progress_cb, "ogr2ogr fallback: importing local gpkg to PostgreSQL stage")
+        _run_ogr2ogr_import(
+            engine=engine,
+            source_path=gpkg_path,
+            stage_table=stage_table,
+            layer_name=gpkg_layer,
+            selected_fields=None,
+            progress_cb=progress_cb,
+            timeout_seconds=_ogr2ogr_timeout_seconds(default=_DEFAULT_OGR2OGR_TIMEOUT_SECONDS),
+            operation_context="small-shapefile-fallback-gpkg-to-postgres",
+        )
 
 
 def _run_road_gdb_canonical_extraction(
@@ -1493,7 +1605,6 @@ def _discover_road_gdb_chunks(source_path: Path, layer_name: str) -> tuple[str, 
         raise NoiseIngestError(
             "ROI Round 4 road chunked import requires pyogrio for feature discovery"
         ) from exc
-
     info_kwargs: dict[str, Any] = {"layer": layer_name}
     try:
         info_kwargs["force_feature_count"] = True
@@ -1515,6 +1626,48 @@ def _discover_road_gdb_chunks(source_path: Path, layer_name: str) -> tuple[str, 
         chunk_size=chunk_size,
     )
     return "fid", ranges, feature_count
+
+
+def _kill_process_tree_windows(proc, *, context_label: str, progress_cb=None) -> None:
+    if os.name != "nt":
+        return
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        _progress(progress_cb, f"taskkill process tree issued: pid={pid} context={context_label}")
+    except Exception:
+        return
+
+
+def _terminate_ogr_process(proc, *, context_label: str, progress_cb=None) -> None:
+    if proc.poll() is not None:
+        return
+    _progress(progress_cb, f"terminating ogr2ogr after interrupt/error: context={context_label}")
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        proc.wait(timeout=5.0)
+    except Exception:
+        _progress(progress_cb, f"killing ogr2ogr after terminate timeout: context={context_label}")
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        try:
+            proc.wait(timeout=5.0)
+        except Exception:
+            pass
+    if proc.poll() is None:
+        _kill_process_tree_windows(proc, context_label=context_label, progress_cb=progress_cb)
 
 
 def _road_chunk_stage_table_name(stage_table: str, idx: int) -> str:
@@ -1607,14 +1760,8 @@ def _terminate_active_ogr2ogr_processes(progress_cb=None) -> int:
         if proc.poll() is not None:
             continue
         terminated += 1
-        _progress(progress_cb, f"terminating active ogr2ogr process: context={context_label}")
-        proc.terminate()
-        try:
-            proc.wait(timeout=5.0)
-        except subprocess.TimeoutExpired:
-            _progress(progress_cb, f"killing active ogr2ogr process after terminate timeout: context={context_label}")
-            proc.kill()
-            proc.wait()
+        _progress(progress_cb, f"terminating active ogr2ogr process: pid={getattr(proc, 'pid', 'unknown')} context={context_label}")
+        _terminate_ogr_process(proc, context_label=context_label, progress_cb=progress_cb)
     return terminated
 
 
@@ -1639,6 +1786,140 @@ def _cleanup_stale_road_stage_tables(conn, *, stage_table: str, progress_cb=None
         f"Road GDB stale cleanup: dropped {dropped} stale chunk/stage tables for prefix {stage_table}",
     )
     return dropped
+
+
+def _cleanup_stale_noise_import_backends(conn, progress_cb=None) -> int:
+    try:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    pid,
+                    state,
+                    wait_event_type,
+                    wait_event,
+                    EXTRACT(EPOCH FROM (now() - COALESCE(query_start, xact_start, backend_start)))::bigint AS age_seconds,
+                    LEFT(COALESCE(query, ''), 220) AS query
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND pid <> pg_backend_pid()
+                  AND (
+                        query ILIKE '%_noise_raw_%'
+                     OR query ILIKE '%COPY%'
+                     OR query ILIKE '%noise_normalized%'
+                     OR query ILIKE '%noise_artifact%'
+                  )
+                ORDER BY age_seconds DESC NULLS LAST
+                """
+            )
+        ).fetchall()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _progress(progress_cb, f"stale backend diagnostic skipped: {exc}")
+        return 0
+    if not rows:
+        return 0
+
+    _progress(progress_cb, f"found {len(rows)} potential stale noise import backend(s)")
+    terminated = 0
+    allow_terminate = _terminate_stale_import_backends_enabled()
+    for row in rows:
+        pid = int(row[0]) if row and row[0] is not None else -1
+        state = row[1] if len(row) > 1 else None
+        wait_event_type = row[2] if len(row) > 2 else None
+        wait_event = row[3] if len(row) > 3 else None
+        age_seconds = int(row[4]) if len(row) > 4 and row[4] is not None else 0
+        query = str(row[5]) if len(row) > 5 and row[5] is not None else ""
+        _progress(
+            progress_cb,
+            "stale backend candidate: "
+            f"pid={pid} state={state} wait={wait_event_type}:{wait_event} age={age_seconds}s query={query}",
+        )
+        if allow_terminate and age_seconds >= _STALE_IMPORT_BACKEND_MIN_AGE_SECONDS and pid > 0:
+            try:
+                conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+                terminated += 1
+                _progress(progress_cb, f"terminated stale backend pid={pid} age={age_seconds}s")
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                _progress(progress_cb, f"failed to terminate stale backend pid={pid}: {exc}")
+    return terminated
+
+
+def _diagnose_stage_table_locks(conn, *, stage_table: str, progress_cb=None) -> int:
+    try:
+        lock_rows = conn.execute(
+            text(
+                """
+                WITH target AS (
+                    SELECT to_regclass(current_schema() || '.' || CAST(:table_name AS text)) AS reg
+                )
+                SELECT
+                    a.pid,
+                    a.state,
+                    a.wait_event_type,
+                    a.wait_event,
+                    EXTRACT(EPOCH FROM (now() - COALESCE(a.query_start, a.xact_start, a.backend_start)))::bigint AS age_seconds,
+                    LEFT(COALESCE(a.query, ''), 220) AS query
+                FROM target t
+                JOIN pg_locks l ON l.relation = t.reg
+                JOIN pg_stat_activity a ON a.pid = l.pid
+                WHERE t.reg IS NOT NULL
+                  AND a.pid <> pg_backend_pid()
+                ORDER BY age_seconds DESC NULLS LAST
+                """
+            ),
+            {"table_name": stage_table},
+        ).fetchall()
+    except Exception as exc:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        _progress(progress_cb, f"stage lock diagnostic skipped for {stage_table}: {exc}")
+        return 0
+    if not lock_rows:
+        return 0
+
+    _progress(progress_cb, f"stage table {stage_table} has active locks before import: count={len(lock_rows)}")
+    terminated = 0
+    allow_terminate = _terminate_stale_stage_locks_enabled()
+    for row in lock_rows:
+        pid = int(row[0]) if row and row[0] is not None else -1
+        state = row[1] if len(row) > 1 else None
+        wait_event_type = row[2] if len(row) > 2 else None
+        wait_event = row[3] if len(row) > 3 else None
+        age_seconds = int(row[4]) if len(row) > 4 and row[4] is not None else 0
+        query = str(row[5]) if len(row) > 5 and row[5] is not None else ""
+        _progress(
+            progress_cb,
+            "stage lock: "
+            f"pid={pid} state={state} wait={wait_event_type}:{wait_event} age={age_seconds}s query={query}",
+        )
+        if allow_terminate and age_seconds >= _STALE_IMPORT_BACKEND_MIN_AGE_SECONDS and pid > 0:
+            try:
+                conn.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": pid})
+                terminated += 1
+                _progress(progress_cb, f"terminated stage lock backend pid={pid}")
+            except Exception as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                _progress(progress_cb, f"failed to terminate stage lock backend pid={pid}: {exc}")
+    return terminated
+
+
+def _prepare_stage_table_for_external_import(conn, *, stage_table: str, progress_cb=None) -> None:
+    _diagnose_stage_table_locks(conn, stage_table=stage_table, progress_cb=progress_cb)
+    conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+    conn.commit()
 
 
 def _cleanup_road_chunk_tables_after_failure(
@@ -2076,9 +2357,8 @@ def ingest_noise_normalized_ogr2ogr(
     raw_extract_seconds = 0.0
     normalize_insert_seconds = 0.0
     total_inserted = 0
-    timeout_seconds = _ogr2ogr_timeout_seconds()
-
     with engine.connect() as conn:
+        _cleanup_stale_noise_import_backends(conn, progress_cb=progress_cb)
         for spec in ROI_SOURCE_SPECS:
             zip_path = Path(data_dir) / spec.zip_name
             extracted = extract_source_archive_if_needed(zip_path)
@@ -2112,7 +2392,7 @@ def ingest_noise_normalized_ogr2ogr(
                 )
 
             stage_table = f"_noise_raw_{_short_hash(f'roi:{spec.zip_name}:{spec.member}')}"
-            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+            _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
 
             import_started = time.perf_counter()
             used_chunking = False
@@ -2159,7 +2439,14 @@ def ingest_noise_normalized_ogr2ogr(
                             layer_name="road_raw",
                             selected_fields=None,
                             progress_cb=progress_cb,
-                            timeout_seconds=_ogr2ogr_timeout_seconds(road_gdb_chunk=True),
+                            timeout_seconds=_ogr2ogr_timeout_seconds(
+                                default=(
+                                    _WINDOWS_ROAD_GDB_TIMEOUT_SECONDS
+                                    if os.name == "nt"
+                                    else _DEFAULT_ROAD_GDB_TIMEOUT_SECONDS
+                                ),
+                                road_gdb_chunk=True,
+                            ),
                             operation_context="road-gpkg-to-postgres",
                         )
                         imported_rows = _imported_stage_row_count_or_fail(
@@ -2212,15 +2499,35 @@ def ingest_noise_normalized_ogr2ogr(
                         "WARNING: NOISE_ROAD_GDB_CANONICAL_CACHE=0; falling back to direct FileGDB import path",
                     )
             if not used_chunking:
-                _run_ogr2ogr_import(
-                    engine=engine,
-                    source_path=source_path,
-                    stage_table=stage_table,
-                    layer_name=layer_name,
-                    selected_fields=selected_fields,
-                    progress_cb=progress_cb,
-                    timeout_seconds=timeout_seconds,
-                )
+                timeout_for_source = _ogr2ogr_timeout_for_source(source_path=source_path, layer_name=layer_name)
+                try:
+                    _run_ogr2ogr_import(
+                        engine=engine,
+                        source_path=source_path,
+                        stage_table=stage_table,
+                        layer_name=layer_name,
+                        selected_fields=selected_fields,
+                        progress_cb=progress_cb,
+                        timeout_seconds=timeout_for_source,
+                    )
+                except NoiseIngestError as exc:
+                    if "timed out" not in str(exc).lower() or not _source_is_small_shapefile(
+                        source_path=source_path,
+                        layer_name=layer_name,
+                    ):
+                        raise
+                    _progress(
+                        progress_cb,
+                        "ogr2ogr direct import timed out for small shapefile; retrying via local gpkg fallback",
+                    )
+                    _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
+                    _run_small_shapefile_fallback_import(
+                        engine=engine,
+                        source_path=source_path,
+                        stage_table=stage_table,
+                        selected_fields=selected_fields,
+                        progress_cb=progress_cb,
+                    )
             import_elapsed = time.perf_counter() - import_started
             raw_extract_seconds += import_elapsed
             try:
@@ -2340,18 +2647,38 @@ def ingest_noise_normalized_ogr2ogr(
                     )
 
                 stage_table = f"_noise_raw_{_short_hash(f'ni:{zip_name}:{member}')}"
-                conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+                _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
 
                 started = time.perf_counter()
-                _run_ogr2ogr_import(
-                    engine=engine,
-                    source_path=source_path,
-                    stage_table=stage_table,
-                    layer_name=None,
-                    selected_fields=selected_fields,
-                    progress_cb=progress_cb,
-                    timeout_seconds=timeout_seconds,
-                )
+                timeout_for_source = _ogr2ogr_timeout_for_source(source_path=source_path, layer_name=None)
+                try:
+                    _run_ogr2ogr_import(
+                        engine=engine,
+                        source_path=source_path,
+                        stage_table=stage_table,
+                        layer_name=None,
+                        selected_fields=selected_fields,
+                        progress_cb=progress_cb,
+                        timeout_seconds=timeout_for_source,
+                    )
+                except NoiseIngestError as exc:
+                    if "timed out" not in str(exc).lower() or not _source_is_small_shapefile(
+                        source_path=source_path,
+                        layer_name=None,
+                    ):
+                        raise
+                    _progress(
+                        progress_cb,
+                        "ogr2ogr direct import timed out for small shapefile; retrying via local gpkg fallback",
+                    )
+                    _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
+                    _run_small_shapefile_fallback_import(
+                        engine=engine,
+                        source_path=source_path,
+                        stage_table=stage_table,
+                        selected_fields=selected_fields,
+                        progress_cb=progress_cb,
+                    )
                 import_elapsed = time.perf_counter() - started
                 raw_extract_seconds += import_elapsed
                 _imported_stage_row_count_or_fail(

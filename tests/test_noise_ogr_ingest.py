@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import queue
 import tempfile
 import zipfile
 from pathlib import Path
@@ -139,20 +140,33 @@ class _FakeIngestConn:
     def __init__(self):
         self.sql: list[str] = []
         self.pg_tables: list[str] = []
+        self.commit_count = 0
+        self.rollback_count = 0
+        self.lock_rows: list[tuple] = []
+        self.stale_backend_rows: list[tuple] = []
+        self.raise_on_lock_diag = False
 
     def execute(self, statement, params=None):  # noqa: ANN001
         sql = str(statement)
         self.sql.append(sql)
+        if self.raise_on_lock_diag and "JOIN pg_locks" in sql:
+            raise RuntimeError("lock diag failed")
         if "SHOW data_directory" in sql:
             return _FakeExecuteResult(rows=[("C:/tmp",)])
+        if "FROM pg_stat_activity" in sql and "_noise_raw_" in sql and "COPY" in sql:
+            return _FakeExecuteResult(rows=list(self.stale_backend_rows))
+        if "JOIN pg_locks" in sql and "to_regclass" in sql:
+            return _FakeExecuteResult(rows=list(self.lock_rows))
         if "FROM pg_tables" in sql:
             return _FakeExecuteResult(rows=[(name,) for name in self.pg_tables])
         return _FakeExecuteResult()
 
     def commit(self):
+        self.commit_count += 1
         return None
 
     def rollback(self):
+        self.rollback_count += 1
         return None
 
 
@@ -567,7 +581,163 @@ class NoiseOgrIngestTests(TestCase):
                         )
         self.assertTrue(proc.killed)
         mock_term.assert_called_once()
-        self.assertIn("timed out", str(ctx.exception))
+        message = str(ctx.exception)
+        self.assertIn("timed out", message)
+        self.assertIn("source=noise.shp", message)
+        self.assertIn("target=_noise_raw_stage", message)
+        self.assertIn("context=road-chunk idx=1/3 fid=0-24", message)
+        self.assertIn("cmd=ogr2ogr", message)
+
+    def test_ogr2ogr_heartbeat_includes_timeout_pid_and_last_output_age(self) -> None:
+        from noise_artifacts.ogr_ingest import _run_ogr2ogr_import
+
+        class _Proc:
+            def __init__(self):
+                self.stdout = _FakeStream([])
+                self.pid = 1234
+                self._poll_calls = 0
+
+            def poll(self):
+                self._poll_calls += 1
+                return None if self._poll_calls < 4 else 0
+
+            def wait(self, timeout=None):
+                del timeout
+                return 0
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        proc = _Proc()
+        progress_events: list[str] = []
+        monotonic_values = iter([0.0, 31.0, 31.1, 31.2, 31.3, 31.4, 31.5, 31.6])
+        with patch("noise_artifacts.ogr_ingest.subprocess.Popen", return_value=proc):
+            with patch("noise_artifacts.ogr_ingest.time.monotonic", side_effect=lambda: next(monotonic_values)):
+                with patch("noise_artifacts.ogr_ingest.queue.Queue.get", side_effect=queue.Empty):
+                    _run_ogr2ogr_import(
+                        engine=self._fake_engine(),
+                        source_path=Path("C:/tmp/noise.shp"),
+                        stage_table="_noise_raw_stage",
+                        layer_name=None,
+                        selected_fields=["DB_LOW"],
+                        progress_cb=lambda _kind, detail, force_log: progress_events.append(str(detail)),
+                        timeout_seconds=300.0,
+                    )
+        heartbeat = next(msg for msg in progress_events if "ogr2ogr still running:" in msg)
+        self.assertIn("pid=1234", heartbeat)
+        self.assertIn("timeout=", heartbeat)
+        self.assertIn("last_output_age=", heartbeat)
+
+    def test_default_ogr2ogr_timeout_is_non_none(self) -> None:
+        from noise_artifacts.ogr_ingest import _ogr2ogr_timeout_seconds
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_ogr2ogr_timeout_seconds(), 300.0)
+
+    def test_non_road_roi_import_passes_non_none_timeout(self) -> None:
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
+
+        roi_spec = SimpleNamespace(
+            zip_name="Rd4-2022.zip",
+            member="Noise_R4_Airport.shp",
+            file_format="shp",
+            source_type="airport",
+            round_number=4,
+        )
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            (tmp / roi_spec.member).parent.mkdir(parents=True, exist_ok=True)
+            (tmp / roi_spec.member).write_text("stub", encoding="utf-8")
+            engine = _FakeIngestEngine(_FakeIngestConn())
+            import_calls: list[dict[str, object]] = []
+            with patch("noise.loader.ROI_SOURCE_SPECS", [roi_spec]):
+                with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                    with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                        with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                            with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                                with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                                    with patch("noise_artifacts.ogr_ingest._run_ogr2ogr_import", side_effect=lambda **kwargs: import_calls.append(dict(kwargs))):
+                                        with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", return_value=43):
+                                            with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=2):
+                                                with patch("noise_artifacts.ogr_ingest._prepare_stage_table", return_value=None):
+                                                    ingest_noise_normalized_ogr2ogr(engine, "h1", tmp, None)
+        self.assertEqual(len(import_calls), 1)
+        self.assertIsNotNone(import_calls[0].get("timeout_seconds"))
+
+    def test_stage_drop_committed_before_external_ogr_import(self) -> None:
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
+
+        roi_spec = SimpleNamespace(
+            zip_name="Rd4-2022.zip",
+            member="Noise_R4_Airport.shp",
+            file_format="shp",
+            source_type="airport",
+            round_number=4,
+        )
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            (tmp / roi_spec.member).write_text("stub", encoding="utf-8")
+            conn = _FakeIngestConn()
+            engine = _FakeIngestEngine(conn)
+            commit_counts_at_import: list[int] = []
+
+            def _capture_import(**kwargs):  # noqa: ANN001
+                del kwargs
+                commit_counts_at_import.append(conn.commit_count)
+
+            with patch("noise.loader.ROI_SOURCE_SPECS", [roi_spec]):
+                with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                    with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                        with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                            with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                                with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                                    with patch("noise_artifacts.ogr_ingest._run_ogr2ogr_import", side_effect=_capture_import):
+                                        with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", return_value=43):
+                                            with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=2):
+                                                with patch("noise_artifacts.ogr_ingest._prepare_stage_table", return_value=None):
+                                                    ingest_noise_normalized_ogr2ogr(engine, "h1", tmp, None)
+            self.assertTrue(commit_counts_at_import)
+            self.assertGreaterEqual(commit_counts_at_import[0], 1)
+
+    def test_stale_lock_diagnostic_query_runs_before_import(self) -> None:
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
+
+        roi_spec = SimpleNamespace(
+            zip_name="Rd4-2022.zip",
+            member="Noise_R4_Airport.shp",
+            file_format="shp",
+            source_type="airport",
+            round_number=4,
+        )
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            (tmp / roi_spec.member).write_text("stub", encoding="utf-8")
+            conn = _FakeIngestConn()
+            engine = _FakeIngestEngine(conn)
+            with patch("noise.loader.ROI_SOURCE_SPECS", [roi_spec]):
+                with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                    with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                        with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                            with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                                with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]):
+                                    with patch("noise_artifacts.ogr_ingest._run_ogr2ogr_import"):
+                                        with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", return_value=43):
+                                            with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=2):
+                                                with patch("noise_artifacts.ogr_ingest._prepare_stage_table", return_value=None):
+                                                    ingest_noise_normalized_ogr2ogr(engine, "h1", tmp, None)
+            self.assertTrue(any("JOIN pg_locks" in sql for sql in conn.sql))
+
+    def test_stage_lock_diagnostic_failure_rolls_back_and_does_not_block_drop(self) -> None:
+        from noise_artifacts.ogr_ingest import _prepare_stage_table_for_external_import
+
+        conn = _FakeIngestConn()
+        conn.raise_on_lock_diag = True
+        _prepare_stage_table_for_external_import(conn, stage_table="_noise_raw_abc123")
+        self.assertGreaterEqual(conn.rollback_count, 1)
+        self.assertTrue(any('DROP TABLE IF EXISTS "_noise_raw_abc123"' in sql for sql in conn.sql))
 
     def test_road_gdb_path_does_not_call_chunk_import(self) -> None:
         from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr

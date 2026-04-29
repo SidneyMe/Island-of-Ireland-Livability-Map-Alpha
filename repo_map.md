@@ -513,8 +513,11 @@ tests/test_server_behavior.py
 | `NOISE_ROAD_GDB_CANONICAL_CACHE` | Enable ROI Round 4 Road canonical FileGDB -> local GPKG extraction cache path | `"1"` |
 | `NOISE_REBUILD_ROAD_GDB_CACHE` | Force rebuild of canonical Road GDB GPKG cache before PG import | `"0"` |
 | `NOISE_ROAD_NORMALIZE_BATCH_SIZE` | Batch size for Road raw-stage normalization by `source_fid` | `5000` |
+| `NOISE_OGR2OGR_TIMEOUT_SECONDS` | Hard timeout for every `ogr2ogr` subprocess import (non-road defaults to 300s, small SHP can fail fast) | `300` |
 | `NOISE_SQL_STATEMENT_TIMEOUT_SECONDS` | Per-normalize statement timeout for heavy SQL | `900` |
 | `NOISE_SQL_LOCK_TIMEOUT_SECONDS` | Per-normalize lock timeout for heavy SQL | `30` |
+| `NOISE_TERMINATE_STALE_IMPORT_BACKENDS` | Optional stale `pg_stat_activity` cleanup for prior crashed noise ingest sessions | `0` |
+| `NOISE_TERMINATE_STALE_STAGE_LOCKS` | Optional pre-import termination of stale table lock holders on `_noise_raw_*` stage targets | `0` |
 
 ### Important config files
 
@@ -523,7 +526,12 @@ tests/test_server_behavior.py
 | `config.py` | Canonical project config |
 | `alembic.ini` | Alembic runner config |
 | `osm2pgsql_livability.lua` | OSM tag filter / import rules |
+| `environment.yml` | Conda-forge Windows GDAL/PostGIS runtime spec (`livability-gdal`) |
 | `.env.example` | Local env template |
+| `scripts/win/geo_env.cmd` | Windows CMD launcher that activates Miniforge env and pins GDAL/PROJ/noise env vars |
+| `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
+| `scripts/win/precompute_noise_dev.cmd` | Windows noise artifact dev precompute wrapper via `geo_env.cmd` |
+| `scripts/win/test_noise.cmd` | Windows targeted noise test wrapper via `geo_env.cmd` |
 | `pytest.ini` | Pytest collection scope and generated-directory exclusions |
 | `frontend/package.json` | Frontend dependency and build scripts |
 
@@ -685,5 +693,7 @@ Areas still relatively fragile:
 - Purpose: high-throughput raw source import path using GDAL `ogr2ogr` direct to PostGIS staging tables.
 - Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `--config PG_USE_COPY YES`, `-preserve_fid`, `-lco PRECISION=NO`, and SQL normalization into `noise_normalized`.
 - ROI Round 4 Road FileGDB now uses a canonical three-phase path: extract once to local GPKG cache (`road_raw`), import GPKG to one PostgreSQL stage table with `PG_USE_COPY`, then normalize from that stage (optional `source_fid` batches) without direct FileGDB `fid` chunk imports.
+- All `ogr2ogr` subprocesses now run with enforced non-`None` timeouts, enhanced heartbeat diagnostics (`pid`, elapsed, timeout, last output age, context), and stronger interrupt/timeout cleanup paths that terminate active processes and process trees on Windows.
+- Stage imports now preflight stale backend and lock diagnostics, commit stage `DROP TABLE` before external `ogr2ogr` runs, and can optionally terminate stale blocking sessions via env toggles.
 - Command building now blocks `-append` + `-select` combinations with an internal ingest error guard.
 - NI normalization in this path still calls verified round-aware NI gridcode mapping logic; unknown class/threshold codes raise explicit errors with source context.
