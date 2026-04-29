@@ -39,6 +39,15 @@ _DEFAULT_ROAD_GDB_TIMEOUT_SECONDS = 1800
 _MIN_FREE_DISK_GB_ENV = "NOISE_MIN_FREE_DISK_GB"
 _DEFAULT_MIN_FREE_DISK_GB = 30.0
 _KEEP_FAILED_STAGE_TABLES_ENV = "NOISE_KEEP_FAILED_STAGE_TABLES"
+_ROAD_GDB_CANONICAL_CACHE_ENV = "NOISE_ROAD_GDB_CANONICAL_CACHE"
+_REBUILD_ROAD_GDB_CACHE_ENV = "NOISE_REBUILD_ROAD_GDB_CACHE"
+_ROAD_NORMALIZE_BATCH_SIZE_ENV = "NOISE_ROAD_NORMALIZE_BATCH_SIZE"
+_SQL_STATEMENT_TIMEOUT_SECONDS_ENV = "NOISE_SQL_STATEMENT_TIMEOUT_SECONDS"
+_SQL_LOCK_TIMEOUT_SECONDS_ENV = "NOISE_SQL_LOCK_TIMEOUT_SECONDS"
+_DEFAULT_ROAD_NORMALIZE_BATCH_SIZE = 5000
+_DEFAULT_SQL_STATEMENT_TIMEOUT_SECONDS = 900
+_DEFAULT_SQL_LOCK_TIMEOUT_SECONDS = 30
+_ROAD_GDB_CANONICAL_VERSION = "road-gdb-canonical-v1"
 _ACTIVE_OGR_PROCS_LOCK = threading.Lock()
 _ACTIVE_OGR_PROCS: dict[int, tuple[subprocess.Popen, str]] = {}
 _ROI_OGR_CANDIDATE_FIELDS = [
@@ -182,6 +191,38 @@ def _keep_failed_stage_tables() -> bool:
     return (os.getenv(_KEEP_FAILED_STAGE_TABLES_ENV) or "").strip().lower() in {"1", "true", "yes"}
 
 
+def _road_gdb_canonical_cache_enabled() -> bool:
+    raw = (os.getenv(_ROAD_GDB_CANONICAL_CACHE_ENV) or "").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes"}
+
+
+def _rebuild_road_gdb_cache() -> bool:
+    return (os.getenv(_REBUILD_ROAD_GDB_CACHE_ENV) or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _road_normalize_batch_size() -> int:
+    value = _env_int(_ROAD_NORMALIZE_BATCH_SIZE_ENV, _DEFAULT_ROAD_NORMALIZE_BATCH_SIZE)
+    if value <= 0:
+        raise NoiseIngestError(f"{_ROAD_NORMALIZE_BATCH_SIZE_ENV} must be > 0; got {value}")
+    return value
+
+
+def _sql_statement_timeout_seconds() -> int:
+    value = _env_int(_SQL_STATEMENT_TIMEOUT_SECONDS_ENV, _DEFAULT_SQL_STATEMENT_TIMEOUT_SECONDS)
+    if value <= 0:
+        raise NoiseIngestError(f"{_SQL_STATEMENT_TIMEOUT_SECONDS_ENV} must be > 0; got {value}")
+    return value
+
+
+def _sql_lock_timeout_seconds() -> int:
+    value = _env_int(_SQL_LOCK_TIMEOUT_SECONDS_ENV, _DEFAULT_SQL_LOCK_TIMEOUT_SECONDS)
+    if value <= 0:
+        raise NoiseIngestError(f"{_SQL_LOCK_TIMEOUT_SECONDS_ENV} must be > 0; got {value}")
+    return value
+
+
 def _free_disk_gb(path: Path) -> float:
     usage = shutil.disk_usage(path)
     return float(usage.free) / (1024.0 ** 3)
@@ -290,6 +331,112 @@ def extract_source_archive_if_needed(zip_path: Path) -> Path:
             shutil.rmtree(tmp_parent, ignore_errors=True)
 
     return target_dir
+
+
+def _road_gdb_canonical_cache_dir() -> Path:
+    path = _noise_gdal_cache_dir() / "canonical"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _road_gdb_canonical_cache_key(
+    *,
+    source_path: Path,
+    layer_name: str,
+    selected_fields: list[str],
+) -> str:
+    st = source_path.stat()
+    payload = "|".join(
+        [
+            _ROAD_GDB_CANONICAL_VERSION,
+            str(source_path.resolve()),
+            str(int(st.st_size)),
+            str(int(st.st_mtime_ns)),
+            layer_name,
+            ",".join(selected_fields),
+            "EPSG:2157",
+        ]
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()[:16]
+
+
+def _road_gdb_canonical_cache_path(
+    *,
+    source_path: Path,
+    layer_name: str,
+    selected_fields: list[str],
+) -> Path:
+    key = _road_gdb_canonical_cache_key(
+        source_path=source_path,
+        layer_name=layer_name,
+        selected_fields=selected_fields,
+    )
+    return _road_gdb_canonical_cache_dir() / f"roi_round4_road_{key}.gpkg"
+
+
+def _cache_dir_size_gb(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    total = 0
+    for file_path in path.rglob("*"):
+        if not file_path.is_file():
+            continue
+        try:
+            total += file_path.stat().st_size
+        except OSError:
+            continue
+    return float(total) / (1024.0 ** 3)
+
+
+def _build_ogr2ogr_gdb_to_gpkg_command(
+    *,
+    source_path: Path,
+    layer_name: str,
+    cache_gpkg_path: Path,
+    selected_fields: list[str],
+) -> list[str]:
+    cmd = [
+        "ogr2ogr",
+        "-f",
+        "GPKG",
+        str(cache_gpkg_path),
+        str(source_path),
+        layer_name,
+        "-nln",
+        "road_raw",
+        "-overwrite",
+        "-t_srs",
+        "EPSG:2157",
+        "-nlt",
+        "PROMOTE_TO_MULTI",
+        "-progress",
+    ]
+    if selected_fields:
+        cmd.extend(["-select", ",".join(selected_fields)])
+    return cmd
+
+
+def _road_gdb_canonical_cache_feature_count(path: Path) -> int:
+    try:
+        import pyogrio
+    except ImportError:
+        return 0
+    try:
+        info = pyogrio.read_info(str(path), layer="road_raw", force_feature_count=True)
+    except TypeError:
+        info = pyogrio.read_info(str(path), layer="road_raw")
+    except Exception:
+        return 0
+    return int(((info or {}).get("features", 0) if isinstance(info, dict) else 0) or 0)
+
+
+def _apply_sql_timeouts(conn) -> None:
+    statement_timeout_seconds = _sql_statement_timeout_seconds()
+    lock_timeout_seconds = _sql_lock_timeout_seconds()
+    # PostgreSQL does not accept bind params in SET LOCAL for these GUCs in this path.
+    # Values are strict positive ints from env parsing, so literal formatting is safe.
+    conn.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout_seconds}s'"))
+    conn.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout_seconds}s'"))
 
 
 def _canonical_field_name(name: str) -> str:
@@ -552,6 +699,7 @@ def _build_roi_normalize_insert_sql(
     db_value_expr: str,
     db_low_expr: str,
     db_high_expr: str,
+    extra_where_sql: str = "",
 ) -> str:
     return f"""
             INSERT INTO noise_normalized (
@@ -596,6 +744,7 @@ def _build_roi_normalize_insert_sql(
               AND NOT ST_IsEmpty(g.clean_geom)
               AND ST_Area(g.clean_geom) > 0
               AND mm.metric IS NOT NULL
+              {extra_where_sql}
             """
 
 
@@ -696,34 +845,20 @@ def build_ogr2ogr_command(
     return cmd
 
 
-def _run_ogr2ogr_import(
+def _run_ogr2ogr_command(
     *,
-    engine: Engine,
-    source_path: Path,
-    stage_table: str,
-    layer_name: str | None,
-    selected_fields: list[str] | None = None,
-    append: bool = False,
-    where_clause: str | None = None,
+    cmd: list[str],
+    source_name: str,
+    target_label: str,
     progress_cb=None,
     timeout_seconds: float | None = None,
     operation_context: str | None = None,
 ) -> None:
-    cmd = build_ogr2ogr_command(
-        engine=engine,
-        source_path=source_path,
-        stage_table=stage_table,
-        layer_name=layer_name,
-        selected_fields=selected_fields,
-        append=append,
-        where_clause=where_clause,
-        progress=True,
-    )
     safe_cmd = _redact_pg_password(cmd)
-    context_label = operation_context or f"stage={stage_table}"
+    context_label = operation_context or f"target={target_label}"
     _progress(
         progress_cb,
-        f"starting ogr2ogr import: stage={stage_table} source={source_path.name} append={append} context={context_label} cmd={safe_cmd}",
+        f"starting ogr2ogr import: source={source_name} target={target_label} context={context_label} cmd={safe_cmd}",
     )
 
     proc = subprocess.Popen(
@@ -739,7 +874,7 @@ def _run_ogr2ogr_import(
         proc.kill()
         with _ACTIVE_OGR_PROCS_LOCK:
             _ACTIVE_OGR_PROCS.pop(id(proc), None)
-        raise NoiseIngestError(f"ogr2ogr did not provide stdout pipe for stage={stage_table}")
+        raise NoiseIngestError(f"ogr2ogr did not provide stdout pipe for target={target_label}")
 
     output_queue: queue.Queue[str] = queue.Queue()
 
@@ -772,13 +907,13 @@ def _run_ogr2ogr_import(
                 if stripped:
                     lines.append(stripped)
                     if "ERROR" in stripped.upper() or (now - last_line_log) >= 15.0:
-                        _progress(progress_cb, f"ogr2ogr {stage_table}: {stripped}")
+                        _progress(progress_cb, f"ogr2ogr {target_label}: {stripped}")
                         last_line_log = now
 
             if (now - last_heartbeat) >= 30.0 and proc.poll() is None:
                 _progress(
                     progress_cb,
-                    f"ogr2ogr still running: source={source_path.name} stage={stage_table} elapsed={_format_elapsed(elapsed)}",
+                    f"ogr2ogr still running: source={source_name} target={target_label} elapsed={_format_elapsed(elapsed)}",
                 )
                 last_heartbeat = now
 
@@ -788,8 +923,7 @@ def _run_ogr2ogr_import(
                 _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
                 raise NoiseIngestError(
                     "ogr2ogr import timed out "
-                    f"for source={source_path} layer={layer_name or '(default)'} stage={stage_table} "
-                    f"context={context_label} where={where_clause or '(none)'} "
+                    f"for source={source_name} target={target_label} context={context_label} "
                     f"after {_format_elapsed(elapsed)}; cmd={safe_cmd}"
                 )
 
@@ -797,12 +931,12 @@ def _run_ogr2ogr_import(
                 break
     except BaseException:
         if proc.poll() is None:
-            _progress(progress_cb, f"terminating ogr2ogr after interrupt/error: stage={stage_table}")
+            _progress(progress_cb, f"terminating ogr2ogr after interrupt/error: target={target_label}")
             proc.terminate()
             try:
                 proc.wait(timeout=5.0)
             except subprocess.TimeoutExpired:
-                _progress(progress_cb, f"killing ogr2ogr after terminate timeout: stage={stage_table}")
+                _progress(progress_cb, f"killing ogr2ogr after terminate timeout: target={target_label}")
                 proc.kill()
                 proc.wait()
         raise
@@ -814,9 +948,113 @@ def _run_ogr2ogr_import(
     rc = proc.wait()
     if rc != 0:
         raise NoiseIngestError(
-            f"ogr2ogr import failed for {source_path} -> {stage_table}: returncode={rc}\n"
+            f"ogr2ogr import failed for source={source_name} target={target_label}: returncode={rc}\n"
             + "\n".join(lines[-50:])
         )
+
+
+def _run_ogr2ogr_import(
+    *,
+    engine: Engine,
+    source_path: Path,
+    stage_table: str,
+    layer_name: str | None,
+    selected_fields: list[str] | None = None,
+    append: bool = False,
+    where_clause: str | None = None,
+    progress_cb=None,
+    timeout_seconds: float | None = None,
+    operation_context: str | None = None,
+) -> None:
+    cmd = build_ogr2ogr_command(
+        engine=engine,
+        source_path=source_path,
+        stage_table=stage_table,
+        layer_name=layer_name,
+        selected_fields=selected_fields,
+        append=append,
+        where_clause=where_clause,
+        progress=True,
+    )
+    context_label = operation_context or f"stage={stage_table}"
+    _run_ogr2ogr_command(
+        cmd=cmd,
+        source_name=source_path.name,
+        target_label=stage_table,
+        progress_cb=progress_cb,
+        timeout_seconds=timeout_seconds,
+        operation_context=f"{context_label} layer={layer_name or '(default)'} where={where_clause or '(none)'}",
+    )
+
+
+def _run_road_gdb_canonical_extraction(
+    *,
+    source_path: Path,
+    layer_name: str,
+    selected_fields: list[str],
+    cache_gpkg_path: Path,
+    progress_cb=None,
+) -> None:
+    cache_gpkg_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = _build_ogr2ogr_gdb_to_gpkg_command(
+        source_path=source_path,
+        layer_name=layer_name,
+        cache_gpkg_path=cache_gpkg_path,
+        selected_fields=selected_fields,
+    )
+    _progress(
+        progress_cb,
+        "Road GDB extracting FileGDB -> GPKG... "
+        f"source={source_path} cache={cache_gpkg_path} selected_fields={','.join(selected_fields)}",
+    )
+    started = time.perf_counter()
+    try:
+        _run_ogr2ogr_command(
+            cmd=cmd,
+            source_name=source_path.name,
+            target_label=str(cache_gpkg_path),
+            progress_cb=progress_cb,
+            timeout_seconds=_ogr2ogr_timeout_seconds(road_gdb_chunk=True),
+            operation_context=f"road-gdb-canonical-extract layer={layer_name}",
+        )
+    except Exception:
+        try:
+            cache_gpkg_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    elapsed = time.perf_counter() - started
+    _progress(progress_cb, f"Road GDB extracted cache elapsed={elapsed:.1f}s path={cache_gpkg_path}")
+
+
+def _ensure_road_gdb_canonical_cache(
+    *,
+    source_path: Path,
+    layer_name: str,
+    selected_fields: list[str],
+    progress_cb=None,
+) -> Path:
+    cache_path = _road_gdb_canonical_cache_path(
+        source_path=source_path,
+        layer_name=layer_name,
+        selected_fields=selected_fields,
+    )
+    _progress(progress_cb, "Road GDB canonical cache lookup...")
+    if cache_path.exists() and not _rebuild_road_gdb_cache():
+        rows = _road_gdb_canonical_cache_feature_count(cache_path)
+        _progress(progress_cb, f"Road GDB canonical cache hit: {cache_path} rows={rows}")
+        return cache_path
+    _progress(progress_cb, f"Road GDB canonical cache miss: {cache_path}")
+    _run_road_gdb_canonical_extraction(
+        source_path=source_path,
+        layer_name=layer_name,
+        selected_fields=selected_fields,
+        cache_gpkg_path=cache_path,
+        progress_cb=progress_cb,
+    )
+    rows = _road_gdb_canonical_cache_feature_count(cache_path)
+    _progress(progress_cb, f"Road GDB extracted cache rows={rows}")
+    return cache_path
 
 
 def _prepare_stage_table(conn, stage_table: str) -> None:
@@ -833,6 +1071,9 @@ def _normalize_roi_stage(
     source_type: str,
     source_dataset: str,
     source_layer: str,
+    fid_min: int | None = None,
+    fid_max: int | None = None,
+    phase_name: str = "roi_normalize",
     progress_cb=None,
 ) -> int:
     from noise.loader import normalize_noise_band
@@ -945,6 +1186,10 @@ def _normalize_roi_stage(
         f"roi stage geometry stats ({source_layer}): total={total_rows}, raw_null={raw_null_rows}, raw_empty={raw_empty_rows}",
     )
 
+    _apply_sql_timeouts(conn)
+    extra_where_sql = ""
+    if fid_min is not None and fid_max is not None:
+        extra_where_sql = "AND s.source_fid >= :fid_min AND s.source_fid <= :fid_max"
     result = conn.execute(
         text(
             _build_roi_normalize_insert_sql(
@@ -956,6 +1201,7 @@ def _normalize_roi_stage(
                 db_value_expr=db_value_expr,
                 db_low_expr=db_low_expr,
                 db_high_expr=db_high_expr,
+                extra_where_sql=extra_where_sql,
             )
         ),
         {
@@ -965,6 +1211,8 @@ def _normalize_roi_stage(
             "default_report_period": f"Round {int(round_number)}",
             "source_dataset": source_dataset,
             "source_layer": source_layer,
+            "fid_min": fid_min,
+            "fid_max": fid_max,
             **source_ref_params,
         },
     )
@@ -1073,6 +1321,7 @@ def _normalize_ni_stage(
         f"ni stage geometry stats ({source_layer}): total={total_rows}, raw_null={raw_null_rows}, raw_empty={raw_empty_rows}",
     )
 
+    _apply_sql_timeouts(conn)
     result = conn.execute(
         text(
             _build_ni_normalize_insert_sql(
@@ -1103,6 +1352,93 @@ def _normalize_ni_stage(
         f"normalized_inserted={inserted}, skipped_after_geometry_cleaning={skipped_after_clean}",
     )
     return inserted
+
+
+def _normalize_roi_stage_batched(
+    conn,
+    *,
+    stage_table: str,
+    noise_source_hash: str,
+    round_number: int,
+    source_type: str,
+    source_dataset: str,
+    source_layer: str,
+    progress_cb=None,
+) -> int:
+    batch_size = _road_normalize_batch_size()
+    min_max = conn.execute(
+        text(
+            f"""
+            SELECT MIN(source_fid), MAX(source_fid)
+            FROM {_quote_ident(stage_table)}
+            WHERE source_fid IS NOT NULL
+            """
+        )
+    ).fetchone()
+    if not min_max or min_max[0] is None or min_max[1] is None:
+        _progress(progress_cb, "Road GDB normalization fallback: no source_fid ranges found")
+        return _normalize_roi_stage(
+            conn,
+            stage_table=stage_table,
+            noise_source_hash=noise_source_hash,
+            round_number=round_number,
+            source_type=source_type,
+            source_dataset=source_dataset,
+            source_layer=source_layer,
+            progress_cb=progress_cb,
+        )
+
+    min_fid = int(min_max[0])
+    max_fid = int(min_max[1])
+    total_span = max_fid - min_fid + 1
+    batch_count = (total_span + batch_size - 1) // batch_size
+    inserted_total = 0
+
+    for idx in range(batch_count):
+        fid_low = min_fid + idx * batch_size
+        fid_high = min(fid_low + batch_size - 1, max_fid)
+        started = time.perf_counter()
+        rows_input = conn.execute(
+            text(
+                f"""
+                SELECT COUNT(*)
+                FROM {_quote_ident(stage_table)}
+                WHERE source_fid >= :fid_low AND source_fid <= :fid_high
+                """
+            ),
+            {"fid_low": fid_low, "fid_high": fid_high},
+        ).scalar_one_or_none()
+        try:
+            inserted = _normalize_roi_stage(
+                conn,
+                stage_table=stage_table,
+                noise_source_hash=noise_source_hash,
+                round_number=round_number,
+                source_type=source_type,
+                source_dataset=source_dataset,
+                source_layer=source_layer,
+                fid_min=fid_low,
+                fid_max=fid_high,
+                phase_name="road_batch_normalize",
+                progress_cb=progress_cb,
+            )
+        except Exception as exc:
+            raise NoiseIngestError(
+                "Road GDB normalization failed: "
+                f"stage_table={stage_table} phase=road_batch_normalize "
+                f"operation=batch_insert source_layer={source_layer} "
+                f"fid_range={fid_low}-{fid_high}. Check pg_stat_activity for blockers/timeouts. "
+                f"error={exc}"
+            ) from exc
+        conn.commit()
+        inserted_total += inserted
+        elapsed = time.perf_counter() - started
+        _progress(
+            progress_cb,
+            f"Road normalize batch {idx + 1}/{batch_count} rows_input={int(rows_input or 0):,} "
+            f"inserted={inserted:,} elapsed={elapsed:.1f}s",
+        )
+    return inserted_total
 
 
 def _iter_ni_members(extracted_zip_dir: Path) -> list[str]:
@@ -1741,7 +2077,6 @@ def ingest_noise_normalized_ogr2ogr(
     normalize_insert_seconds = 0.0
     total_inserted = 0
     timeout_seconds = _ogr2ogr_timeout_seconds()
-    road_chunk_timeout_seconds = _ogr2ogr_timeout_seconds(road_gdb_chunk=True)
 
     with engine.connect() as conn:
         for spec in ROI_SOURCE_SPECS:
@@ -1786,73 +2121,60 @@ def ingest_noise_normalized_ogr2ogr(
                 file_format=spec.file_format,
                 round_number=spec.round_number,
             ):
-                id_column, chunk_ranges, feature_count = _discover_road_gdb_chunks(source_path, layer_name)
-                if chunk_ranges:
+                if _road_gdb_canonical_cache_enabled():
                     used_chunking = True
+                    configured_workers = _ogr2ogr_gdb_workers()
+                    if os.name == "nt" and configured_workers > 1:
+                        _progress(
+                            progress_cb,
+                            "WARNING: parallel Road GDB ogr2ogr workers on Windows are experimental and may "
+                            "hang/fail with GDAL/WinSock errors. Use NOISE_OGR2OGR_GDB_WORKERS=1 for stable ingest.",
+                        )
                     _assert_road_gdb_disk_preflight(conn, progress_cb=progress_cb)
+                    cache_root = _noise_gdal_cache_dir()
+                    _progress(
+                        progress_cb,
+                        f"Road GDB cache directory size={_cache_dir_size_gb(cache_root):.2f}GB path={cache_root}",
+                    )
+                    try:
+                        db_size = conn.execute(text("SELECT pg_database_size(current_database())")).scalar_one_or_none()
+                        if db_size is not None:
+                            _progress(progress_cb, f"Road GDB postgres database size={float(db_size) / (1024.0 ** 3):.2f}GB")
+                    except Exception:
+                        pass
+
                     _cleanup_stale_road_stage_tables(conn, stage_table=stage_table, progress_cb=progress_cb)
-                    configured_fid_start = _ogr2ogr_fid_start()
-                    chunk_size = _ogr2ogr_gdb_chunk_size()
-                    workers = _ogr2ogr_gdb_workers()
-                    if workers > 4:
-                        _progress(
-                            progress_cb,
-                            "warning: high Road GDB workers may increase PostgreSQL disk/WAL pressure",
-                        )
-                    active_fid_start = configured_fid_start
-                    imported_rows_total = 0
-                    inserted_rows_total = 0
-                    known_chunk_tables: set[str] = set()
-                    while True:
-                        current_ranges = (
-                            _fid_chunk_ranges(
-                                feature_count=feature_count,
-                                fid_start=active_fid_start,
-                                chunk_size=chunk_size,
-                            )
-                            if active_fid_start != configured_fid_start
-                            else chunk_ranges
-                        )
-                        total_chunks = len(current_ranges)
-                        if total_chunks <= 0:
-                            break
-                        worker_count = max(1, min(workers, total_chunks))
-                        _progress(
-                            progress_cb,
-                            "ogr2ogr Road GDB parallel chunking enabled: "
-                            f"workers={worker_count} chunks={total_chunks} chunk_size={chunk_size}",
-                        )
-                        _progress(
-                            progress_cb,
-                            f"Road GDB submitting all {total_chunks} chunks to worker pool workers={worker_count}",
-                        )
-                        if os.name == "nt" and worker_count > 1:
-                            _progress(
-                                progress_cb,
-                                "WARNING: parallel Road GDB ogr2ogr workers on Windows are experimental and may "
-                                "hang/fail with GDAL/WinSock errors. Use NOISE_OGR2OGR_GDB_WORKERS=1 for stable ingest.",
-                            )
-                        _progress(
-                            progress_cb,
-                            "Road GDB will normalize and drop each chunk table as it completes; no merged raw table will be created",
-                        )
-                        road_chunk_stage_tables = [
-                            _road_chunk_stage_table_name(stage_table, idx)
-                            for idx in range(1, total_chunks + 1)
-                        ]
-                        known_chunk_tables = set(road_chunk_stage_tables)
-                        norm_started = time.perf_counter()
-                        attempt_imported_rows, attempt_inserted_rows = _run_road_gdb_chunks_fail_fast(
-                            conn,
-                            engine=engine,
+                    try:
+                        canonical_cache = _ensure_road_gdb_canonical_cache(
                             source_path=source_path,
                             layer_name=layer_name,
                             selected_fields=selected_fields,
+                            progress_cb=progress_cb,
+                        )
+                        _progress(progress_cb, "Road GDB importing GPKG -> PostgreSQL stage...")
+                        _run_ogr2ogr_import(
+                            engine=engine,
+                            source_path=canonical_cache,
                             stage_table=stage_table,
-                            id_column=id_column,
-                            chunk_ranges=current_ranges,
-                            worker_count=worker_count,
-                            timeout_seconds=road_chunk_timeout_seconds,
+                            layer_name="road_raw",
+                            selected_fields=None,
+                            progress_cb=progress_cb,
+                            timeout_seconds=_ogr2ogr_timeout_seconds(road_gdb_chunk=True),
+                            operation_context="road-gpkg-to-postgres",
+                        )
+                        imported_rows = _imported_stage_row_count_or_fail(
+                            conn,
+                            stage_table=stage_table,
+                            source_label=f"ROI Road canonical layer {spec.member}",
+                            elapsed_seconds=time.perf_counter() - import_started,
+                            progress_cb=progress_cb,
+                        )
+                        _progress(progress_cb, f"Road GDB imported raw stage rows={imported_rows:,} elapsed={(time.perf_counter() - import_started):.1f}s")
+                        _progress(progress_cb, "Road GDB normalizing raw stage...")
+                        norm_started = time.perf_counter()
+                        inserted_rows = _normalize_roi_stage_batched(
+                            conn,
+                            stage_table=stage_table,
                             noise_source_hash=noise_source_hash,
                             round_number=spec.round_number,
                             source_type=spec.source_type,
@@ -1861,46 +2183,33 @@ def ingest_noise_normalized_ogr2ogr(
                             progress_cb=progress_cb,
                         )
                         normalize_insert_seconds += time.perf_counter() - norm_started
-
-                        if attempt_imported_rows > 0:
-                            imported_rows_total += attempt_imported_rows
-                            inserted_rows_total += attempt_inserted_rows
-                            break
-                        if active_fid_start == 0:
+                        total_inserted += inserted_rows
+                        _progress(progress_cb, f"Road GDB normalized inserted={inserted_rows:,} elapsed={(time.perf_counter() - norm_started):.1f}s")
+                        conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+                        _progress(progress_cb, f"Road GDB dropped raw stage {stage_table}")
+                        conn.commit()
+                    except BaseException:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        if _keep_failed_stage_tables():
                             _progress(
                                 progress_cb,
-                                "Road GDB fid_start=0 produced zero rows; retrying with fid_start=1",
+                                "Road GDB keeping failed chunk staging tables because NOISE_KEEP_FAILED_STAGE_TABLES=1",
                             )
-                            dropped = _drop_tables_best_effort(
-                                conn,
-                                sorted(known_chunk_tables),
-                                progress_cb=progress_cb,
-                            )
-                            if dropped > 0:
-                                known_chunk_tables.clear()
-                            conn.commit()
-                            active_fid_start = 1
-                            continue
-                        raise NoiseIngestError(
-                            f"Road GDB chunks imported zero rows for ROI layer {spec.member} "
-                            f"(fid_start={active_fid_start})"
-                        )
-                    if imported_rows_total <= 0:
-                        raise NoiseIngestError(
-                            f"Road GDB chunks imported zero rows for ROI layer {spec.member}"
-                        )
-                    _progress(
-                        progress_cb,
-                        f"Road GDB total imported rows={imported_rows_total:,} normalized rows={inserted_rows_total:,}",
-                    )
-                    total_inserted += inserted_rows_total
+                        else:
+                            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)} CASCADE"))
+                            try:
+                                conn.commit()
+                            except Exception:
+                                pass
+                        _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
+                        raise
                 else:
                     _progress(
                         progress_cb,
-                        (
-                            "WARNING: Road GDB chunk plan unavailable; falling back to one-shot import "
-                            f"for {source_path.name} layer={layer_name}. This may run for a long time."
-                        ),
+                        "WARNING: NOISE_ROAD_GDB_CANONICAL_CACHE=0; falling back to direct FileGDB import path",
                     )
             if not used_chunking:
                 _run_ogr2ogr_import(

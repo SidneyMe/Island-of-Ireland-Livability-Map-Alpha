@@ -181,7 +181,7 @@ Notes:
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
 | Noise overlay source handling | `noise/loader.py` | `noise_polygons`, `noise` PMTiles layer, `/api/runtime` noise counts | `noise_datasets/*.zip` local inputs |
-| Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB parallel chunk imports (`fid` ranges), per-chunk normalize+drop, disk preflight (cache + PostgreSQL `data_directory`), stale chunk cleanup | `NOISE_OGR2OGR_GDB_*`, `NOISE_MIN_FREE_DISK_GB`, `NOISE_KEEP_FAILED_STAGE_TABLES` |
+| Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB canonical pipeline (FileGDB -> local GPKG cache -> one PG stage import -> batch normalize), SQL timeouts, disk preflight (cache + PostgreSQL `data_directory`) | `NOISE_ROAD_GDB_CANONICAL_CACHE`, `NOISE_REBUILD_ROAD_GDB_CACHE`, `NOISE_ROAD_NORMALIZE_BATCH_SIZE`, `NOISE_SQL_*`, `NOISE_MIN_FREE_DISK_GB` |
 | Precompute orchestration | `precompute/workflow.py` | `precompute/__init__.py` | None |
 | PMTiles layer metadata | `precompute/bake_pmtiles.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
@@ -510,9 +510,11 @@ tests/test_server_behavior.py
 | `LIVABILITY_FINE_RASTER_SURFACE` | Enable inspect-backed fine surface caches and legacy PNG endpoint; main map rendering now uses vector PMTiles | `"1"` |
 | `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` | Skip opening step for very large coastal components | `1_000_000_000.0` |
 | `OSM2PGSQL_BIN` | osm2pgsql binary path | `"osm2pgsql"` |
-| `NOISE_OGR2OGR_GDB_CHUNK_SIZE` | ROI Round 4 Road FileGDB chunk size (features per FID range) | `25` |
-| `NOISE_OGR2OGR_FID_START` | ROI Round 4 Road FileGDB FID range start | `0` |
-| `NOISE_OGR2OGR_GDB_WORKERS` | ROI Round 4 Road parallel chunk worker cap (clamped to <= 6) | `min(4, cpu_count())` |
+| `NOISE_ROAD_GDB_CANONICAL_CACHE` | Enable ROI Round 4 Road canonical FileGDB -> local GPKG extraction cache path | `"1"` |
+| `NOISE_REBUILD_ROAD_GDB_CACHE` | Force rebuild of canonical Road GDB GPKG cache before PG import | `"0"` |
+| `NOISE_ROAD_NORMALIZE_BATCH_SIZE` | Batch size for Road raw-stage normalization by `source_fid` | `5000` |
+| `NOISE_SQL_STATEMENT_TIMEOUT_SECONDS` | Per-normalize statement timeout for heavy SQL | `900` |
+| `NOISE_SQL_LOCK_TIMEOUT_SECONDS` | Per-normalize lock timeout for heavy SQL | `30` |
 
 ### Important config files
 
@@ -682,6 +684,6 @@ Areas still relatively fragile:
 
 - Purpose: high-throughput raw source import path using GDAL `ogr2ogr` direct to PostGIS staging tables.
 - Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `--config PG_USE_COPY YES`, `-preserve_fid`, `-lco PRECISION=NO`, and SQL normalization into `noise_normalized`.
-- ROI Round 4 Road FileGDB now chunks by `pyogrio.read_info(... force_feature_count=True)` feature count and `fid` ranges, imports each chunk into its own stage table in parallel workers (no append), then `UNION ALL` merges chunk tables into the final stage table before one prepare/index + normalize pass.
+- ROI Round 4 Road FileGDB now uses a canonical three-phase path: extract once to local GPKG cache (`road_raw`), import GPKG to one PostgreSQL stage table with `PG_USE_COPY`, then normalize from that stage (optional `source_fid` batches) without direct FileGDB `fid` chunk imports.
 - Command building now blocks `-append` + `-select` combinations with an internal ingest error guard.
 - NI normalization in this path still calls verified round-aware NI gridcode mapping logic; unknown class/threshold codes raise explicit errors with source context.
