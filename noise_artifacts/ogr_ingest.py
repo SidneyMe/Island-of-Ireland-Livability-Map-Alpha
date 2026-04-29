@@ -22,6 +22,60 @@ log = logging.getLogger(__name__)
 
 _GDAL_CACHE_ENV = "NOISE_GDAL_CACHE_DIR"
 _DEFAULT_GDAL_CACHE_DIR = Path(".livability_cache") / "noise_gdal"
+_ROI_OGR_CANDIDATE_FIELDS = [
+    "Time",
+    "TIME",
+    "DB_LO",
+    "DB_LOW",
+    "DBLOW",
+    "DB_HI",
+    "DB_HIGH",
+    "DBHI",
+    "DB_VALUE",
+    "DBVALUE",
+    "DB_VAL",
+    "BAND",
+    "Band",
+    "Legend",
+    "LEGEND",
+    "NoiseBand",
+    "NOISEBAND",
+    "ReportPeri",
+    "ReportPeriod",
+    "REPORTPERI",
+    "REPORTPERIOD",
+    "Round",
+    "ROUND",
+    "OBJECTID",
+    "ObjectID",
+    "FID",
+    "ID",
+]
+_NI_OGR_CANDIDATE_FIELDS = [
+    "gridcode",
+    "GRIDCODE",
+    "GridCode",
+    "Noise_Cl",
+    "NOISE_CL",
+    "noise_cl",
+    "NoiseCl",
+    "NOISECL",
+    "OBJECTID",
+    "ObjectID",
+    "FID",
+    "ID",
+]
+_OGR_FIELD_DENYLIST = {
+    "shape_star",
+    "shape_leng",
+    "shape_area",
+    "shape_length",
+    "shape__area",
+    "shape__length",
+    "shape_area_",
+    "shape_len",
+    "shape",
+}
 
 
 def _progress(progress_cb, message: str) -> None:
@@ -88,6 +142,13 @@ def _canonical_field_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(name).lower())
 
 
+_OGR_FIELD_DENYLIST_CANONICAL = {_canonical_field_name(name) for name in _OGR_FIELD_DENYLIST}
+
+
+def _is_denylisted_field(name: str) -> bool:
+    return _canonical_field_name(name) in _OGR_FIELD_DENYLIST_CANONICAL
+
+
 def _find_column(columns: list[str], *candidates: str) -> str | None:
     by_key = {_canonical_field_name(col): col for col in columns}
     for cand in candidates:
@@ -124,6 +185,58 @@ def _table_columns(conn, table_name: str) -> list[str]:
         {"table_name": table_name},
     ).fetchall()
     return [str(row[0]) for row in rows]
+
+
+def _stage_raw_geom_stats(conn, stage_table: str) -> tuple[int, int, int]:
+    row = conn.execute(
+        text(
+            f"""
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (WHERE geom IS NULL) AS raw_null,
+                COUNT(*) FILTER (WHERE geom IS NOT NULL AND ST_IsEmpty(geom)) AS raw_empty
+            FROM {_quote_ident(stage_table)}
+            """
+        )
+    ).fetchone()
+    if row is None:
+        return 0, 0, 0
+    return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
+
+
+def _stage_clean_geom_ready_counts(conn, stage_table: str) -> tuple[int, int]:
+    row = conn.execute(
+        text(
+            f"""
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE s.geom IS NOT NULL
+                      AND NOT ST_IsEmpty(s.geom)
+                      AND ST_Area(s.geom) > 0
+                ) AS raw_geom_ready,
+                COUNT(*) FILTER (
+                    WHERE s.geom IS NOT NULL
+                      AND NOT ST_IsEmpty(s.geom)
+                      AND ST_Area(s.geom) > 0
+                      AND g.clean_geom IS NOT NULL
+                      AND NOT ST_IsEmpty(g.clean_geom)
+                      AND ST_Area(g.clean_geom) > 0
+                ) AS clean_geom_ready
+            FROM {_quote_ident(stage_table)} s
+            CROSS JOIN LATERAL (
+                SELECT ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(s.geom),
+                        3
+                    )
+                ) AS clean_geom
+            ) g
+            """
+        )
+    ).fetchone()
+    if row is None:
+        return 0, 0
+    return int(row[0] or 0), int(row[1] or 0)
 
 
 def _source_ref_expr(alias: str, columns: list[str], *, source_dataset: str, source_layer: str) -> tuple[str, dict[str, str]]:
@@ -170,12 +283,214 @@ def _pg_ogr_conn_string(engine: Engine) -> str:
     return "PG:" + " ".join(parts)
 
 
+def _noise_ogr_candidate_fields(
+    *,
+    jurisdiction: str,
+    source_type: str,
+    metric: str | None = None,
+    round_number: int | None = None,
+) -> list[str]:
+    del source_type, metric, round_number
+    key = str(jurisdiction or "").strip().lower()
+    if key == "roi":
+        return list(_ROI_OGR_CANDIDATE_FIELDS)
+    if key == "ni":
+        return list(_NI_OGR_CANDIDATE_FIELDS)
+    raise NoiseIngestError(f"unsupported noise jurisdiction for ogr field selection: {jurisdiction!r}")
+
+
+def _available_ogr_fields(source_path: Path, layer_name: str | None) -> list[str]:
+    info_kwargs: dict[str, Any] = {}
+    if layer_name:
+        info_kwargs["layer"] = layer_name
+
+    pyogrio_exc: Exception | None = None
+    try:
+        import pyogrio
+
+        info = pyogrio.read_info(str(source_path), **info_kwargs)
+        fields = info.get("fields", ()) if isinstance(info, dict) else ()
+        return [str(field) for field in fields if str(field)]
+    except ImportError:
+        pyogrio_exc = None
+    except Exception as exc:  # pragma: no cover - exercised when GDAL bindings mismatch runtime data
+        pyogrio_exc = exc
+
+    fiona_exc: Exception | None = None
+    try:
+        import fiona
+
+        with fiona.open(str(source_path), **info_kwargs) as src:
+            properties = (src.schema or {}).get("properties") or {}
+            return [str(field) for field in properties.keys()]
+    except Exception as exc:
+        fiona_exc = exc
+
+    layer_label = layer_name or "<default>"
+    detail = ""
+    if pyogrio_exc is not None:
+        detail = f"; pyogrio error: {pyogrio_exc}"
+    if fiona_exc is not None:
+        detail = f"{detail}; fiona error: {fiona_exc}" if detail else f"; fiona error: {fiona_exc}"
+    raise NoiseIngestError(
+        f"could not discover source fields for {source_path} (layer={layer_label}){detail}"
+    )
+
+
+def _select_existing_noise_fields(
+    available_fields: list[str],
+    candidate_fields: list[str],
+    *,
+    source_path: Path | None = None,
+    layer_name: str | None = None,
+) -> list[str]:
+    available_by_key: dict[str, str] = {}
+    for field_name in available_fields:
+        key = _canonical_field_name(field_name)
+        if key and key not in available_by_key:
+            available_by_key[key] = field_name
+
+    selected: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidate_fields:
+        key = _canonical_field_name(candidate)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if key in _OGR_FIELD_DENYLIST_CANONICAL:
+            continue
+        matched = available_by_key.get(key)
+        if matched and not _is_denylisted_field(matched):
+            selected.append(matched)
+
+    if selected:
+        return selected
+
+    source_label = str(source_path) if source_path is not None else "<unknown>"
+    layer_label = layer_name or "<default>"
+    raise NoiseIngestError(
+        "No usable noise fields for ogr2ogr import. "
+        f"source={source_label}; layer={layer_label}; "
+        f"available_fields={available_fields}; candidate_fields={candidate_fields}"
+    )
+
+
+def _denylisted_available_fields(available_fields: list[str]) -> list[str]:
+    return [field for field in available_fields if _is_denylisted_field(field)]
+
+
+def _build_roi_normalize_insert_sql(
+    *,
+    stage_table: str,
+    map_table: str,
+    metric_case_expr: str,
+    report_expr: str,
+    source_ref_expr: str,
+    db_value_expr: str,
+    db_low_expr: str,
+    db_high_expr: str,
+) -> str:
+    return f"""
+            INSERT INTO noise_normalized (
+                noise_source_hash, jurisdiction, source_type, metric,
+                round_number, report_period, db_low, db_high, db_value,
+                source_dataset, source_layer, source_ref, geom
+            )
+            SELECT
+                :noise_source_hash,
+                'roi',
+                :source_type,
+                mm.metric,
+                :round_number,
+                COALESCE({report_expr}, :default_report_period),
+                m.norm_db_low,
+                m.norm_db_high,
+                m.norm_db_value,
+                :source_dataset,
+                :source_layer,
+                {source_ref_expr},
+                g.clean_geom
+            FROM {_quote_ident(stage_table)} s
+            CROSS JOIN LATERAL (
+                SELECT ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(s.geom),
+                        3
+                    )
+                ) AS clean_geom
+            ) g
+            CROSS JOIN LATERAL (
+                SELECT {metric_case_expr} AS metric
+            ) mm
+            JOIN {map_table} m
+              ON m.raw_db_value IS NOT DISTINCT FROM {db_value_expr}
+             AND m.raw_db_low IS NOT DISTINCT FROM {db_low_expr}
+             AND m.raw_db_high IS NOT DISTINCT FROM {db_high_expr}
+            WHERE s.geom IS NOT NULL
+              AND NOT ST_IsEmpty(s.geom)
+              AND ST_Area(s.geom) > 0
+              AND g.clean_geom IS NOT NULL
+              AND NOT ST_IsEmpty(g.clean_geom)
+              AND ST_Area(g.clean_geom) > 0
+              AND mm.metric IS NOT NULL
+            """
+
+
+def _build_ni_normalize_insert_sql(
+    *,
+    stage_table: str,
+    map_table: str,
+    report_expr: str,
+    source_ref_expr: str,
+    grid_expr: str,
+) -> str:
+    return f"""
+            INSERT INTO noise_normalized (
+                noise_source_hash, jurisdiction, source_type, metric,
+                round_number, report_period, db_low, db_high, db_value,
+                source_dataset, source_layer, source_ref, geom
+            )
+            SELECT
+                :noise_source_hash,
+                'ni',
+                :source_type,
+                :metric,
+                :round_number,
+                COALESCE({report_expr}, :default_report_period),
+                m.norm_db_low,
+                m.norm_db_high,
+                m.norm_db_value,
+                :source_dataset,
+                :source_layer,
+                {source_ref_expr},
+                g.clean_geom
+            FROM {_quote_ident(stage_table)} s
+            CROSS JOIN LATERAL (
+                SELECT ST_Multi(
+                    ST_CollectionExtract(
+                        ST_MakeValid(s.geom),
+                        3
+                    )
+                ) AS clean_geom
+            ) g
+            JOIN {map_table} m
+              ON m.raw_gridcode = {grid_expr}
+            WHERE s.geom IS NOT NULL
+              AND NOT ST_IsEmpty(s.geom)
+              AND ST_Area(s.geom) > 0
+              AND g.clean_geom IS NOT NULL
+              AND NOT ST_IsEmpty(g.clean_geom)
+              AND ST_Area(g.clean_geom) > 0
+            """
+
+
 def build_ogr2ogr_command(
     *,
     engine: Engine,
     source_path: Path,
     stage_table: str,
     layer_name: str | None = None,
+    selected_fields: list[str] | None = None,
 ) -> list[str]:
     cmd = [
         "ogr2ogr",
@@ -194,7 +509,11 @@ def build_ogr2ogr_command(
         "GEOMETRY_NAME=geom",
         "-lco",
         "FID=source_fid",
+        "-lco",
+        "PRECISION=NO",
     ]
+    if selected_fields:
+        cmd.extend(["-select", ",".join(selected_fields)])
     if layer_name:
         cmd.append(layer_name)
     return cmd
@@ -206,12 +525,14 @@ def _run_ogr2ogr_import(
     source_path: Path,
     stage_table: str,
     layer_name: str | None,
+    selected_fields: list[str] | None = None,
 ) -> None:
     cmd = build_ogr2ogr_command(
         engine=engine,
         source_path=source_path,
         stage_table=stage_table,
         layer_name=layer_name,
+        selected_fields=selected_fields,
     )
     completed = subprocess.run(cmd, capture_output=True, text=True)
     if completed.returncode != 0:
@@ -235,6 +556,7 @@ def _normalize_roi_stage(
     source_type: str,
     source_dataset: str,
     source_layer: str,
+    progress_cb=None,
 ) -> int:
     from noise.loader import normalize_noise_band
 
@@ -325,7 +647,7 @@ def _normalize_roi_stage(
     )
 
     metric_source = _col_expr("s", time_col, "text")
-    metric_expr = (
+    metric_case_expr = (
         "CASE "
         f"WHEN lower(trim({metric_source})) = 'lden' THEN 'Lden' "
         f"WHEN lower(trim({metric_source})) IN ('lnight','lngt','lnght') THEN 'Lnight' "
@@ -339,38 +661,25 @@ def _normalize_roi_stage(
         source_layer=source_layer,
     )
 
+    total_rows, raw_null_rows, raw_empty_rows = _stage_raw_geom_stats(conn, stage_table)
+    raw_geom_ready, clean_geom_ready = _stage_clean_geom_ready_counts(conn, stage_table)
+    _progress(
+        progress_cb,
+        f"roi stage geometry stats ({source_layer}): total={total_rows}, raw_null={raw_null_rows}, raw_empty={raw_empty_rows}",
+    )
+
     result = conn.execute(
         text(
-            f"""
-            INSERT INTO noise_normalized (
-                noise_source_hash, jurisdiction, source_type, metric,
-                round_number, report_period, db_low, db_high, db_value,
-                source_dataset, source_layer, source_ref, geom
+            _build_roi_normalize_insert_sql(
+                stage_table=stage_table,
+                map_table=map_table,
+                metric_case_expr=metric_case_expr,
+                report_expr=report_expr,
+                source_ref_expr=source_ref_expr,
+                db_value_expr=db_value_expr,
+                db_low_expr=db_low_expr,
+                db_high_expr=db_high_expr,
             )
-            SELECT
-                :noise_source_hash,
-                'roi',
-                :source_type,
-                {metric_expr},
-                :round_number,
-                COALESCE({report_expr}, :default_report_period),
-                m.norm_db_low,
-                m.norm_db_high,
-                m.norm_db_value,
-                :source_dataset,
-                :source_layer,
-                {source_ref_expr},
-                ST_Multi(ST_CollectionExtract(ST_MakeValid(s.geom), 3))
-            FROM {_quote_ident(stage_table)} s
-            JOIN {map_table} m
-              ON m.raw_db_value IS NOT DISTINCT FROM {db_value_expr}
-             AND m.raw_db_low IS NOT DISTINCT FROM {db_low_expr}
-             AND m.raw_db_high IS NOT DISTINCT FROM {db_high_expr}
-            WHERE s.geom IS NOT NULL
-              AND NOT ST_IsEmpty(s.geom)
-              AND ST_Area(s.geom) > 0
-              AND {metric_expr} IS NOT NULL
-            """
         ),
         {
             "noise_source_hash": noise_source_hash,
@@ -382,7 +691,15 @@ def _normalize_roi_stage(
             **source_ref_params,
         },
     )
-    return max(int(result.rowcount or 0), 0)
+    inserted = max(int(result.rowcount or 0), 0)
+    skipped_after_clean = max(raw_geom_ready - clean_geom_ready, 0)
+    _progress(
+        progress_cb,
+        "roi stage normalize rows "
+        f"({source_layer}): raw_geom_ready={raw_geom_ready}, clean_geom_ready={clean_geom_ready}, "
+        f"normalized_inserted={inserted}, skipped_after_geometry_cleaning={skipped_after_clean}",
+    )
+    return inserted
 
 
 def _normalize_ni_stage(
@@ -395,6 +712,7 @@ def _normalize_ni_stage(
     metric: str,
     source_dataset: str,
     source_layer: str,
+    progress_cb=None,
 ) -> int:
     from noise.loader import normalize_ni_gridcode_band
 
@@ -471,35 +789,22 @@ def _normalize_ni_stage(
         source_layer=source_layer,
     )
 
+    total_rows, raw_null_rows, raw_empty_rows = _stage_raw_geom_stats(conn, stage_table)
+    raw_geom_ready, clean_geom_ready = _stage_clean_geom_ready_counts(conn, stage_table)
+    _progress(
+        progress_cb,
+        f"ni stage geometry stats ({source_layer}): total={total_rows}, raw_null={raw_null_rows}, raw_empty={raw_empty_rows}",
+    )
+
     result = conn.execute(
         text(
-            f"""
-            INSERT INTO noise_normalized (
-                noise_source_hash, jurisdiction, source_type, metric,
-                round_number, report_period, db_low, db_high, db_value,
-                source_dataset, source_layer, source_ref, geom
+            _build_ni_normalize_insert_sql(
+                stage_table=stage_table,
+                map_table=map_table,
+                report_expr=report_expr,
+                source_ref_expr=source_ref_expr,
+                grid_expr=grid_expr,
             )
-            SELECT
-                :noise_source_hash,
-                'ni',
-                :source_type,
-                :metric,
-                :round_number,
-                COALESCE({report_expr}, :default_report_period),
-                m.norm_db_low,
-                m.norm_db_high,
-                m.norm_db_value,
-                :source_dataset,
-                :source_layer,
-                {source_ref_expr},
-                ST_Multi(ST_CollectionExtract(ST_MakeValid(s.geom), 3))
-            FROM {_quote_ident(stage_table)} s
-            JOIN {map_table} m
-              ON m.raw_gridcode = {grid_expr}
-            WHERE s.geom IS NOT NULL
-              AND NOT ST_IsEmpty(s.geom)
-              AND ST_Area(s.geom) > 0
-            """
         ),
         {
             "noise_source_hash": noise_source_hash,
@@ -512,7 +817,15 @@ def _normalize_ni_stage(
             **source_ref_params,
         },
     )
-    return max(int(result.rowcount or 0), 0)
+    inserted = max(int(result.rowcount or 0), 0)
+    skipped_after_clean = max(raw_geom_ready - clean_geom_ready, 0)
+    _progress(
+        progress_cb,
+        "ni stage normalize rows "
+        f"({source_layer}): raw_geom_ready={raw_geom_ready}, clean_geom_ready={clean_geom_ready}, "
+        f"normalized_inserted={inserted}, skipped_after_geometry_cleaning={skipped_after_clean}",
+    )
+    return inserted
 
 
 def _iter_ni_members(extracted_zip_dir: Path) -> list[str]:
@@ -560,6 +873,30 @@ def ingest_noise_normalized_ogr2ogr(
                 raise NoiseIngestError(f"missing ROI source member after extraction: {source_path}")
 
             layer_name = source_path.stem if spec.file_format == "gdb" else None
+            available_fields = _available_ogr_fields(source_path, layer_name)
+            candidate_fields = _noise_ogr_candidate_fields(
+                jurisdiction="roi",
+                source_type=spec.source_type,
+                round_number=spec.round_number,
+            )
+            selected_fields = _select_existing_noise_fields(
+                available_fields,
+                candidate_fields,
+                source_path=source_path,
+                layer_name=layer_name,
+            )
+            skipped_fields = _denylisted_available_fields(available_fields)
+            layer_label = layer_name or spec.member
+            _progress(
+                progress_cb,
+                f"ogr2ogr selected fields for {layer_label}: {','.join(selected_fields)}",
+            )
+            if skipped_fields:
+                _progress(
+                    progress_cb,
+                    f"ogr2ogr skipping geometry metadata fields: {','.join(skipped_fields)}",
+                )
+
             stage_table = f"_noise_raw_{_short_hash(f'roi:{spec.zip_name}:{spec.member}')}"
             conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
 
@@ -569,6 +906,7 @@ def ingest_noise_normalized_ogr2ogr(
                 source_path=source_path,
                 stage_table=stage_table,
                 layer_name=layer_name,
+                selected_fields=selected_fields,
             )
             raw_extract_seconds += time.perf_counter() - started
             _progress(progress_cb, f"ogr2ogr imported ROI layer {spec.member} -> {stage_table}")
@@ -583,6 +921,7 @@ def ingest_noise_normalized_ogr2ogr(
                 source_type=spec.source_type,
                 source_dataset=spec.zip_name,
                 source_layer=spec.member,
+                progress_cb=progress_cb,
             )
             normalize_insert_seconds += time.perf_counter() - started
             total_inserted += inserted
@@ -603,6 +942,30 @@ def ingest_noise_normalized_ogr2ogr(
                 if not source_path.exists():
                     continue
 
+                available_fields = _available_ogr_fields(source_path, None)
+                candidate_fields = _noise_ogr_candidate_fields(
+                    jurisdiction="ni",
+                    source_type=source_type,
+                    metric=metric,
+                    round_number=int(round_number),
+                )
+                selected_fields = _select_existing_noise_fields(
+                    available_fields,
+                    candidate_fields,
+                    source_path=source_path,
+                    layer_name=member,
+                )
+                skipped_fields = _denylisted_available_fields(available_fields)
+                _progress(
+                    progress_cb,
+                    f"ogr2ogr selected fields for {member}: {','.join(selected_fields)}",
+                )
+                if skipped_fields:
+                    _progress(
+                        progress_cb,
+                        f"ogr2ogr skipping geometry metadata fields: {','.join(skipped_fields)}",
+                    )
+
                 stage_table = f"_noise_raw_{_short_hash(f'ni:{zip_name}:{member}')}"
                 conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
 
@@ -612,6 +975,7 @@ def ingest_noise_normalized_ogr2ogr(
                     source_path=source_path,
                     stage_table=stage_table,
                     layer_name=None,
+                    selected_fields=selected_fields,
                 )
                 raw_extract_seconds += time.perf_counter() - started
                 _progress(progress_cb, f"ogr2ogr imported NI layer {member} -> {stage_table}")
@@ -627,6 +991,7 @@ def ingest_noise_normalized_ogr2ogr(
                     metric=metric,
                     source_dataset=zip_name,
                     source_layer=member,
+                    progress_cb=progress_cb,
                 )
                 normalize_insert_seconds += time.perf_counter() - started
                 total_inserted += inserted

@@ -677,5 +677,5 @@ Areas still relatively fragile:
 ### `noise_artifacts/ogr_ingest.py`
 
 - Purpose: high-throughput raw source import path using GDAL `ogr2ogr` direct to PostGIS staging tables.
-- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, and SQL normalization into `noise_normalized`.
+- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `-lco PRECISION=NO`, and SQL normalization into `noise_normalized`.
 - NI normalization in this path still calls verified round-aware NI gridcode mapping logic; unknown class/threshold codes raise explicit errors with source context.
