@@ -509,6 +509,9 @@ tests/test_server_behavior.py
 | `LIVABILITY_FINE_RASTER_SURFACE` | Enable inspect-backed fine surface caches and legacy PNG endpoint; main map rendering now uses vector PMTiles | `"1"` |
 | `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` | Skip opening step for very large coastal components | `1_000_000_000.0` |
 | `OSM2PGSQL_BIN` | osm2pgsql binary path | `"osm2pgsql"` |
+| `NOISE_OGR2OGR_GDB_CHUNK_SIZE` | ROI Round 4 Road FileGDB chunk size (features per FID range) | `25` |
+| `NOISE_OGR2OGR_FID_START` | ROI Round 4 Road FileGDB FID range start | `0` |
+| `NOISE_OGR2OGR_GDB_WORKERS` | ROI Round 4 Road parallel chunk worker cap (clamped to <= 6) | `min(4, cpu_count())` |
 
 ### Important config files
 
@@ -677,5 +680,7 @@ Areas still relatively fragile:
 ### `noise_artifacts/ogr_ingest.py`
 
 - Purpose: high-throughput raw source import path using GDAL `ogr2ogr` direct to PostGIS staging tables.
-- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `-lco PRECISION=NO`, and SQL normalization into `noise_normalized`.
+- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `--config PG_USE_COPY YES`, `-preserve_fid`, `-lco PRECISION=NO`, and SQL normalization into `noise_normalized`.
+- ROI Round 4 Road FileGDB now chunks by `pyogrio.read_info(... force_feature_count=True)` feature count and `fid` ranges, imports each chunk into its own stage table in parallel workers (no append), then `UNION ALL` merges chunk tables into the final stage table before one prepare/index + normalize pass.
+- Command building now blocks `-append` + `-select` combinations with an internal ingest error guard.
 - NI normalization in this path still calls verified round-aware NI gridcode mapping logic; unknown class/threshold codes raise explicit errors with source context.

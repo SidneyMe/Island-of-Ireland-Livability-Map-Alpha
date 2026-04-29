@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,11 @@ _DEFAULT_GDAL_CACHE_DIR = Path(".livability_cache") / "noise_gdal"
 _OGR2OGR_TIMEOUT_ENV = "NOISE_OGR2OGR_TIMEOUT_SECONDS"
 _OGR2OGR_GDB_CHUNK_SIZE_ENV = "NOISE_OGR2OGR_GDB_CHUNK_SIZE"
 _DEFAULT_OGR2OGR_GDB_CHUNK_SIZE = 25
+_OGR2OGR_FID_START_ENV = "NOISE_OGR2OGR_FID_START"
+_DEFAULT_OGR2OGR_FID_START = 0
+_OGR2OGR_GDB_WORKERS_ENV = "NOISE_OGR2OGR_GDB_WORKERS"
+_DEFAULT_OGR2OGR_GDB_WORKERS = 4
+_MAX_OGR2OGR_GDB_WORKERS = 6
 _ROI_OGR_CANDIDATE_FIELDS = [
     "Time",
     "TIME",
@@ -117,6 +123,24 @@ def _ogr2ogr_gdb_chunk_size() -> int:
     if value <= 0:
         raise NoiseIngestError(f"{_OGR2OGR_GDB_CHUNK_SIZE_ENV} must be > 0; got {value}")
     return value
+
+
+def _ogr2ogr_fid_start() -> int:
+    value = _env_int(_OGR2OGR_FID_START_ENV, _DEFAULT_OGR2OGR_FID_START)
+    if value < 0:
+        raise NoiseIngestError(f"{_OGR2OGR_FID_START_ENV} must be >= 0; got {value}")
+    return value
+
+
+def _ogr2ogr_gdb_workers() -> int:
+    raw = (os.getenv(_OGR2OGR_GDB_WORKERS_ENV) or "").strip()
+    if not raw:
+        default = min(_DEFAULT_OGR2OGR_GDB_WORKERS, os.cpu_count() or 1)
+        return max(1, min(default, _MAX_OGR2OGR_GDB_WORKERS))
+    value = _env_int(_OGR2OGR_GDB_WORKERS_ENV, _DEFAULT_OGR2OGR_GDB_WORKERS)
+    if value <= 0:
+        raise NoiseIngestError(f"{_OGR2OGR_GDB_WORKERS_ENV} must be > 0; got {value}")
+    return max(1, min(value, _MAX_OGR2OGR_GDB_WORKERS))
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -542,8 +566,14 @@ def build_ogr2ogr_command(
     where_clause: str | None = None,
     progress: bool = True,
 ) -> list[str]:
+    if append and selected_fields:
+        raise NoiseIngestError("Internal bug: ogr2ogr command cannot combine -append and -select")
+
     cmd = [
         "ogr2ogr",
+        "--config",
+        "PG_USE_COPY",
+        "YES",
         "-f",
         "PostgreSQL",
         _pg_ogr_conn_string(engine),
@@ -561,12 +591,13 @@ def build_ogr2ogr_command(
         "FID=source_fid",
         "-lco",
         "PRECISION=NO",
+        "-preserve_fid",
     ]
     if progress:
         cmd.append("-progress")
     if where_clause:
         cmd.extend(["-where", where_clause])
-    if selected_fields and not append:
+    if selected_fields:
         cmd.extend(["-select", ",".join(selected_fields)])
     if layer_name:
         cmd.append(layer_name)
@@ -991,7 +1022,18 @@ def _supports_chunked_road_gdb_import(
     )
 
 
-def _discover_road_gdb_chunks(source_path: Path, layer_name: str) -> tuple[str | None, list[tuple[int, int]], int]:
+def _fid_chunk_ranges(*, feature_count: int, fid_start: int, chunk_size: int) -> list[tuple[int, int]]:
+    if feature_count <= 0:
+        return []
+    ranges: list[tuple[int, int]] = []
+    for offset in range(0, feature_count, chunk_size):
+        low = fid_start + offset
+        high = fid_start + min(offset + chunk_size, feature_count) - 1
+        ranges.append((low, high))
+    return ranges
+
+
+def _discover_road_gdb_chunks(source_path: Path, layer_name: str) -> tuple[str, list[tuple[int, int]], int]:
     try:
         import pyogrio
     except ImportError as exc:
@@ -1012,55 +1054,95 @@ def _discover_road_gdb_chunks(source_path: Path, layer_name: str) -> tuple[str |
         ) from exc
 
     feature_count = int(((info or {}).get("features", 0) if isinstance(info, dict) else 0) or 0)
-    if feature_count <= 0:
-        return None, [], 0
-
-    fields = [
-        str(field)
-        for field in (((info or {}).get("fields", ()) if isinstance(info, dict) else ()))
-        if str(field)
-    ]
-    id_column = _find_column(fields, "OBJECTID", "ObjectID", "FID", "ID")
-    if not id_column:
-        fid_column = (info or {}).get("fid_column") if isinstance(info, dict) else None
-        fid_column_text = str(fid_column or "").strip()
-        if fid_column_text:
-            id_column = fid_column_text
-    if not id_column:
-        return None, [], feature_count
-
-    try:
-        id_df = pyogrio.read_dataframe(
-            str(source_path),
-            layer=layer_name,
-            columns=[id_column],
-            read_geometry=False,
-        )
-    except Exception as exc:
-        raise NoiseIngestError(
-            f"failed to read Road GDB id column for chunking: source={source_path} layer={layer_name} id={id_column}: {exc}"
-        ) from exc
-
-    id_values: list[int] = []
-    for value in id_df[id_column].tolist():
-        if value is None:
-            continue
-        try:
-            id_values.append(int(value))
-        except (TypeError, ValueError):
-            continue
-
-    if not id_values:
-        return None, [], feature_count
-
-    id_values = sorted(set(id_values))
     chunk_size = _ogr2ogr_gdb_chunk_size()
-    ranges: list[tuple[int, int]] = []
-    for idx in range(0, len(id_values), chunk_size):
-        group = id_values[idx : idx + chunk_size]
-        if group:
-            ranges.append((group[0], group[-1]))
-    return id_column, ranges, feature_count
+    fid_start = _ogr2ogr_fid_start()
+    ranges = _fid_chunk_ranges(
+        feature_count=feature_count,
+        fid_start=fid_start,
+        chunk_size=chunk_size,
+    )
+    return "fid", ranges, feature_count
+
+
+def _road_chunk_stage_table_name(stage_table: str, idx: int) -> str:
+    return f"{stage_table}_c{idx:03d}"
+
+
+def _import_one_road_chunk(
+    *,
+    engine: Engine,
+    source_path: Path,
+    layer_name: str,
+    selected_fields: list[str],
+    chunk_stage_table: str,
+    idx: int,
+    total_chunks: int,
+    chunk_low: int,
+    chunk_high: int,
+    where_clause: str,
+    timeout_seconds: float | None,
+    progress_cb=None,
+) -> dict[str, int | float | str]:
+    _progress(
+        progress_cb,
+        f"ogr2ogr Road GDB chunk {idx}/{total_chunks} fid {chunk_low}-{chunk_high} -> {chunk_stage_table}",
+    )
+    chunk_started = time.perf_counter()
+    _run_ogr2ogr_import(
+        engine=engine,
+        source_path=source_path,
+        stage_table=chunk_stage_table,
+        layer_name=layer_name,
+        selected_fields=selected_fields,
+        append=False,
+        where_clause=where_clause,
+        progress_cb=progress_cb,
+        timeout_seconds=timeout_seconds,
+    )
+    with engine.connect() as chunk_conn:
+        row_count = _stage_row_count(chunk_conn, chunk_stage_table)
+    elapsed = time.perf_counter() - chunk_started
+    _progress(
+        progress_cb,
+        f"ogr2ogr Road GDB chunk {idx}/{total_chunks} done rows={row_count:,} elapsed={elapsed:.1f}s",
+    )
+    return {
+        "idx": idx,
+        "chunk_stage_table": chunk_stage_table,
+        "chunk_low": chunk_low,
+        "chunk_high": chunk_high,
+        "rows": row_count,
+        "elapsed_seconds": elapsed,
+    }
+
+
+def _merge_road_chunk_tables(
+    conn,
+    *,
+    stage_table: str,
+    chunk_stage_tables: list[str],
+    expected_rows: int,
+    progress_cb=None,
+) -> int:
+    if not chunk_stage_tables:
+        raise NoiseIngestError("internal bug: no chunk stage tables to merge")
+
+    conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+    union_sql = " UNION ALL ".join(f"SELECT * FROM {_quote_ident(name)}" for name in chunk_stage_tables)
+    conn.execute(text(f"CREATE TABLE {_quote_ident(stage_table)} AS {union_sql}"))
+    final_rows = _stage_row_count(conn, stage_table)
+    if final_rows != expected_rows:
+        raise NoiseIngestError(
+            "Road GDB chunk merge row mismatch: "
+            f"stage_table={stage_table} expected_rows={expected_rows} merged_rows={final_rows}"
+        )
+    _progress(
+        progress_cb,
+        f"ogr2ogr Road GDB merged {len(chunk_stage_tables)} chunk tables -> {stage_table} rows={final_rows:,}",
+    )
+    for chunk_stage_table in chunk_stage_tables:
+        conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(chunk_stage_table)}"))
+    return final_rows
 
 
 def _imported_stage_row_count_or_fail(
@@ -1148,35 +1230,100 @@ def ingest_noise_normalized_ogr2ogr(
                 round_number=spec.round_number,
             ):
                 id_column, chunk_ranges, feature_count = _discover_road_gdb_chunks(source_path, layer_name)
-                if id_column and chunk_ranges:
+                if chunk_ranges:
                     used_chunking = True
-                    total_chunks = len(chunk_ranges)
-                    _progress(
-                        progress_cb,
-                        f"ogr2ogr Road GDB chunking enabled: layer={layer_name} id_column={id_column} features={feature_count} chunk_size={_ogr2ogr_gdb_chunk_size()} chunks={total_chunks}",
-                    )
-                    for idx, (chunk_low, chunk_high) in enumerate(chunk_ranges, start=1):
-                        where_clause = f"{_quote_ogr_identifier(id_column)} >= {chunk_low} AND {_quote_ogr_identifier(id_column)} <= {chunk_high}"
+                    configured_fid_start = _ogr2ogr_fid_start()
+                    chunk_size = _ogr2ogr_gdb_chunk_size()
+                    workers = _ogr2ogr_gdb_workers()
+                    active_fid_start = configured_fid_start
+                    while True:
+                        current_ranges = (
+                            _fid_chunk_ranges(
+                                feature_count=feature_count,
+                                fid_start=active_fid_start,
+                                chunk_size=chunk_size,
+                            )
+                            if active_fid_start != configured_fid_start
+                            else chunk_ranges
+                        )
+                        total_chunks = len(current_ranges)
+                        if total_chunks <= 0:
+                            break
                         _progress(
                             progress_cb,
-                            f"ogr2ogr Road GDB chunk {idx}/{total_chunks} {id_column} {chunk_low}-{chunk_high}",
+                            "ogr2ogr Road GDB parallel chunking enabled: "
+                            f"workers={workers} chunks={total_chunks} chunk_size={chunk_size}",
                         )
-                        chunk_started = time.perf_counter()
-                        _run_ogr2ogr_import(
+                        chunk_stage_tables = [
+                            _road_chunk_stage_table_name(stage_table, idx)
+                            for idx in range(1, total_chunks + 1)
+                        ]
+                        for chunk_stage_table in chunk_stage_tables:
+                            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(chunk_stage_table)}"))
+
+                        first_low, first_high = current_ranges[0]
+                        first_stage_table = chunk_stage_tables[0]
+                        first_result = _import_one_road_chunk(
                             engine=engine,
                             source_path=source_path,
-                            stage_table=stage_table,
                             layer_name=layer_name,
                             selected_fields=selected_fields,
-                            append=idx > 1,
-                            where_clause=where_clause,
-                            progress_cb=progress_cb,
+                            chunk_stage_table=first_stage_table,
+                            idx=1,
+                            total_chunks=total_chunks,
+                            chunk_low=first_low,
+                            chunk_high=first_high,
+                            where_clause=f"{id_column} >= {first_low} AND {id_column} <= {first_high}",
                             timeout_seconds=timeout_seconds,
+                            progress_cb=progress_cb,
                         )
-                        _progress(
-                            progress_cb,
-                            f"ogr2ogr Road GDB chunk {idx}/{total_chunks} done in {time.perf_counter() - chunk_started:.1f}s",
+                        first_rows = int(first_result["rows"] or 0)
+                        if first_rows <= 0 and active_fid_start == 0:
+                            _progress(
+                                progress_cb,
+                                "ogr2ogr Road GDB first chunk returned 0 rows with fid_start=0; retrying with fid_start=1",
+                            )
+                            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(first_stage_table)}"))
+                            active_fid_start = 1
+                            continue
+
+                        chunk_rows_by_index: dict[int, int] = {1: first_rows}
+                        if total_chunks > 1:
+                            worker_count = max(1, min(workers, total_chunks - 1))
+                            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                                futures = []
+                                for idx, (chunk_low, chunk_high) in enumerate(current_ranges[1:], start=2):
+                                    chunk_stage_table = chunk_stage_tables[idx - 1]
+                                    futures.append(
+                                        executor.submit(
+                                            _import_one_road_chunk,
+                                            engine=engine,
+                                            source_path=source_path,
+                                            layer_name=layer_name,
+                                            selected_fields=selected_fields,
+                                            chunk_stage_table=chunk_stage_table,
+                                            idx=idx,
+                                            total_chunks=total_chunks,
+                                            chunk_low=chunk_low,
+                                            chunk_high=chunk_high,
+                                            where_clause=f"{id_column} >= {chunk_low} AND {id_column} <= {chunk_high}",
+                                            timeout_seconds=timeout_seconds,
+                                            progress_cb=progress_cb,
+                                        )
+                                    )
+                                for future in as_completed(futures):
+                                    result = future.result()
+                                    chunk_rows_by_index[int(result["idx"])] = int(result["rows"] or 0)
+
+                        expected_rows = sum(chunk_rows_by_index.values())
+                        _merge_road_chunk_tables(
+                            conn,
+                            stage_table=stage_table,
+                            chunk_stage_tables=chunk_stage_tables,
+                            expected_rows=expected_rows,
+                            progress_cb=progress_cb,
                         )
+                        break
                 else:
                     _progress(
                         progress_cb,
