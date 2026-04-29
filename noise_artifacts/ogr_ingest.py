@@ -31,8 +31,11 @@ _DEFAULT_OGR2OGR_GDB_CHUNK_SIZE = 25
 _OGR2OGR_FID_START_ENV = "NOISE_OGR2OGR_FID_START"
 _DEFAULT_OGR2OGR_FID_START = 0
 _OGR2OGR_GDB_WORKERS_ENV = "NOISE_OGR2OGR_GDB_WORKERS"
-_DEFAULT_OGR2OGR_GDB_WORKERS = 4
+_DEFAULT_OGR2OGR_GDB_WORKERS = 2
 _MAX_OGR2OGR_GDB_WORKERS = 6
+_MIN_FREE_DISK_GB_ENV = "NOISE_MIN_FREE_DISK_GB"
+_DEFAULT_MIN_FREE_DISK_GB = 10.0
+_KEEP_FAILED_STAGE_TABLES_ENV = "NOISE_KEEP_FAILED_STAGE_TABLES"
 _ROI_OGR_CANDIDATE_FIELDS = [
     "Time",
     "TIME",
@@ -141,6 +144,48 @@ def _ogr2ogr_gdb_workers() -> int:
     if value <= 0:
         raise NoiseIngestError(f"{_OGR2OGR_GDB_WORKERS_ENV} must be > 0; got {value}")
     return max(1, min(value, _MAX_OGR2OGR_GDB_WORKERS))
+
+
+def _min_free_disk_gb() -> float:
+    raw = (os.getenv(_MIN_FREE_DISK_GB_ENV) or "").strip()
+    if not raw:
+        return float(_DEFAULT_MIN_FREE_DISK_GB)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(f"{_MIN_FREE_DISK_GB_ENV} must be a number; got {raw!r}") from exc
+    if value <= 0:
+        raise NoiseIngestError(f"{_MIN_FREE_DISK_GB_ENV} must be > 0; got {value}")
+    return float(value)
+
+
+def _keep_failed_stage_tables() -> bool:
+    return (os.getenv(_KEEP_FAILED_STAGE_TABLES_ENV) or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _free_disk_gb(path: Path) -> float:
+    usage = shutil.disk_usage(path)
+    return float(usage.free) / (1024.0 ** 3)
+
+
+def _road_gdb_preflight_path() -> Path:
+    return Path(".").resolve()
+
+
+def _assert_road_gdb_disk_preflight(progress_cb=None) -> None:
+    preflight_path = _road_gdb_preflight_path()
+    free_gb = _free_disk_gb(preflight_path)
+    min_gb = _min_free_disk_gb()
+    _progress(
+        progress_cb,
+        f"disk preflight: free={free_gb:.2f}GB min={min_gb:.2f}GB path={preflight_path}",
+    )
+    if free_gb < min_gb:
+        raise NoiseIngestError(
+            "Not enough free disk for Road GDB ingest: "
+            f"free {free_gb:.2f} GB, require at least {min_gb:.2f} GB. "
+            "Clean .livability_cache and Postgres _noise_raw_* tables."
+        )
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -1116,33 +1161,225 @@ def _import_one_road_chunk(
     }
 
 
-def _merge_road_chunk_tables(
+def _drop_tables_best_effort(conn_or_engine, table_names: list[str], progress_cb=None) -> int:
+    unique_names = [name for name in dict.fromkeys(table_names) if str(name).strip()]
+    if not unique_names:
+        return 0
+
+    dropped = 0
+
+    def _drop_from_conn(conn) -> int:
+        local_dropped = 0
+        for table_name in unique_names:
+            try:
+                conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(table_name)} CASCADE"))
+                local_dropped += 1
+            except Exception as exc:
+                _progress(progress_cb, f"Road GDB drop failed for {table_name}: {exc}")
+        return local_dropped
+
+    if hasattr(conn_or_engine, "execute"):
+        dropped = _drop_from_conn(conn_or_engine)
+    else:
+        with conn_or_engine.connect() as drop_conn:
+            dropped = _drop_from_conn(drop_conn)
+            try:
+                drop_conn.commit()
+            except Exception:
+                pass
+    return dropped
+
+
+def _normalize_roi_stage_union(
     conn,
     *,
-    stage_table: str,
-    chunk_stage_tables: list[str],
-    expected_rows: int,
+    stage_tables: list[str],
+    noise_source_hash: str,
+    round_number: int,
+    source_type: str,
+    source_dataset: str,
+    source_layer: str,
+    default_report_period: str | None = None,
     progress_cb=None,
 ) -> int:
-    if not chunk_stage_tables:
-        raise NoiseIngestError("internal bug: no chunk stage tables to merge")
+    from noise.loader import normalize_noise_band
 
-    conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
-    union_sql = " UNION ALL ".join(f"SELECT * FROM {_quote_ident(name)}" for name in chunk_stage_tables)
-    conn.execute(text(f"CREATE TABLE {_quote_ident(stage_table)} AS {union_sql}"))
-    final_rows = _stage_row_count(conn, stage_table)
-    if final_rows != expected_rows:
-        raise NoiseIngestError(
-            "Road GDB chunk merge row mismatch: "
-            f"stage_table={stage_table} expected_rows={expected_rows} merged_rows={final_rows}"
-        )
-    _progress(
-        progress_cb,
-        f"ogr2ogr Road GDB merged {len(chunk_stage_tables)} chunk tables -> {stage_table} rows={final_rows:,}",
+    if not stage_tables:
+        raise NoiseIngestError("internal bug: stage_tables must not be empty for union normalization")
+
+    cols = _table_columns(conn, stage_tables[0])
+    time_col = _find_column(cols, "Time")
+    db_value_col = _find_column(cols, "DbValue", "dB_Value")
+    db_low_col = _find_column(cols, "Db_Low", "dB_Low")
+    db_high_col = _find_column(cols, "Db_High", "dB_High")
+    report_col = _find_column(cols, "ReportPeriod")
+
+    if time_col is None:
+        raise NoiseIngestError(f"ROI layer missing Time column: {source_layer}")
+
+    db_value_expr_s = _col_expr("s", db_value_col, "text")
+    db_low_expr_s = _col_expr("s", db_low_col, "double precision")
+    db_high_expr_s = _col_expr("s", db_high_col, "double precision")
+    db_value_expr_p = _col_expr("p", db_value_col, "text")
+    db_low_expr_p = _col_expr("p", db_low_col, "double precision")
+    db_high_expr_p = _col_expr("p", db_high_col, "double precision")
+    metric_source = _col_expr("s", time_col, "text")
+    metric_case_expr = (
+        "CASE "
+        f"WHEN lower(trim({metric_source})) = 'lden' THEN 'Lden' "
+        f"WHEN lower(trim({metric_source})) IN ('lnight','lngt','lnght') THEN 'Lnight' "
+        "ELSE NULL END"
     )
-    for chunk_stage_table in chunk_stage_tables:
-        conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(chunk_stage_table)}"))
-    return final_rows
+    report_expr = _col_expr("p", report_col, "text") if report_col else ":default_report_period"
+    source_ref_expr, source_ref_params = _source_ref_expr(
+        "p",
+        cols,
+        source_dataset=source_dataset,
+        source_layer=source_layer,
+    )
+
+    union_select = " UNION ALL ".join(
+        f"SELECT s.*, {repr(name)}::text AS _chunk_table FROM {_quote_ident(name)} s"
+        for name in stage_tables
+    )
+    raw_union_cte = f"WITH raw_union AS ({union_select})"
+
+    distinct_rows = conn.execute(
+        text(
+            f"""
+            {raw_union_cte}
+            SELECT DISTINCT
+                {db_value_expr_s} AS raw_db_value,
+                {db_low_expr_s} AS raw_db_low,
+                {db_high_expr_s} AS raw_db_high
+            FROM raw_union s
+            """
+        )
+    ).fetchall()
+
+    band_map_rows: list[dict[str, Any]] = []
+    for raw_db_value, raw_db_low, raw_db_high in distinct_rows:
+        try:
+            norm_low, norm_high, norm_value = normalize_noise_band(
+                raw_db_value,
+                db_low=raw_db_low,
+                db_high=raw_db_high,
+            )
+        except ValueError as exc:
+            raise NoiseIngestError(
+                f"ROI band normalization failed for {source_dataset}:{source_layer} "
+                f"(db_value={raw_db_value!r}, db_low={raw_db_low!r}, db_high={raw_db_high!r}): {exc}"
+            ) from exc
+        if norm_value is None:
+            continue
+        band_map_rows.append(
+            {
+                "raw_db_value": raw_db_value,
+                "raw_db_low": raw_db_low,
+                "raw_db_high": raw_db_high,
+                "norm_db_low": norm_low,
+                "norm_db_high": norm_high,
+                "norm_db_value": norm_value,
+            }
+        )
+
+    if not band_map_rows:
+        return 0
+
+    map_table = "noise_roi_band_map"
+    conn.execute(text(f"DROP TABLE IF EXISTS {map_table}"))
+    conn.execute(
+        text(
+            f"""
+            CREATE TEMP TABLE {map_table} (
+                raw_db_value TEXT NULL,
+                raw_db_low DOUBLE PRECISION NULL,
+                raw_db_high DOUBLE PRECISION NULL,
+                norm_db_low DOUBLE PRECISION NULL,
+                norm_db_high DOUBLE PRECISION NULL,
+                norm_db_value TEXT NOT NULL
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            f"""
+            INSERT INTO {map_table} (
+                raw_db_value, raw_db_low, raw_db_high,
+                norm_db_low, norm_db_high, norm_db_value
+            ) VALUES (
+                :raw_db_value, :raw_db_low, :raw_db_high,
+                :norm_db_low, :norm_db_high, :norm_db_value
+            )
+            """
+        ),
+        band_map_rows,
+    )
+
+    result = conn.execute(
+        text(
+            f"""
+            {raw_union_cte},
+            prepared AS (
+                SELECT
+                    s.*,
+                    {metric_case_expr} AS norm_metric,
+                    ST_Multi(
+                        ST_CollectionExtract(
+                            ST_MakeValid(s.geom),
+                            3
+                        )
+                    ) AS clean_geom
+                FROM raw_union s
+                WHERE s.geom IS NOT NULL
+                  AND NOT ST_IsEmpty(s.geom)
+                  AND ST_Area(s.geom) > 0
+            )
+            INSERT INTO noise_normalized (
+                noise_source_hash, jurisdiction, source_type, metric,
+                round_number, report_period, db_low, db_high, db_value,
+                source_dataset, source_layer, source_ref, geom
+            )
+            SELECT
+                :noise_source_hash,
+                'roi',
+                :source_type,
+                p.norm_metric,
+                :round_number,
+                COALESCE({report_expr}, :default_report_period),
+                m.norm_db_low,
+                m.norm_db_high,
+                m.norm_db_value,
+                :source_dataset,
+                :source_layer,
+                COALESCE(
+                    {source_ref_expr},
+                    :source_dataset || ':' || :source_layer || ':' || p._chunk_table
+                ),
+                p.clean_geom
+            FROM prepared p
+            JOIN {map_table} m
+              ON m.raw_db_value IS NOT DISTINCT FROM {db_value_expr_p}
+             AND m.raw_db_low IS NOT DISTINCT FROM {db_low_expr_p}
+             AND m.raw_db_high IS NOT DISTINCT FROM {db_high_expr_p}
+            WHERE p.norm_metric IS NOT NULL
+              AND p.clean_geom IS NOT NULL
+              AND NOT ST_IsEmpty(p.clean_geom)
+              AND ST_Area(p.clean_geom) > 0
+            """
+        ),
+        {
+            "noise_source_hash": noise_source_hash,
+            "source_type": source_type,
+            "round_number": int(round_number),
+            "default_report_period": default_report_period or f"Round {int(round_number)}",
+            "source_dataset": source_dataset,
+            "source_layer": source_layer,
+            **source_ref_params,
+        },
+    )
+    return max(int(result.rowcount or 0), 0)
 
 
 def _imported_stage_row_count_or_fail(
@@ -1224,6 +1461,8 @@ def ingest_noise_normalized_ogr2ogr(
 
             import_started = time.perf_counter()
             used_chunking = False
+            road_chunk_stage_tables: list[str] = []
+            road_chunk_total_rows = 0
             if layer_name and _supports_chunked_road_gdb_import(
                 source_type=spec.source_type,
                 file_format=spec.file_format,
@@ -1232,6 +1471,7 @@ def ingest_noise_normalized_ogr2ogr(
                 id_column, chunk_ranges, feature_count = _discover_road_gdb_chunks(source_path, layer_name)
                 if chunk_ranges:
                     used_chunking = True
+                    _assert_road_gdb_disk_preflight(progress_cb=progress_cb)
                     configured_fid_start = _ogr2ogr_fid_start()
                     chunk_size = _ogr2ogr_gdb_chunk_size()
                     workers = _ogr2ogr_gdb_workers()
@@ -1254,15 +1494,15 @@ def ingest_noise_normalized_ogr2ogr(
                             "ogr2ogr Road GDB parallel chunking enabled: "
                             f"workers={workers} chunks={total_chunks} chunk_size={chunk_size}",
                         )
-                        chunk_stage_tables = [
+                        road_chunk_stage_tables = [
                             _road_chunk_stage_table_name(stage_table, idx)
                             for idx in range(1, total_chunks + 1)
                         ]
-                        for chunk_stage_table in chunk_stage_tables:
+                        for chunk_stage_table in road_chunk_stage_tables:
                             conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(chunk_stage_table)}"))
 
                         first_low, first_high = current_ranges[0]
-                        first_stage_table = chunk_stage_tables[0]
+                        first_stage_table = road_chunk_stage_tables[0]
                         first_result = _import_one_road_chunk(
                             engine=engine,
                             source_path=source_path,
@@ -1293,7 +1533,7 @@ def ingest_noise_normalized_ogr2ogr(
                             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                                 futures = []
                                 for idx, (chunk_low, chunk_high) in enumerate(current_ranges[1:], start=2):
-                                    chunk_stage_table = chunk_stage_tables[idx - 1]
+                                    chunk_stage_table = road_chunk_stage_tables[idx - 1]
                                     futures.append(
                                         executor.submit(
                                             _import_one_road_chunk,
@@ -1315,13 +1555,18 @@ def ingest_noise_normalized_ogr2ogr(
                                     result = future.result()
                                     chunk_rows_by_index[int(result["idx"])] = int(result["rows"] or 0)
 
-                        expected_rows = sum(chunk_rows_by_index.values())
-                        _merge_road_chunk_tables(
-                            conn,
-                            stage_table=stage_table,
-                            chunk_stage_tables=chunk_stage_tables,
-                            expected_rows=expected_rows,
-                            progress_cb=progress_cb,
+                        road_chunk_total_rows = sum(chunk_rows_by_index.values())
+                        if road_chunk_total_rows <= 0:
+                            raise NoiseIngestError(
+                                f"ogr2ogr imported zero rows for ROI layer {spec.member} via chunk tables"
+                            )
+                        _progress(
+                            progress_cb,
+                            (
+                                f"ogr2ogr imported ROI layer {spec.member} via "
+                                f"{len(road_chunk_stage_tables)} chunk tables rows={road_chunk_total_rows:,} "
+                                f"elapsed={time.perf_counter() - import_started:.1f}s"
+                            ),
                         )
                         break
                 else:
@@ -1344,30 +1589,82 @@ def ingest_noise_normalized_ogr2ogr(
                 )
             import_elapsed = time.perf_counter() - import_started
             raw_extract_seconds += import_elapsed
-            _imported_stage_row_count_or_fail(
-                conn,
-                stage_table=stage_table,
-                source_label=f"ROI layer {spec.member}",
-                elapsed_seconds=import_elapsed,
-                progress_cb=progress_cb,
-            )
+            try:
+                if used_chunking:
+                    _progress(
+                        progress_cb,
+                        (
+                            "Road GDB normalizing directly from "
+                            f"{len(road_chunk_stage_tables)} chunk tables; no merged raw table will be created"
+                        ),
+                    )
+                    started = time.perf_counter()
+                    inserted = _normalize_roi_stage_union(
+                        conn,
+                        stage_tables=road_chunk_stage_tables,
+                        noise_source_hash=noise_source_hash,
+                        round_number=spec.round_number,
+                        source_type=spec.source_type,
+                        source_dataset=spec.zip_name,
+                        source_layer=spec.member,
+                        default_report_period=f"Round {int(spec.round_number)}",
+                        progress_cb=progress_cb,
+                    )
+                    normalize_insert_seconds += time.perf_counter() - started
+                    total_inserted += inserted
+                    _progress(progress_cb, f"Road GDB normalized rows={inserted:,} from chunk tables")
+                    dropped = _drop_tables_best_effort(conn, road_chunk_stage_tables, progress_cb=progress_cb)
+                    _progress(progress_cb, f"Road GDB dropped {dropped} chunk staging tables")
+                else:
+                    _imported_stage_row_count_or_fail(
+                        conn,
+                        stage_table=stage_table,
+                        source_label=f"ROI layer {spec.member}",
+                        elapsed_seconds=import_elapsed,
+                        progress_cb=progress_cb,
+                    )
 
-            _prepare_stage_table(conn, stage_table)
-            started = time.perf_counter()
-            inserted = _normalize_roi_stage(
-                conn,
-                stage_table=stage_table,
-                noise_source_hash=noise_source_hash,
-                round_number=spec.round_number,
-                source_type=spec.source_type,
-                source_dataset=spec.zip_name,
-                source_layer=spec.member,
-                progress_cb=progress_cb,
-            )
-            normalize_insert_seconds += time.perf_counter() - started
-            total_inserted += inserted
-            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
-            conn.commit()
+                    _prepare_stage_table(conn, stage_table)
+                    started = time.perf_counter()
+                    inserted = _normalize_roi_stage(
+                        conn,
+                        stage_table=stage_table,
+                        noise_source_hash=noise_source_hash,
+                        round_number=spec.round_number,
+                        source_type=spec.source_type,
+                        source_dataset=spec.zip_name,
+                        source_layer=spec.member,
+                        progress_cb=progress_cb,
+                    )
+                    normalize_insert_seconds += time.perf_counter() - started
+                    total_inserted += inserted
+                    conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+                conn.commit()
+            except Exception:
+                if used_chunking and road_chunk_stage_tables:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    if _keep_failed_stage_tables():
+                        _progress(
+                            progress_cb,
+                            "Road GDB keeping failed chunk staging tables because NOISE_KEEP_FAILED_STAGE_TABLES=1",
+                        )
+                    else:
+                        dropped = _drop_tables_best_effort(conn, road_chunk_stage_tables, progress_cb=progress_cb)
+                        _progress(
+                            progress_cb,
+                            (
+                                "Road GDB cleanup after failure: dropped "
+                                f"{dropped}/{len(road_chunk_stage_tables)} chunk staging tables"
+                            ),
+                        )
+                        try:
+                            conn.commit()
+                        except Exception:
+                            pass
+                raise
 
         for round_number, zip_name in sorted(NI_ZIP_BY_ROUND.items(), reverse=True):
             zip_path = Path(data_dir) / zip_name

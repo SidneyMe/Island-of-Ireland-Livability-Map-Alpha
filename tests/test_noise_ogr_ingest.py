@@ -39,6 +39,21 @@ class _FakeNormalizeConn:
         return _FakeExecuteResult()
 
 
+class _FakeUnionNormalizeConn:
+    def __init__(self):
+        self.sql_texts: list[str] = []
+
+    def execute(self, statement, params=None):  # noqa: ANN001 - SQLAlchemy text object in production.
+        del params
+        sql = str(statement)
+        self.sql_texts.append(sql)
+        if "SELECT DISTINCT" in sql:
+            return _FakeExecuteResult(rows=[("45-49", 45.0, 49.0)])
+        if "INSERT INTO noise_normalized" in sql:
+            return _FakeExecuteResult(rowcount=7)
+        return _FakeExecuteResult()
+
+
 class _FakeStream:
     def __init__(self, lines):
         self._lines = list(lines)
@@ -307,6 +322,33 @@ class NoiseOgrIngestTests(TestCase):
         self.assertIn("NOT ST_IsEmpty(g.clean_geom)", insert_sql)
         self.assertIn("ST_Area(g.clean_geom) > 0", insert_sql)
 
+    def test_normalize_roi_stage_union_sql_uses_cte_insert_without_create_table(self) -> None:
+        from noise_artifacts.ogr_ingest import _normalize_roi_stage_union
+
+        conn = _FakeUnionNormalizeConn()
+        with patch("noise_artifacts.ogr_ingest._table_columns", return_value=["Time", "DbValue", "Db_Low", "Db_High", "ReportPeriod", "source_fid"]):
+            with patch("noise_artifacts.ogr_ingest._source_ref_expr", return_value=("CAST('x' AS text)", {})):
+                with patch("noise.loader.normalize_noise_band", return_value=(45.0, 49.0, "45-49")):
+                    inserted = _normalize_roi_stage_union(
+                        conn,
+                        stage_tables=["_noise_raw_a_c001", "_noise_raw_a_c002"],
+                        noise_source_hash="h1",
+                        round_number=4,
+                        source_type="road",
+                        source_dataset="Rd4-2022.zip",
+                        source_layer="Noise_R4_Road.gdb",
+                    )
+        self.assertEqual(inserted, 7)
+        insert_sql = next(sql for sql in conn.sql_texts if "INSERT INTO noise_normalized" in sql)
+        self.assertIn("WITH raw_union AS", insert_sql)
+        self.assertIn("UNION ALL", insert_sql)
+        self.assertIn("INSERT INTO noise_normalized", insert_sql)
+        self.assertNotIn("CREATE TABLE", insert_sql)
+        self.assertIn("clean_geom", insert_sql)
+        self.assertIn("clean_geom IS NOT NULL", insert_sql)
+        self.assertIn("NOT ST_IsEmpty", insert_sql)
+        self.assertIn("ST_Area", insert_sql)
+
     def test_extract_source_archive_if_needed_supports_windows_style_member_paths(self) -> None:
         from noise_artifacts.ogr_ingest import extract_source_archive_if_needed
 
@@ -402,6 +444,20 @@ class NoiseOgrIngestTests(TestCase):
         self.assertEqual(feature_count, 75)
         self.assertEqual(ranges, [(0, 24), (25, 49), (50, 74)])
 
+    def test_worker_default_is_conservative(self) -> None:
+        from noise_artifacts.ogr_ingest import _ogr2ogr_gdb_workers
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("noise_artifacts.ogr_ingest.os.cpu_count", return_value=16):
+                self.assertLessEqual(_ogr2ogr_gdb_workers(), 2)
+
+    def test_disk_preflight_helper_passes_when_enough_free_space(self) -> None:
+        from noise_artifacts.ogr_ingest import _assert_road_gdb_disk_preflight
+
+        with patch("noise_artifacts.ogr_ingest._free_disk_gb", return_value=50.0):
+            with patch.dict(os.environ, {"NOISE_MIN_FREE_DISK_GB": "10"}, clear=False):
+                _assert_road_gdb_disk_preflight(progress_cb=None)
+
     def test_import_one_road_chunk_never_uses_append(self) -> None:
         from noise_artifacts.ogr_ingest import _import_one_road_chunk
 
@@ -471,27 +527,34 @@ class NoiseOgrIngestTests(TestCase):
                             with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
                                 with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
                                     with patch("noise_artifacts.ogr_ingest._discover_road_gdb_chunks", return_value=("fid", [(0, 24), (25, 49), (50, 74)], 75)):
-                                        with patch("noise_artifacts.ogr_ingest._import_one_road_chunk", side_effect=_fake_import_one_road_chunk):
-                                            with patch("noise_artifacts.ogr_ingest._merge_road_chunk_tables", side_effect=lambda *args, **kwargs: order.append("merge") or 75):
-                                                with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", side_effect=lambda *args, **kwargs: order.append("stage-count") or 75):
-                                                    with patch("noise_artifacts.ogr_ingest._prepare_stage_table", side_effect=lambda *args, **kwargs: order.append("prepare")):
-                                                        with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=0):
-                                                            with patch.dict(os.environ, {"NOISE_OGR2OGR_GDB_WORKERS": "4"}, clear=False):
-                                                                ingest_noise_normalized_ogr2ogr(
-                                                                    engine,
-                                                                    "h1",
-                                                                    tmp,
-                                                                    None,
-                                                                    progress_cb=lambda _kind, detail, force_log: progress_events.append(str(detail)),
-                                                                )
+                                        with patch("noise_artifacts.ogr_ingest._assert_road_gdb_disk_preflight", return_value=None):
+                                            with patch("noise_artifacts.ogr_ingest._import_one_road_chunk", side_effect=_fake_import_one_road_chunk):
+                                                with patch("noise_artifacts.ogr_ingest._normalize_roi_stage_union", side_effect=lambda *args, **kwargs: order.append("normalize-union") or 11):
+                                                    with patch("noise_artifacts.ogr_ingest._drop_tables_best_effort", side_effect=lambda *args, **kwargs: order.append("drop-chunks") or 3):
+                                                        with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", side_effect=lambda *args, **kwargs: order.append("stage-count") or 75):
+                                                            with patch("noise_artifacts.ogr_ingest._prepare_stage_table", side_effect=lambda *args, **kwargs: order.append("prepare")):
+                                                                with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=0) as mock_single_normalize:
+                                                                    with patch.dict(os.environ, {"NOISE_OGR2OGR_GDB_WORKERS": "4"}, clear=False):
+                                                                        ingest_noise_normalized_ogr2ogr(
+                                                                            engine,
+                                                                            "h1",
+                                                                            tmp,
+                                                                            None,
+                                                                            progress_cb=lambda _kind, detail, force_log: progress_events.append(str(detail)),
+                                                                        )
+        mock_single_normalize.assert_not_called()
 
         self.assertEqual(len(chunk_calls), 3)
         stage_tables = [str(call["chunk_stage_table"]) for call in chunk_calls]
         self.assertEqual(len(stage_tables), len(set(stage_tables)))
         self.assertTrue(all("fid >=" in str(call["where_clause"]) for call in chunk_calls))
         self.assertTrue(any("workers=4" in msg for msg in progress_events))
-        self.assertLess(order.index("merge"), order.index("stage-count"))
-        self.assertLess(order.index("stage-count"), order.index("prepare"))
+        self.assertIn("normalize-union", order)
+        self.assertIn("drop-chunks", order)
+        self.assertNotIn("stage-count", order)
+        self.assertNotIn("prepare", order)
+        self.assertTrue(any("no merged raw table will be created" in msg for msg in progress_events))
+        self.assertTrue(any("Road GDB dropped 3 chunk staging tables" in msg for msg in progress_events))
 
     def test_road_gdb_chunking_retries_with_fid_start_one_when_first_chunk_is_empty(self) -> None:
         from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
@@ -533,52 +596,172 @@ class NoiseOgrIngestTests(TestCase):
                             with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
                                 with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
                                     with patch("noise_artifacts.ogr_ingest._discover_road_gdb_chunks", return_value=("fid", [(0, 24)], 25)):
-                                        with patch("noise_artifacts.ogr_ingest._import_one_road_chunk", side_effect=_fake_import_one_road_chunk):
-                                            with patch("noise_artifacts.ogr_ingest._merge_road_chunk_tables", return_value=25):
-                                                with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", return_value=25):
-                                                    with patch("noise_artifacts.ogr_ingest._prepare_stage_table"):
-                                                        with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=0):
-                                                            with patch.dict(os.environ, {"NOISE_OGR2OGR_FID_START": "0"}, clear=False):
+                                        with patch("noise_artifacts.ogr_ingest._assert_road_gdb_disk_preflight", return_value=None):
+                                            with patch("noise_artifacts.ogr_ingest._import_one_road_chunk", side_effect=_fake_import_one_road_chunk):
+                                                with patch("noise_artifacts.ogr_ingest._normalize_roi_stage_union", return_value=2):
+                                                    with patch("noise_artifacts.ogr_ingest._drop_tables_best_effort", return_value=1):
+                                                        with patch.dict(os.environ, {"NOISE_OGR2OGR_FID_START": "0"}, clear=False):
+                                                            ingest_noise_normalized_ogr2ogr(
+                                                                engine,
+                                                                "h1",
+                                                                tmp,
+                                                                None,
+                                                            )
+
+        self.assertEqual(where_calls[0], "fid >= 0 AND fid <= 24")
+        self.assertEqual(where_calls[1], "fid >= 1 AND fid <= 25")
+
+    def test_road_gdb_cleanup_after_failure_by_default(self) -> None:
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
+
+        roi_spec = SimpleNamespace(
+            zip_name="Rd4-2022.zip",
+            member="Noise_R4_Road.gdb",
+            file_format="gdb",
+            source_type="road",
+            round_number=4,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            source_path = tmp / roi_spec.member
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text("stub", encoding="utf-8")
+
+            drop_calls: list[list[str]] = []
+
+            def _fake_drop(conn, table_names, progress_cb=None):  # noqa: ANN001
+                del conn, progress_cb
+                drop_calls.append(list(table_names))
+                return len(table_names)
+
+            engine = _FakeIngestEngine(_FakeIngestConn())
+            with patch("noise.loader.ROI_SOURCE_SPECS", [roi_spec]):
+                with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                    with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                        with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                            with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                    with patch("noise_artifacts.ogr_ingest._discover_road_gdb_chunks", return_value=("fid", [(0, 24), (25, 49)], 50)):
+                                        with patch("noise_artifacts.ogr_ingest._assert_road_gdb_disk_preflight", return_value=None):
+                                            with patch("noise_artifacts.ogr_ingest._import_one_road_chunk", side_effect=lambda **kwargs: {"idx": kwargs["idx"], "chunk_stage_table": kwargs["chunk_stage_table"], "chunk_low": kwargs["chunk_low"], "chunk_high": kwargs["chunk_high"], "rows": 25, "elapsed_seconds": 0.1}):
+                                                with patch("noise_artifacts.ogr_ingest._normalize_roi_stage_union", side_effect=RuntimeError("boom")):
+                                                    with patch("noise_artifacts.ogr_ingest._drop_tables_best_effort", side_effect=_fake_drop):
+                                                        with self.assertRaises(RuntimeError):
+                                                            ingest_noise_normalized_ogr2ogr(
+                                                                engine,
+                                                                "h1",
+                                                                tmp,
+                                                                None,
+                                                            )
+        self.assertEqual(len(drop_calls), 1)
+        self.assertEqual(len(drop_calls[0]), 2)
+
+    def test_road_gdb_keep_failed_tables_env(self) -> None:
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
+
+        roi_spec = SimpleNamespace(
+            zip_name="Rd4-2022.zip",
+            member="Noise_R4_Road.gdb",
+            file_format="gdb",
+            source_type="road",
+            round_number=4,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            source_path = tmp / roi_spec.member
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text("stub", encoding="utf-8")
+
+            progress_events: list[str] = []
+
+            engine = _FakeIngestEngine(_FakeIngestConn())
+            with patch("noise.loader.ROI_SOURCE_SPECS", [roi_spec]):
+                with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                    with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                        with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                            with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                    with patch("noise_artifacts.ogr_ingest._discover_road_gdb_chunks", return_value=("fid", [(0, 24)], 25)):
+                                        with patch("noise_artifacts.ogr_ingest._assert_road_gdb_disk_preflight", return_value=None):
+                                            with patch("noise_artifacts.ogr_ingest._import_one_road_chunk", side_effect=lambda **kwargs: {"idx": kwargs["idx"], "chunk_stage_table": kwargs["chunk_stage_table"], "chunk_low": kwargs["chunk_low"], "chunk_high": kwargs["chunk_high"], "rows": 25, "elapsed_seconds": 0.1}):
+                                                with patch("noise_artifacts.ogr_ingest._normalize_roi_stage_union", side_effect=RuntimeError("boom")):
+                                                    with patch("noise_artifacts.ogr_ingest._drop_tables_best_effort") as mock_drop:
+                                                        with patch.dict(os.environ, {"NOISE_KEEP_FAILED_STAGE_TABLES": "1"}, clear=False):
+                                                            with self.assertRaises(RuntimeError):
                                                                 ingest_noise_normalized_ogr2ogr(
                                                                     engine,
                                                                     "h1",
                                                                     tmp,
                                                                     None,
+                                                                    progress_cb=lambda _kind, detail, force_log: progress_events.append(str(detail)),
                                                                 )
+        mock_drop.assert_not_called()
+        self.assertTrue(any("keeping failed chunk staging tables" in msg for msg in progress_events))
 
-        self.assertEqual(where_calls[0], "fid >= 0 AND fid <= 24")
-        self.assertEqual(where_calls[1], "fid >= 1 AND fid <= 25")
+    def test_road_gdb_disk_preflight_blocks_before_import_when_low(self) -> None:
+        from noise_artifacts.exceptions import NoiseIngestError
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
 
-    def test_merge_road_chunk_tables_unions_chunks_and_checks_rows(self) -> None:
-        from noise_artifacts.ogr_ingest import _merge_road_chunk_tables
+        roi_spec = SimpleNamespace(
+            zip_name="Rd4-2022.zip",
+            member="Noise_R4_Road.gdb",
+            file_format="gdb",
+            source_type="road",
+            round_number=4,
+        )
 
-        class _MergeConn:
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            source_path = tmp / roi_spec.member
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text("stub", encoding="utf-8")
+
+            engine = _FakeIngestEngine(_FakeIngestConn())
+            with patch("noise.loader.ROI_SOURCE_SPECS", [roi_spec]):
+                with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                    with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                        with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                            with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                    with patch("noise_artifacts.ogr_ingest._discover_road_gdb_chunks", return_value=("fid", [(0, 24)], 25)):
+                                        with patch("noise_artifacts.ogr_ingest._free_disk_gb", return_value=0.5):
+                                            with patch("noise_artifacts.ogr_ingest._import_one_road_chunk") as mock_chunk_import:
+                                                with patch.dict(os.environ, {"NOISE_MIN_FREE_DISK_GB": "10"}, clear=False):
+                                                    with self.assertRaises(NoiseIngestError):
+                                                        ingest_noise_normalized_ogr2ogr(
+                                                            engine,
+                                                            "h1",
+                                                            tmp,
+                                                            None,
+                                                        )
+        mock_chunk_import.assert_not_called()
+
+    def test_drop_tables_best_effort_attempts_all_tables(self) -> None:
+        from noise_artifacts.ogr_ingest import _drop_tables_best_effort
+
+        class _DropConn:
             def __init__(self):
                 self.sql: list[str] = []
 
             def execute(self, statement, params=None):  # noqa: ANN001
                 del params
                 self.sql.append(str(statement))
+                if "c002" in str(statement):
+                    raise RuntimeError("drop fail")
                 return _FakeExecuteResult()
 
-        conn = _MergeConn()
-        with patch("noise_artifacts.ogr_ingest._stage_row_count", return_value=42):
-            merged_rows = _merge_road_chunk_tables(
-                conn,
-                stage_table="_noise_raw_stage",
-                chunk_stage_tables=[
-                    "_noise_raw_stage_c001",
-                    "_noise_raw_stage_c002",
-                    "_noise_raw_stage_c003",
-                ],
-                expected_rows=42,
-                progress_cb=None,
-            )
-        self.assertEqual(merged_rows, 42)
+        conn = _DropConn()
+        dropped = _drop_tables_best_effort(
+            conn,
+            ["_noise_raw_stage_c001", "_noise_raw_stage_c002", "_noise_raw_stage_c003"],
+            progress_cb=None,
+        )
+        self.assertEqual(dropped, 2)
         sql_blob = "\n".join(conn.sql)
-        self.assertIn("CREATE TABLE \"_noise_raw_stage\" AS", sql_blob)
-        self.assertIn("UNION ALL", sql_blob)
-        self.assertIn("DROP TABLE IF EXISTS \"_noise_raw_stage_c001\"", sql_blob)
+        self.assertIn("DROP TABLE IF EXISTS \"_noise_raw_stage_c001\" CASCADE", sql_blob)
+        self.assertIn("DROP TABLE IF EXISTS \"_noise_raw_stage_c002\" CASCADE", sql_blob)
 
     def test_stage_count_logged_after_import(self) -> None:
         from noise_artifacts.ogr_ingest import _imported_stage_row_count_or_fail
