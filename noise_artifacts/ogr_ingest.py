@@ -12,7 +12,7 @@ import tempfile
 import threading
 import time
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -33,9 +33,14 @@ _DEFAULT_OGR2OGR_FID_START = 0
 _OGR2OGR_GDB_WORKERS_ENV = "NOISE_OGR2OGR_GDB_WORKERS"
 _DEFAULT_OGR2OGR_GDB_WORKERS = 2
 _MAX_OGR2OGR_GDB_WORKERS = 6
+_WINDOWS_DEFAULT_OGR2OGR_GDB_WORKERS = 1
+_WINDOWS_ROAD_GDB_TIMEOUT_SECONDS = 900
+_DEFAULT_ROAD_GDB_TIMEOUT_SECONDS = 1800
 _MIN_FREE_DISK_GB_ENV = "NOISE_MIN_FREE_DISK_GB"
-_DEFAULT_MIN_FREE_DISK_GB = 10.0
+_DEFAULT_MIN_FREE_DISK_GB = 30.0
 _KEEP_FAILED_STAGE_TABLES_ENV = "NOISE_KEEP_FAILED_STAGE_TABLES"
+_ACTIVE_OGR_PROCS_LOCK = threading.Lock()
+_ACTIVE_OGR_PROCS: dict[int, tuple[subprocess.Popen, str]] = {}
 _ROI_OGR_CANDIDATE_FIELDS = [
     "Time",
     "TIME",
@@ -114,11 +119,20 @@ def _env_int(name: str, default: int) -> int:
     return value
 
 
-def _ogr2ogr_timeout_seconds() -> float | None:
-    value = _env_int(_OGR2OGR_TIMEOUT_ENV, 0)
-    if value <= 0:
+def _ogr2ogr_timeout_seconds(*, road_gdb_chunk: bool = False) -> float | None:
+    raw = (os.getenv(_OGR2OGR_TIMEOUT_ENV) or "").strip()
+    if raw:
+        value = _env_int(_OGR2OGR_TIMEOUT_ENV, 0)
+        if value <= 0:
+            return None
+        return float(value)
+    if not road_gdb_chunk:
         return None
-    return float(value)
+    return float(
+        _WINDOWS_ROAD_GDB_TIMEOUT_SECONDS
+        if os.name == "nt"
+        else _DEFAULT_ROAD_GDB_TIMEOUT_SECONDS
+    )
 
 
 def _ogr2ogr_gdb_chunk_size() -> int:
@@ -138,7 +152,12 @@ def _ogr2ogr_fid_start() -> int:
 def _ogr2ogr_gdb_workers() -> int:
     raw = (os.getenv(_OGR2OGR_GDB_WORKERS_ENV) or "").strip()
     if not raw:
-        default = min(_DEFAULT_OGR2OGR_GDB_WORKERS, os.cpu_count() or 1)
+        default_target = (
+            _WINDOWS_DEFAULT_OGR2OGR_GDB_WORKERS
+            if os.name == "nt"
+            else _DEFAULT_OGR2OGR_GDB_WORKERS
+        )
+        default = min(default_target, os.cpu_count() or 1)
         return max(1, min(default, _MAX_OGR2OGR_GDB_WORKERS))
     value = _env_int(_OGR2OGR_GDB_WORKERS_ENV, _DEFAULT_OGR2OGR_GDB_WORKERS)
     if value <= 0:
@@ -168,23 +187,51 @@ def _free_disk_gb(path: Path) -> float:
     return float(usage.free) / (1024.0 ** 3)
 
 
-def _road_gdb_preflight_path() -> Path:
-    return Path(".").resolve()
+def _nearest_existing_path(path: Path) -> Path:
+    current = path.resolve()
+    while not current.exists() and current.parent != current:
+        current = current.parent
+    return current
 
 
-def _assert_road_gdb_disk_preflight(progress_cb=None) -> None:
-    preflight_path = _road_gdb_preflight_path()
-    free_gb = _free_disk_gb(preflight_path)
+def _pg_data_directory(conn) -> Path:
+    value = conn.execute(text("SHOW data_directory")).scalar_one_or_none()
+    if not value:
+        raise NoiseIngestError("could not resolve PostgreSQL data_directory via SHOW data_directory")
+    return Path(str(value))
+
+
+def _assert_road_gdb_disk_preflight(conn, progress_cb=None) -> None:
+    cache_path = _nearest_existing_path(_noise_gdal_cache_dir())
+    pg_data_dir = _nearest_existing_path(_pg_data_directory(conn))
+    cache_free_gb = _free_disk_gb(cache_path)
+    pg_free_gb = _free_disk_gb(pg_data_dir)
     min_gb = _min_free_disk_gb()
     _progress(
         progress_cb,
-        f"disk preflight: free={free_gb:.2f}GB min={min_gb:.2f}GB path={preflight_path}",
+        f"disk preflight: cache_free={cache_free_gb:.2f}GB path={cache_path}",
     )
-    if free_gb < min_gb:
+    _progress(
+        progress_cb,
+        f"disk preflight: postgres_free={pg_free_gb:.2f}GB data_directory={pg_data_dir}",
+    )
+    _progress(
+        progress_cb,
+        f"disk preflight: min={min_gb:.2f}GB",
+    )
+    if cache_free_gb < min_gb:
         raise NoiseIngestError(
             "Not enough free disk for Road GDB ingest: "
-            f"free {free_gb:.2f} GB, require at least {min_gb:.2f} GB. "
-            "Clean .livability_cache and Postgres _noise_raw_* tables."
+            f"cache path has {cache_free_gb:.2f} GB free, requires at least {min_gb:.2f} GB. "
+            "Clean stale _noise_raw_* tables and .livability_cache, or lower "
+            "NOISE_MIN_FREE_DISK_GB only if you know what you are doing."
+        )
+    if pg_free_gb < min_gb:
+        raise NoiseIngestError(
+            "Not enough free disk for Road GDB ingest: "
+            f"PostgreSQL data directory has {pg_free_gb:.2f} GB free, requires at least {min_gb:.2f} GB. "
+            "Clean stale _noise_raw_* tables and .livability_cache, or lower "
+            "NOISE_MIN_FREE_DISK_GB only if you know what you are doing."
         )
 
 
@@ -660,6 +707,7 @@ def _run_ogr2ogr_import(
     where_clause: str | None = None,
     progress_cb=None,
     timeout_seconds: float | None = None,
+    operation_context: str | None = None,
 ) -> None:
     cmd = build_ogr2ogr_command(
         engine=engine,
@@ -672,9 +720,10 @@ def _run_ogr2ogr_import(
         progress=True,
     )
     safe_cmd = _redact_pg_password(cmd)
+    context_label = operation_context or f"stage={stage_table}"
     _progress(
         progress_cb,
-        f"starting ogr2ogr import: stage={stage_table} source={source_path.name} append={append} cmd={safe_cmd}",
+        f"starting ogr2ogr import: stage={stage_table} source={source_path.name} append={append} context={context_label} cmd={safe_cmd}",
     )
 
     proc = subprocess.Popen(
@@ -684,8 +733,12 @@ def _run_ogr2ogr_import(
         text=True,
         bufsize=1,
     )
+    with _ACTIVE_OGR_PROCS_LOCK:
+        _ACTIVE_OGR_PROCS[id(proc)] = (proc, context_label)
     if proc.stdout is None:
         proc.kill()
+        with _ACTIVE_OGR_PROCS_LOCK:
+            _ACTIVE_OGR_PROCS.pop(id(proc), None)
         raise NoiseIngestError(f"ogr2ogr did not provide stdout pipe for stage={stage_table}")
 
     output_queue: queue.Queue[str] = queue.Queue()
@@ -704,40 +757,59 @@ def _run_ogr2ogr_import(
     last_heartbeat = start
     lines: list[str] = []
 
-    while True:
-        try:
-            line = output_queue.get(timeout=1.0)
-        except queue.Empty:
-            line = None
+    try:
+        while True:
+            try:
+                line = output_queue.get(timeout=1.0)
+            except queue.Empty:
+                line = None
 
-        now = time.monotonic()
-        elapsed = now - start
+            now = time.monotonic()
+            elapsed = now - start
 
-        if line is not None:
-            stripped = line.strip()
-            if stripped:
-                lines.append(stripped)
-                if "ERROR" in stripped.upper() or (now - last_line_log) >= 15.0:
-                    _progress(progress_cb, f"ogr2ogr {stage_table}: {stripped}")
-                    last_line_log = now
+            if line is not None:
+                stripped = line.strip()
+                if stripped:
+                    lines.append(stripped)
+                    if "ERROR" in stripped.upper() or (now - last_line_log) >= 15.0:
+                        _progress(progress_cb, f"ogr2ogr {stage_table}: {stripped}")
+                        last_line_log = now
 
-        if (now - last_heartbeat) >= 30.0 and proc.poll() is None:
-            _progress(
-                progress_cb,
-                f"ogr2ogr still running: source={source_path.name} stage={stage_table} elapsed={_format_elapsed(elapsed)}",
-            )
-            last_heartbeat = now
+            if (now - last_heartbeat) >= 30.0 and proc.poll() is None:
+                _progress(
+                    progress_cb,
+                    f"ogr2ogr still running: source={source_path.name} stage={stage_table} elapsed={_format_elapsed(elapsed)}",
+                )
+                last_heartbeat = now
 
-        if timeout_seconds is not None and elapsed > timeout_seconds and proc.poll() is None:
-            proc.kill()
-            proc.wait()
-            raise NoiseIngestError(
-                "ogr2ogr import timed out "
-                f"for {source_path} -> {stage_table} after {_format_elapsed(elapsed)}; cmd={safe_cmd}"
-            )
+            if timeout_seconds is not None and elapsed > timeout_seconds and proc.poll() is None:
+                proc.kill()
+                proc.wait()
+                _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
+                raise NoiseIngestError(
+                    "ogr2ogr import timed out "
+                    f"for source={source_path} layer={layer_name or '(default)'} stage={stage_table} "
+                    f"context={context_label} where={where_clause or '(none)'} "
+                    f"after {_format_elapsed(elapsed)}; cmd={safe_cmd}"
+                )
 
-        if proc.poll() is not None and output_queue.empty():
-            break
+            if proc.poll() is not None and output_queue.empty():
+                break
+    except BaseException:
+        if proc.poll() is None:
+            _progress(progress_cb, f"terminating ogr2ogr after interrupt/error: stage={stage_table}")
+            proc.terminate()
+            try:
+                proc.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                _progress(progress_cb, f"killing ogr2ogr after terminate timeout: stage={stage_table}")
+                proc.kill()
+                proc.wait()
+        raise
+    finally:
+        with _ACTIVE_OGR_PROCS_LOCK:
+            _ACTIVE_OGR_PROCS.pop(id(proc), None)
+        pump_thread.join(timeout=1.0)
 
     rc = proc.wait()
     if rc != 0:
@@ -1143,6 +1215,7 @@ def _import_one_road_chunk(
         where_clause=where_clause,
         progress_cb=progress_cb,
         timeout_seconds=timeout_seconds,
+        operation_context=f"road-chunk idx={idx}/{total_chunks} fid={chunk_low}-{chunk_high}",
     )
     with engine.connect() as chunk_conn:
         row_count = _stage_row_count(chunk_conn, chunk_stage_table)
@@ -1188,6 +1261,252 @@ def _drop_tables_best_effort(conn_or_engine, table_names: list[str], progress_cb
             except Exception:
                 pass
     return dropped
+
+
+def _terminate_active_ogr2ogr_processes(progress_cb=None) -> int:
+    with _ACTIVE_OGR_PROCS_LOCK:
+        active = list(_ACTIVE_OGR_PROCS.values())
+    terminated = 0
+    for proc, context_label in active:
+        if proc.poll() is not None:
+            continue
+        terminated += 1
+        _progress(progress_cb, f"terminating active ogr2ogr process: context={context_label}")
+        proc.terminate()
+        try:
+            proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            _progress(progress_cb, f"killing active ogr2ogr process after terminate timeout: context={context_label}")
+            proc.kill()
+            proc.wait()
+    return terminated
+
+
+def _cleanup_stale_road_stage_tables(conn, *, stage_table: str, progress_cb=None) -> int:
+    rows = conn.execute(
+        text(
+            """
+            SELECT tablename
+            FROM pg_tables
+            WHERE schemaname = current_schema()
+              AND (tablename = :stage_table OR tablename LIKE :chunk_like)
+            """
+        ),
+        {"stage_table": stage_table, "chunk_like": f"{stage_table}_c%"},
+    ).fetchall()
+    table_names = [str(row[0]) for row in rows if row and row[0]]
+    dropped = 0
+    if table_names:
+        dropped = _drop_tables_best_effort(conn, table_names, progress_cb=progress_cb)
+    _progress(
+        progress_cb,
+        f"Road GDB stale cleanup: dropped {dropped} stale chunk/stage tables for prefix {stage_table}",
+    )
+    return dropped
+
+
+def _cleanup_road_chunk_tables_after_failure(
+    conn,
+    *,
+    stage_table: str,
+    known_chunk_tables: set[str],
+    progress_cb=None,
+) -> None:
+    if _keep_failed_stage_tables():
+        _progress(
+            progress_cb,
+            "Road GDB keeping failed chunk staging tables because NOISE_KEEP_FAILED_STAGE_TABLES=1",
+        )
+        return
+
+    discovered_chunk_tables: list[str] = []
+    try:
+        rows = conn.execute(
+            text(
+                """
+                SELECT tablename
+                FROM pg_tables
+                WHERE schemaname = current_schema()
+                  AND tablename LIKE :chunk_like
+                """
+            ),
+            {"chunk_like": f"{stage_table}_c%"},
+        ).fetchall()
+        discovered_chunk_tables = [str(row[0]) for row in rows if row and row[0]]
+    except Exception:
+        discovered_chunk_tables = []
+
+    known_list = [name for name in sorted(known_chunk_tables) if name]
+    chunk_tables = list(dict.fromkeys([*known_list, *discovered_chunk_tables]))
+    dropped = 0
+    if chunk_tables:
+        dropped = _drop_tables_best_effort(conn, chunk_tables, progress_cb=progress_cb)
+    _progress(
+        progress_cb,
+        (
+            "Road GDB cleanup after failure: dropped "
+            f"{dropped}/{len(chunk_tables)} known chunk staging tables"
+        ),
+    )
+    try:
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _run_road_gdb_chunks_fail_fast(
+    conn,
+    *,
+    engine: Engine,
+    source_path: Path,
+    layer_name: str,
+    selected_fields: list[str],
+    stage_table: str,
+    id_column: str,
+    chunk_ranges: list[tuple[int, int]],
+    worker_count: int,
+    timeout_seconds: float | None,
+    noise_source_hash: str,
+    round_number: int,
+    source_type: str,
+    source_dataset: str,
+    source_layer: str,
+    progress_cb=None,
+) -> tuple[int, int]:
+    expected_chunks = len(chunk_ranges)
+    if expected_chunks <= 0:
+        return 0, 0
+
+    chunk_jobs = [
+        (
+            idx,
+            chunk_low,
+            chunk_high,
+            _road_chunk_stage_table_name(stage_table, idx),
+        )
+        for idx, (chunk_low, chunk_high) in enumerate(chunk_ranges, start=1)
+    ]
+    known_chunk_tables = {job[3] for job in chunk_jobs}
+    imported_rows_total = 0
+    inserted_rows_total = 0
+    completed_chunks = 0
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        running: dict[Any, tuple[int, int, int, str]] = {}
+        next_job_index = 0
+
+        def _submit_next() -> None:
+            nonlocal next_job_index
+            if next_job_index >= len(chunk_jobs):
+                return
+            idx, chunk_low, chunk_high, chunk_stage_table = chunk_jobs[next_job_index]
+            next_job_index += 1
+            future = executor.submit(
+                _import_one_road_chunk,
+                engine=engine,
+                source_path=source_path,
+                layer_name=layer_name,
+                selected_fields=selected_fields,
+                chunk_stage_table=chunk_stage_table,
+                idx=idx,
+                total_chunks=expected_chunks,
+                chunk_low=chunk_low,
+                chunk_high=chunk_high,
+                where_clause=f"{id_column} >= {chunk_low} AND {id_column} <= {chunk_high}",
+                timeout_seconds=timeout_seconds,
+                progress_cb=progress_cb,
+            )
+            running[future] = (idx, chunk_low, chunk_high, chunk_stage_table)
+
+        for _ in range(min(worker_count, len(chunk_jobs))):
+            _submit_next()
+
+        while running:
+            done, _ = wait(set(running.keys()), return_when=FIRST_COMPLETED)
+            for future in done:
+                idx, chunk_low, chunk_high, chunk_stage_table = running.pop(future)
+                try:
+                    result = future.result()
+                except BaseException as exc:
+                    for pending in running:
+                        pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
+                    _cleanup_road_chunk_tables_after_failure(
+                        conn,
+                        stage_table=stage_table,
+                        known_chunk_tables=known_chunk_tables,
+                        progress_cb=progress_cb,
+                    )
+                    if isinstance(exc, KeyboardInterrupt):
+                        raise
+                    raise NoiseIngestError(
+                        "Road GDB chunk failed: "
+                        f"idx={idx}/{expected_chunks} fid={chunk_low}-{chunk_high} "
+                        f"stage={chunk_stage_table}: {exc}"
+                    ) from exc
+
+                chunk_rows = int(result.get("rows", 0) or 0)
+                try:
+                    imported_rows_total += chunk_rows
+                    completed_chunks += 1
+
+                    if chunk_rows > 0:
+                        _progress(
+                            progress_cb,
+                            f"Road GDB normalizing chunk {idx}/{expected_chunks} table={chunk_stage_table}",
+                        )
+                        inserted = _normalize_roi_stage(
+                            conn,
+                            stage_table=chunk_stage_table,
+                            noise_source_hash=noise_source_hash,
+                            round_number=round_number,
+                            source_type=source_type,
+                            source_dataset=source_dataset,
+                            source_layer=source_layer,
+                            progress_cb=progress_cb,
+                        )
+                        inserted_rows_total += inserted
+                        _progress(
+                            progress_cb,
+                            f"Road GDB normalized chunk {idx}/{expected_chunks} inserted={inserted:,}",
+                        )
+                    else:
+                        _progress(
+                            progress_cb,
+                            f"Road GDB chunk {idx}/{expected_chunks} imported zero rows for fid {chunk_low}-{chunk_high}",
+                        )
+
+                    _drop_tables_best_effort(conn, [chunk_stage_table], progress_cb=progress_cb)
+                    _progress(progress_cb, f"Road GDB dropped chunk table {chunk_stage_table}")
+                    known_chunk_tables.discard(chunk_stage_table)
+                    conn.commit()
+                    _submit_next()
+                except BaseException as exc:
+                    for pending in running:
+                        pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
+                    _cleanup_road_chunk_tables_after_failure(
+                        conn,
+                        stage_table=stage_table,
+                        known_chunk_tables=known_chunk_tables,
+                        progress_cb=progress_cb,
+                    )
+                    if isinstance(exc, KeyboardInterrupt):
+                        raise
+                    raise NoiseIngestError(
+                        "Road GDB chunk post-import processing failed: "
+                        f"idx={idx}/{expected_chunks} fid={chunk_low}-{chunk_high} "
+                        f"stage={chunk_stage_table}: {exc}"
+                    ) from exc
+
+    if completed_chunks != expected_chunks:
+        raise NoiseIngestError(
+            "Road GDB chunk execution incomplete: "
+            f"completed={completed_chunks} expected={expected_chunks}"
+        )
+    return imported_rows_total, inserted_rows_total
 
 
 def _normalize_roi_stage_union(
@@ -1422,6 +1741,7 @@ def ingest_noise_normalized_ogr2ogr(
     normalize_insert_seconds = 0.0
     total_inserted = 0
     timeout_seconds = _ogr2ogr_timeout_seconds()
+    road_chunk_timeout_seconds = _ogr2ogr_timeout_seconds(road_gdb_chunk=True)
 
     with engine.connect() as conn:
         for spec in ROI_SOURCE_SPECS:
@@ -1461,8 +1781,6 @@ def ingest_noise_normalized_ogr2ogr(
 
             import_started = time.perf_counter()
             used_chunking = False
-            road_chunk_stage_tables: list[str] = []
-            road_chunk_total_rows = 0
             if layer_name and _supports_chunked_road_gdb_import(
                 source_type=spec.source_type,
                 file_format=spec.file_format,
@@ -1471,11 +1789,20 @@ def ingest_noise_normalized_ogr2ogr(
                 id_column, chunk_ranges, feature_count = _discover_road_gdb_chunks(source_path, layer_name)
                 if chunk_ranges:
                     used_chunking = True
-                    _assert_road_gdb_disk_preflight(progress_cb=progress_cb)
+                    _assert_road_gdb_disk_preflight(conn, progress_cb=progress_cb)
+                    _cleanup_stale_road_stage_tables(conn, stage_table=stage_table, progress_cb=progress_cb)
                     configured_fid_start = _ogr2ogr_fid_start()
                     chunk_size = _ogr2ogr_gdb_chunk_size()
                     workers = _ogr2ogr_gdb_workers()
+                    if workers > 4:
+                        _progress(
+                            progress_cb,
+                            "warning: high Road GDB workers may increase PostgreSQL disk/WAL pressure",
+                        )
                     active_fid_start = configured_fid_start
+                    imported_rows_total = 0
+                    inserted_rows_total = 0
+                    known_chunk_tables: set[str] = set()
                     while True:
                         current_ranges = (
                             _fid_chunk_ranges(
@@ -1489,86 +1816,84 @@ def ingest_noise_normalized_ogr2ogr(
                         total_chunks = len(current_ranges)
                         if total_chunks <= 0:
                             break
+                        worker_count = max(1, min(workers, total_chunks))
                         _progress(
                             progress_cb,
                             "ogr2ogr Road GDB parallel chunking enabled: "
-                            f"workers={workers} chunks={total_chunks} chunk_size={chunk_size}",
+                            f"workers={worker_count} chunks={total_chunks} chunk_size={chunk_size}",
+                        )
+                        _progress(
+                            progress_cb,
+                            f"Road GDB submitting all {total_chunks} chunks to worker pool workers={worker_count}",
+                        )
+                        if os.name == "nt" and worker_count > 1:
+                            _progress(
+                                progress_cb,
+                                "WARNING: parallel Road GDB ogr2ogr workers on Windows are experimental and may "
+                                "hang/fail with GDAL/WinSock errors. Use NOISE_OGR2OGR_GDB_WORKERS=1 for stable ingest.",
+                            )
+                        _progress(
+                            progress_cb,
+                            "Road GDB will normalize and drop each chunk table as it completes; no merged raw table will be created",
                         )
                         road_chunk_stage_tables = [
                             _road_chunk_stage_table_name(stage_table, idx)
                             for idx in range(1, total_chunks + 1)
                         ]
-                        for chunk_stage_table in road_chunk_stage_tables:
-                            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(chunk_stage_table)}"))
-
-                        first_low, first_high = current_ranges[0]
-                        first_stage_table = road_chunk_stage_tables[0]
-                        first_result = _import_one_road_chunk(
+                        known_chunk_tables = set(road_chunk_stage_tables)
+                        norm_started = time.perf_counter()
+                        attempt_imported_rows, attempt_inserted_rows = _run_road_gdb_chunks_fail_fast(
+                            conn,
                             engine=engine,
                             source_path=source_path,
                             layer_name=layer_name,
                             selected_fields=selected_fields,
-                            chunk_stage_table=first_stage_table,
-                            idx=1,
-                            total_chunks=total_chunks,
-                            chunk_low=first_low,
-                            chunk_high=first_high,
-                            where_clause=f"{id_column} >= {first_low} AND {id_column} <= {first_high}",
-                            timeout_seconds=timeout_seconds,
+                            stage_table=stage_table,
+                            id_column=id_column,
+                            chunk_ranges=current_ranges,
+                            worker_count=worker_count,
+                            timeout_seconds=road_chunk_timeout_seconds,
+                            noise_source_hash=noise_source_hash,
+                            round_number=spec.round_number,
+                            source_type=spec.source_type,
+                            source_dataset=spec.zip_name,
+                            source_layer=spec.member,
                             progress_cb=progress_cb,
                         )
-                        first_rows = int(first_result["rows"] or 0)
-                        if first_rows <= 0 and active_fid_start == 0:
+                        normalize_insert_seconds += time.perf_counter() - norm_started
+
+                        if attempt_imported_rows > 0:
+                            imported_rows_total += attempt_imported_rows
+                            inserted_rows_total += attempt_inserted_rows
+                            break
+                        if active_fid_start == 0:
                             _progress(
                                 progress_cb,
-                                "ogr2ogr Road GDB first chunk returned 0 rows with fid_start=0; retrying with fid_start=1",
+                                "Road GDB fid_start=0 produced zero rows; retrying with fid_start=1",
                             )
-                            conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(first_stage_table)}"))
+                            dropped = _drop_tables_best_effort(
+                                conn,
+                                sorted(known_chunk_tables),
+                                progress_cb=progress_cb,
+                            )
+                            if dropped > 0:
+                                known_chunk_tables.clear()
+                            conn.commit()
                             active_fid_start = 1
                             continue
-
-                        chunk_rows_by_index: dict[int, int] = {1: first_rows}
-                        if total_chunks > 1:
-                            worker_count = max(1, min(workers, total_chunks - 1))
-                            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                                futures = []
-                                for idx, (chunk_low, chunk_high) in enumerate(current_ranges[1:], start=2):
-                                    chunk_stage_table = road_chunk_stage_tables[idx - 1]
-                                    futures.append(
-                                        executor.submit(
-                                            _import_one_road_chunk,
-                                            engine=engine,
-                                            source_path=source_path,
-                                            layer_name=layer_name,
-                                            selected_fields=selected_fields,
-                                            chunk_stage_table=chunk_stage_table,
-                                            idx=idx,
-                                            total_chunks=total_chunks,
-                                            chunk_low=chunk_low,
-                                            chunk_high=chunk_high,
-                                            where_clause=f"{id_column} >= {chunk_low} AND {id_column} <= {chunk_high}",
-                                            timeout_seconds=timeout_seconds,
-                                            progress_cb=progress_cb,
-                                        )
-                                    )
-                                for future in as_completed(futures):
-                                    result = future.result()
-                                    chunk_rows_by_index[int(result["idx"])] = int(result["rows"] or 0)
-
-                        road_chunk_total_rows = sum(chunk_rows_by_index.values())
-                        if road_chunk_total_rows <= 0:
-                            raise NoiseIngestError(
-                                f"ogr2ogr imported zero rows for ROI layer {spec.member} via chunk tables"
-                            )
-                        _progress(
-                            progress_cb,
-                            (
-                                f"ogr2ogr imported ROI layer {spec.member} via "
-                                f"{len(road_chunk_stage_tables)} chunk tables rows={road_chunk_total_rows:,} "
-                                f"elapsed={time.perf_counter() - import_started:.1f}s"
-                            ),
+                        raise NoiseIngestError(
+                            f"Road GDB chunks imported zero rows for ROI layer {spec.member} "
+                            f"(fid_start={active_fid_start})"
                         )
-                        break
+                    if imported_rows_total <= 0:
+                        raise NoiseIngestError(
+                            f"Road GDB chunks imported zero rows for ROI layer {spec.member}"
+                        )
+                    _progress(
+                        progress_cb,
+                        f"Road GDB total imported rows={imported_rows_total:,} normalized rows={inserted_rows_total:,}",
+                    )
+                    total_inserted += inserted_rows_total
                 else:
                     _progress(
                         progress_cb,
@@ -1590,32 +1915,7 @@ def ingest_noise_normalized_ogr2ogr(
             import_elapsed = time.perf_counter() - import_started
             raw_extract_seconds += import_elapsed
             try:
-                if used_chunking:
-                    _progress(
-                        progress_cb,
-                        (
-                            "Road GDB normalizing directly from "
-                            f"{len(road_chunk_stage_tables)} chunk tables; no merged raw table will be created"
-                        ),
-                    )
-                    started = time.perf_counter()
-                    inserted = _normalize_roi_stage_union(
-                        conn,
-                        stage_tables=road_chunk_stage_tables,
-                        noise_source_hash=noise_source_hash,
-                        round_number=spec.round_number,
-                        source_type=spec.source_type,
-                        source_dataset=spec.zip_name,
-                        source_layer=spec.member,
-                        default_report_period=f"Round {int(spec.round_number)}",
-                        progress_cb=progress_cb,
-                    )
-                    normalize_insert_seconds += time.perf_counter() - started
-                    total_inserted += inserted
-                    _progress(progress_cb, f"Road GDB normalized rows={inserted:,} from chunk tables")
-                    dropped = _drop_tables_best_effort(conn, road_chunk_stage_tables, progress_cb=progress_cb)
-                    _progress(progress_cb, f"Road GDB dropped {dropped} chunk staging tables")
-                else:
+                if not used_chunking:
                     _imported_stage_row_count_or_fail(
                         conn,
                         stage_table=stage_table,
@@ -1641,29 +1941,55 @@ def ingest_noise_normalized_ogr2ogr(
                     conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
                 conn.commit()
             except Exception:
-                if used_chunking and road_chunk_stage_tables:
+                if used_chunking:
                     try:
                         conn.rollback()
                     except Exception:
                         pass
-                    if _keep_failed_stage_tables():
-                        _progress(
-                            progress_cb,
-                            "Road GDB keeping failed chunk staging tables because NOISE_KEEP_FAILED_STAGE_TABLES=1",
-                        )
-                    else:
-                        dropped = _drop_tables_best_effort(conn, road_chunk_stage_tables, progress_cb=progress_cb)
-                        _progress(
-                            progress_cb,
-                            (
-                                "Road GDB cleanup after failure: dropped "
-                                f"{dropped}/{len(road_chunk_stage_tables)} chunk staging tables"
+                if _keep_failed_stage_tables():
+                    _progress(
+                        progress_cb,
+                        "Road GDB keeping failed chunk staging tables because NOISE_KEEP_FAILED_STAGE_TABLES=1",
+                    )
+                else:
+                    discovered_chunk_tables: list[str] = []
+                    try:
+                        rows = conn.execute(
+                            text(
+                                """
+                                SELECT tablename
+                                FROM pg_tables
+                                WHERE schemaname = current_schema()
+                                  AND tablename LIKE :chunk_like
+                                """
                             ),
-                        )
-                        try:
-                            conn.commit()
-                        except Exception:
-                            pass
+                            {"chunk_like": f"{stage_table}_c%"},
+                        ).fetchall()
+                        discovered_chunk_tables = [
+                            str(row[0]) for row in rows if row and row[0]
+                        ]
+                    except Exception:
+                        discovered_chunk_tables = []
+                    try:
+                        known_from_attempt = [name for name in sorted(known_chunk_tables) if name]
+                    except Exception:
+                        known_from_attempt = []
+                    chunk_tables = list(dict.fromkeys([*known_from_attempt, *discovered_chunk_tables]))
+                    dropped = 0
+                    if chunk_tables:
+                        dropped = _drop_tables_best_effort(conn, chunk_tables, progress_cb=progress_cb)
+                    _progress(
+                        progress_cb,
+                        (
+                            "Road GDB cleanup after failure: dropped "
+                            f"{dropped}/{len(chunk_tables)} known chunk staging tables"
+                        ),
+                    )
+                    try:
+                        conn.commit()
+                    except Exception:
+                        pass
+                _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
                 raise
 
         for round_number, zip_name in sorted(NI_ZIP_BY_ROUND.items(), reverse=True):

@@ -15,7 +15,7 @@ import time
 from binascii import unhexlify
 from decimal import Decimal
 from itertools import islice
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -112,6 +112,41 @@ def _existing_source_row_count(engine: Engine, noise_source_hash: str) -> int:
             return 0
         return parsed if parsed > 0 else 0
     return 0
+
+
+def _source_manifest_state(engine: Engine, noise_source_hash: str) -> dict[str, Any] | None:
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT status, manifest_json
+                    FROM noise_artifact_manifest
+                    WHERE artifact_hash = :h
+                      AND artifact_type = 'source'
+                    """
+                ),
+                {"h": noise_source_hash},
+            ).mappings().first()
+    except Exception:
+        return None
+    if row is None:
+        return None
+    manifest_json = row.get("manifest_json") or {}
+    if not isinstance(manifest_json, dict):
+        manifest_json = {}
+    return {
+        "status": str(row.get("status") or ""),
+        "manifest_json": manifest_json,
+    }
+
+
+def _delete_source_rows(engine: Engine, noise_source_hash: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM noise_normalized WHERE noise_source_hash = :h"),
+            {"h": noise_source_hash},
+        )
 
 
 def _validate_noise_row(row: dict) -> None:
@@ -483,23 +518,57 @@ def ingest_noise_normalized(
 
     cache_lookup_started = time.perf_counter()
     existing_rows = _existing_source_row_count(engine, noise_source_hash)
+    source_manifest = _source_manifest_state(engine, noise_source_hash)
     _timing(progress_cb, "ingest.cache_lookup", time.perf_counter() - cache_lookup_started)
 
     if reimport_source:
-        with engine.begin() as conn:
-            conn.execute(
-                text("DELETE FROM noise_normalized WHERE noise_source_hash = :h"),
-                {"h": noise_source_hash},
-            )
-            log.info("deleted prior noise_normalized rows for source_hash=%s", noise_source_hash)
-        existing_rows = 0
-    elif existing_rows > 0:
         _progress(
             progress_cb,
-            f"source normalized rows already exist for source={noise_source_hash}; skipping raw ingest",
+            "reimport_source=True; deleting existing source rows and rebuilding",
         )
-        _timing(progress_cb, "ingest.total", 0.0)
-        return 0
+        _delete_source_rows(engine, noise_source_hash)
+        log.info("deleted prior noise_normalized rows for source_hash=%s", noise_source_hash)
+        existing_rows = 0
+    elif existing_rows > 0:
+        status = str((source_manifest or {}).get("status") or "")
+        manifest_json = dict((source_manifest or {}).get("manifest_json") or {})
+        manifest_rows = manifest_json.get("row_count")
+        manifest_schema = manifest_json.get("ingest_schema_version")
+        ingest_complete = bool(manifest_json.get("ingest_complete"))
+        manifest_rows_int = None
+        manifest_schema_int = None
+        try:
+            if manifest_rows is not None:
+                manifest_rows_int = int(manifest_rows)
+        except (TypeError, ValueError):
+            manifest_rows_int = None
+        try:
+            if manifest_schema is not None:
+                manifest_schema_int = int(manifest_schema)
+        except (TypeError, ValueError):
+            manifest_schema_int = None
+
+        cache_hit = (
+            status == "complete"
+            and ingest_complete
+            and manifest_rows_int is not None
+            and manifest_rows_int == existing_rows
+            and manifest_schema_int == INGEST_SCHEMA_VERSION
+        )
+        if cache_hit:
+            _progress(
+                progress_cb,
+                f"source ingest cache hit: source_hash={noise_source_hash} rows={existing_rows:,}",
+            )
+            _timing(progress_cb, "ingest.total", 0.0)
+            return 0
+
+        _progress(
+            progress_cb,
+            "source ingest incomplete/stale; deleting partial rows and rebuilding",
+        )
+        _delete_source_rows(engine, noise_source_hash)
+        existing_rows = 0
 
     mode = _resolve_ingest_mode()
     _progress(progress_cb, f"ingest mode: {mode}")

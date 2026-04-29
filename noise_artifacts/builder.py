@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from .dissolve import dissolve_noise_into_staging, drop_staging_tables
-from .ingest import ingest_noise_normalized
+from .ingest import INGEST_SCHEMA_VERSION, ingest_noise_normalized
 from .manifest import (
     mark_artifact_complete,
     mark_artifact_failed,
@@ -39,6 +39,21 @@ def _timing(progress_cb, label: str, seconds: float) -> None:
     _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
 
 
+def _advisory_lock_key(resolved_hash: str) -> str:
+    return f"noise_artifact_build:{resolved_hash}"
+
+
+def _source_row_count(engine: Engine, source_hash: str) -> int:
+    with engine.connect() as conn:
+        value = conn.execute(
+            text("SELECT COUNT(*) FROM noise_normalized WHERE noise_source_hash = :h"),
+            {"h": source_hash},
+        ).scalar_one_or_none()
+    if value is None:
+        return 0
+    return max(int(value), 0)
+
+
 def build_noise_artifact(
     engine: Engine,
     *,
@@ -59,7 +74,7 @@ def build_noise_artifact(
     Run the full noise artifact pipeline:
 
     1. Create/reset artifact manifest rows (source, domain, resolved)
-    2. Record lineage: resolved → source, resolved → domain
+    2. Record lineage: resolved -> source, resolved -> domain
     3. Ingest raw source into noise_normalized (EPSG:2157)
     4. Two-pass chunked dissolve into UNLOGGED staging tables
     5. Round-priority resolve into noise_resolved_display
@@ -79,105 +94,121 @@ def build_noise_artifact(
         force_resolved = True
 
     _progress(progress_cb, f"artifact build start: source={source_hash} resolved={resolved_hash}")
+    lock_key = _advisory_lock_key(resolved_hash)
+    with engine.connect() as lock_conn:
+        lock_conn.execute(text("SELECT pg_advisory_lock(hashtext(:lock_key))"), {"lock_key": lock_key})
+        _progress(progress_cb, f"acquired noise artifact build lock for resolved_hash={resolved_hash}")
+        try:
+            _progress(progress_cb, "ensuring artifact manifests")
+            src_status = _ensure_artifact(engine, source_hash, "source", {}, force=reimport_source)
+            _ensure_artifact(engine, domain_hash, "domain", {}, force=False)
+            res_status = _ensure_artifact(engine, resolved_hash, "resolved", {}, force=force_resolved)
 
-    # --- 1. Create/reset artifact rows (parent rows BEFORE lineage) ---
-    _progress(progress_cb, "ensuring artifact manifests")
-    src_status = _ensure_artifact(engine, source_hash, "source", {}, force=reimport_source)
-    _ensure_artifact(engine, domain_hash, "domain", {}, force=False)
-    res_status = _ensure_artifact(engine, resolved_hash, "resolved", {}, force=force_resolved)
+            if res_status == "already_complete":
+                log.info("resolved artifact already complete (resolved_hash=%s); skipping rebuild", resolved_hash)
+                set_active_artifact(engine, "resolved", resolved_hash)
+                counts = _compute_artifact_counts(engine, resolved_hash)
+                return {**counts, "resolved_hash": resolved_hash, "source_hash": source_hash}
 
-    # --- Fast path: resolved artifact is already complete and we're not forcing ---
-    if res_status == "already_complete":
-        log.info("resolved artifact already complete (resolved_hash=%s); skipping rebuild", resolved_hash)
-        set_active_artifact(engine, "resolved", resolved_hash)
-        counts = _compute_artifact_counts(engine, resolved_hash)
-        return {**counts, "resolved_hash": resolved_hash, "source_hash": source_hash}
+            record_lineage(engine, resolved_hash, source_hash)
+            record_lineage(engine, resolved_hash, domain_hash)
 
-    # --- 2. Lineage (parents already exist above) ---
-    record_lineage(engine, resolved_hash, source_hash)
-    record_lineage(engine, resolved_hash, domain_hash)
-
-    dissolve_table = None
-    round_table = None
-    try:
-        # --- 3. Ingest raw source ---
-        _progress(progress_cb, "ingest start")
-        log.info("ingesting raw source → noise_normalized (source_hash=%s)", source_hash)
-        ingest_started = time.perf_counter()
-        n_ingested = ingest_noise_normalized(
-            engine, source_hash, data_dir, domain_wgs84,
-            reimport_source=(reimport_source or src_status == "reset"),
-            progress_cb=progress_cb,
-        )
-        _timing(progress_cb, "ingest.total", time.perf_counter() - ingest_started)
-        _progress(progress_cb, f"ingest done: {n_ingested} rows")
-
-        # --- 4. Two-pass dissolve ---
-        _progress(
-            progress_cb,
-            f"dissolve start: tile_size={tile_size_metres}m grid={topology_grid_metres}m",
-        )
-        log.info("running two-pass dissolve (source_hash=%s resolved_hash=%s)",
-                 source_hash, resolved_hash)
-        dissolve_started = time.perf_counter()
-        dissolve_table, round_table = dissolve_noise_into_staging(
-            engine,
-            source_hash=source_hash,
-            resolved_hash=resolved_hash,
-            tile_size_metres=tile_size_metres,
-            topology_grid_metres=topology_grid_metres,
-            progress_cb=progress_cb,
-        )
-        _timing(progress_cb, "dissolve.total", time.perf_counter() - dissolve_started)
-
-        # --- 5. Round-priority resolve ---
-        _progress(progress_cb, "resolve start")
-        log.info("materializing resolved display (resolved_hash=%s)", resolved_hash)
-        resolve_started = time.perf_counter()
-        resolve_result = materialize_resolved_display(
-            engine,
-            noise_resolved_hash=resolved_hash,
-            round_table=round_table,
-            domain_wkb=domain_wkb,
-            topology_grid_metres=topology_grid_metres,
-            progress_cb=progress_cb,
-        )
-        _timing(progress_cb, "resolve.total", time.perf_counter() - resolve_started)
-        _progress(progress_cb, f"resolve done: {resolve_result['total_inserted']} rows")
-        log.info("resolved: %s", resolve_result)
-
-        # --- 6. Compute counts and mark complete ---
-        counts = _compute_artifact_counts(engine, resolved_hash)
-        mark_artifact_complete(engine, resolved_hash, updated_manifest_json=counts)
-        mark_artifact_complete(engine, source_hash, updated_manifest_json={})
-        mark_artifact_complete(engine, domain_hash, updated_manifest_json={})
-        set_active_artifact(engine, "resolved", resolved_hash)
-
-        _progress(
-            progress_cb,
-            f"artifact complete: resolved_hash={resolved_hash} rows={counts}",
-        )
-        _timing(progress_cb, "build.total", time.perf_counter() - total_started)
-        log.info("artifact complete: resolved_hash=%s rows=%s", resolved_hash, counts)
-        return {**counts, "resolved_hash": resolved_hash, "source_hash": source_hash}
-
-    except Exception:
-        detail = traceback.format_exc()
-        log.error("artifact build failed: %s", detail)
-        for h in (resolved_hash, source_hash, domain_hash):
+            dissolve_table = None
+            round_table = None
             try:
-                mark_artifact_failed(engine, h, error_detail=detail)
-            except Exception:
-                log.warning("failed to mark artifact failed: %s", h, exc_info=True)
-        raise
+                _progress(progress_cb, "ingest start")
+                log.info("ingesting raw source -> noise_normalized (source_hash=%s)", source_hash)
+                ingest_started = time.perf_counter()
+                n_ingested = ingest_noise_normalized(
+                    engine,
+                    source_hash,
+                    data_dir,
+                    domain_wgs84,
+                    reimport_source=(reimport_source or src_status == "reset"),
+                    progress_cb=progress_cb,
+                )
+                _timing(progress_cb, "ingest.total", time.perf_counter() - ingest_started)
+                source_rows_total = _source_row_count(engine, source_hash)
+                _progress(progress_cb, f"source ingest complete rows={source_rows_total:,}")
+                _progress(progress_cb, f"ingest done: {n_ingested} rows")
 
-    finally:
-        if dissolve_table and round_table:
+                _progress(progress_cb, f"dissolve start source_hash={source_hash}")
+                _progress(
+                    progress_cb,
+                    f"dissolve start: tile_size={tile_size_metres}m grid={topology_grid_metres}m",
+                )
+                log.info("running two-pass dissolve (source_hash=%s resolved_hash=%s)", source_hash, resolved_hash)
+                dissolve_started = time.perf_counter()
+                dissolve_table, round_table = dissolve_noise_into_staging(
+                    engine,
+                    source_hash=source_hash,
+                    resolved_hash=resolved_hash,
+                    tile_size_metres=tile_size_metres,
+                    topology_grid_metres=topology_grid_metres,
+                    progress_cb=progress_cb,
+                )
+                _timing(progress_cb, "dissolve.total", time.perf_counter() - dissolve_started)
+
+                _progress(progress_cb, "resolve start")
+                log.info("materializing resolved display (resolved_hash=%s)", resolved_hash)
+                resolve_started = time.perf_counter()
+                resolve_result = materialize_resolved_display(
+                    engine,
+                    noise_resolved_hash=resolved_hash,
+                    round_table=round_table,
+                    domain_wkb=domain_wkb,
+                    topology_grid_metres=topology_grid_metres,
+                    progress_cb=progress_cb,
+                )
+                resolve_elapsed = time.perf_counter() - resolve_started
+                _timing(progress_cb, "resolve.total", resolve_elapsed)
+                groups_processed = int(resolve_result.get("groups_processed", 0) or 0)
+                if groups_processed > 0:
+                    _progress(progress_cb, f"resolve start groups={groups_processed}")
+                _progress(progress_cb, f"resolve complete rows={resolve_result['total_inserted']} elapsed={resolve_elapsed:.1f}s")
+                _progress(progress_cb, f"resolve done: {resolve_result['total_inserted']} rows")
+                log.info("resolved: %s", resolve_result)
+
+                counts = _compute_artifact_counts(engine, resolved_hash)
+                mark_artifact_complete(engine, resolved_hash, updated_manifest_json=counts)
+                mark_artifact_complete(
+                    engine,
+                    source_hash,
+                    updated_manifest_json={
+                        "row_count": source_rows_total,
+                        "ingest_schema_version": INGEST_SCHEMA_VERSION,
+                        "ingest_complete": True,
+                    },
+                )
+                mark_artifact_complete(engine, domain_hash, updated_manifest_json={})
+                set_active_artifact(engine, "resolved", resolved_hash)
+
+                _progress(progress_cb, f"artifact build complete resolved_hash={resolved_hash}")
+                _progress(progress_cb, f"artifact complete: resolved_hash={resolved_hash} rows={counts}")
+                _timing(progress_cb, "build.total", time.perf_counter() - total_started)
+                log.info("artifact complete: resolved_hash=%s rows=%s", resolved_hash, counts)
+                return {**counts, "resolved_hash": resolved_hash, "source_hash": source_hash}
+
+            except Exception:
+                detail = traceback.format_exc()
+                log.error("artifact build failed: %s", detail)
+                for h in (resolved_hash, source_hash, domain_hash):
+                    try:
+                        mark_artifact_failed(engine, h, error_detail=detail)
+                    except Exception:
+                        log.warning("failed to mark artifact failed: %s", h, exc_info=True)
+                raise
+            finally:
+                if dissolve_table and round_table:
+                    try:
+                        drop_staging_tables(engine, dissolve_table, round_table)
+                    except Exception:
+                        log.warning("failed to drop staging tables", exc_info=True)
+        finally:
             try:
-                drop_staging_tables(engine, dissolve_table, round_table)
-            except Exception:
-                log.warning("failed to drop staging tables", exc_info=True)
-
+                lock_conn.execute(text("SELECT pg_advisory_unlock(hashtext(:lock_key))"), {"lock_key": lock_key})
+            finally:
+                _progress(progress_cb, f"released noise artifact build lock for resolved_hash={resolved_hash}")
 
 def _ensure_artifact(
     engine: Engine,
@@ -262,6 +293,7 @@ def _compute_artifact_counts(engine: Engine, resolved_hash: str) -> dict:
         "source_type_count": int(row["source_type_count"] or 0),
         "metric_count": int(row["metric_count"] or 0),
     }
+
 
 
 

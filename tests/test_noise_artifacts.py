@@ -547,6 +547,14 @@ class BuilderTests(TestCase):
                                         )
                         mock_set.assert_called_once_with(engine, "resolved", "res")
 
+    def test_builder_uses_postgres_advisory_lock(self) -> None:
+        import inspect
+        from noise_artifacts.builder import build_noise_artifact
+
+        src = inspect.getsource(build_noise_artifact)
+        self.assertIn("pg_advisory_lock", src)
+        self.assertIn("pg_advisory_unlock", src)
+
 
 class IngestSqlTests(TestCase):
 
@@ -617,7 +625,7 @@ class IngestSqlTests(TestCase):
         import inspect
         from noise_artifacts.ingest import ingest_noise_normalized
         src = inspect.getsource(ingest_noise_normalized)
-        self.assertIn("DELETE FROM noise_normalized", src)
+        self.assertIn("_delete_source_rows(engine, noise_source_hash)", src)
 
     def test_bake_stub_raises_not_implemented(self) -> None:
         from noise_artifacts.bake import bake_noise_artifact_pmtiles
@@ -1114,8 +1122,49 @@ class BuilderProgressTests(TestCase):
         self.assertIn("NOISE_INGEST_MODE", src)
         self.assertNotIn("candidate_rows = list(", src)
 
-    def test_ingest_skips_raw_read_when_source_rows_exist(self) -> None:
+    def test_ingest_partial_source_rows_are_not_cache_hit(self) -> None:
         from noise_artifacts.ingest import ingest_noise_normalized
+
+        fake_rows = [
+            {
+                "jurisdiction": "roi",
+                "source_type": "road",
+                "metric": "Lden",
+                "round_number": 4,
+                "db_value": "55-59",
+                "db_low": 55.0,
+                "db_high": 59.0,
+                "report_period": "Rd4-2022",
+                "source_dataset": "NOISE_Round4.zip",
+                "source_layer": "Noise_R4_Road.shp",
+                "source_ref": "ref1",
+                "geom": None,
+            }
+        ]
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+
+        with patch("noise_artifacts.ingest._existing_source_row_count", return_value=42):
+            with patch(
+                "noise_artifacts.ingest._source_manifest_state",
+                return_value={"status": "failed", "manifest_json": {"row_count": 999}},
+            ):
+                with patch.dict(os.environ, {"NOISE_INGEST_MODE": "python"}, clear=False):
+                    with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)) as mock_rows:
+                        with patch("noise_artifacts.ingest._create_ingest_stage_table"):
+                            with patch("noise_artifacts.ingest._copy_batch_to_stage", return_value=0):
+                                with patch("noise_artifacts.ingest._flush_stage_to_normalized", return_value=0):
+                                    with patch("noise_artifacts.ingest._drop_ingest_stage_table"):
+                                        ingest_noise_normalized(engine, "srchash123", "/fake_dir", MagicMock())
+        self.assertTrue(engine.begin.called, "expected stale source rows delete before rebuild")
+        mock_rows.assert_called()
+
+    def test_ingest_complete_manifest_with_matching_row_count_is_cache_hit(self) -> None:
+        from noise_artifacts.ingest import INGEST_SCHEMA_VERSION, ingest_noise_normalized
 
         engine = MagicMock()
         conn = MagicMock()
@@ -1123,13 +1172,24 @@ class BuilderProgressTests(TestCase):
         engine.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         with patch("noise_artifacts.ingest._existing_source_row_count", return_value=42):
-            with patch("noise.loader.iter_noise_candidate_rows_cached") as mock_rows:
-                inserted = ingest_noise_normalized(
-                    engine,
-                    "srchash123",
-                    "/fake_dir",
-                    MagicMock(),
-                )
+            with patch(
+                "noise_artifacts.ingest._source_manifest_state",
+                return_value={
+                    "status": "complete",
+                    "manifest_json": {
+                        "row_count": 42,
+                        "ingest_schema_version": INGEST_SCHEMA_VERSION,
+                        "ingest_complete": True,
+                    },
+                },
+            ):
+                with patch("noise.loader.iter_noise_candidate_rows_cached") as mock_rows:
+                    inserted = ingest_noise_normalized(
+                        engine,
+                        "srchash123",
+                        "/fake_dir",
+                        MagicMock(),
+                    )
         self.assertEqual(inserted, 0)
         mock_rows.assert_not_called()
 
@@ -1161,19 +1221,26 @@ class BuilderProgressTests(TestCase):
         engine.connect.return_value.__exit__ = MagicMock(return_value=False)
 
         with patch("noise_artifacts.ingest._existing_source_row_count", return_value=42):
-            with patch.dict(os.environ, {"NOISE_INGEST_MODE": "python"}, clear=False):
-                with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)):
-                    with patch("noise_artifacts.ingest._create_ingest_stage_table"):
-                        with patch("noise_artifacts.ingest._copy_batch_to_stage", return_value=0):
-                            with patch("noise_artifacts.ingest._flush_stage_to_normalized", return_value=0):
-                                with patch("noise_artifacts.ingest._drop_ingest_stage_table"):
-                                    ingest_noise_normalized(
-                                        engine,
-                                        "srchash123",
-                                        "/fake_dir",
-                                        MagicMock(),
-                                        reimport_source=True,
-                                    )
+            with patch(
+                "noise_artifacts.ingest._source_manifest_state",
+                return_value={
+                    "status": "complete",
+                    "manifest_json": {"row_count": 42, "ingest_schema_version": 1, "ingest_complete": True},
+                },
+            ):
+                with patch.dict(os.environ, {"NOISE_INGEST_MODE": "python"}, clear=False):
+                    with patch("noise.loader.iter_noise_candidate_rows_cached", return_value=iter(fake_rows)):
+                        with patch("noise_artifacts.ingest._create_ingest_stage_table"):
+                            with patch("noise_artifacts.ingest._copy_batch_to_stage", return_value=0):
+                                with patch("noise_artifacts.ingest._flush_stage_to_normalized", return_value=0):
+                                    with patch("noise_artifacts.ingest._drop_ingest_stage_table"):
+                                        ingest_noise_normalized(
+                                            engine,
+                                            "srchash123",
+                                            "/fake_dir",
+                                            MagicMock(),
+                                            reimport_source=True,
+                                        )
 
         self.assertTrue(engine.begin.called, "expected source delete transaction for reimport")
 

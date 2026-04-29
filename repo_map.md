@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-04-28. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-04-29. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -181,6 +181,7 @@ Notes:
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
 | Noise overlay source handling | `noise/loader.py` | `noise_polygons`, `noise` PMTiles layer, `/api/runtime` noise counts | `noise_datasets/*.zip` local inputs |
+| Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB parallel chunk imports (`fid` ranges), per-chunk normalize+drop, disk preflight (cache + PostgreSQL `data_directory`), stale chunk cleanup | `NOISE_OGR2OGR_GDB_*`, `NOISE_MIN_FREE_DISK_GB`, `NOISE_KEEP_FAILED_STAGE_TABLES` |
 | Precompute orchestration | `precompute/workflow.py` | `precompute/__init__.py` | None |
 | PMTiles layer metadata | `precompute/bake_pmtiles.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
