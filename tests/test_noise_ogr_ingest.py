@@ -34,6 +34,71 @@ class _FakeNormalizeConn:
         return _FakeExecuteResult()
 
 
+class _FakeStream:
+    def __init__(self, lines):
+        self._lines = list(lines)
+        self._index = 0
+
+    def readline(self):
+        if self._index >= len(self._lines):
+            return ""
+        value = self._lines[self._index]
+        self._index += 1
+        return value
+
+    def close(self):
+        return None
+
+
+class _FakePopenProcess:
+    def __init__(self, lines, returncode: int = 0):
+        self.stdout = _FakeStream(lines)
+        self._returncode = int(returncode)
+        self._killed = False
+
+    def poll(self):
+        if self._killed:
+            return -9
+        if self.stdout._index >= len(self.stdout._lines):
+            return self._returncode
+        return None
+
+    def wait(self):
+        if self._killed:
+            return -9
+        return self._returncode
+
+    def kill(self):
+        self._killed = True
+
+
+class _FakeIngestConn:
+    def execute(self, statement, params=None):  # noqa: ANN001
+        return _FakeExecuteResult()
+
+    def commit(self):
+        return None
+
+
+class _FakeConnectCtx:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def __enter__(self):
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+        return False
+
+
+class _FakeIngestEngine:
+    def __init__(self, conn):
+        self._conn = conn
+
+    def connect(self):
+        return _FakeConnectCtx(self._conn)
+
+
 class NoiseOgrIngestTests(TestCase):
     def _fake_engine(self):
         return SimpleNamespace(url=make_url("postgresql+psycopg://user:pass@localhost:5432/livability"))
@@ -62,6 +127,7 @@ class NoiseOgrIngestTests(TestCase):
         self.assertIn("GEOMETRY_NAME=geom", cmd)
         self.assertIn("_noise_raw_test", cmd)
         self.assertIn("PRECISION=NO", cmd)
+        self.assertIn("-progress", cmd)
 
     def test_build_ogr2ogr_command_adds_select_clause_when_fields_provided(self) -> None:
         from noise_artifacts.ogr_ingest import build_ogr2ogr_command
@@ -75,6 +141,16 @@ class NoiseOgrIngestTests(TestCase):
         )
         self.assertIn("-select", cmd)
         self.assertIn("DB_LOW,DB_HIGH,OBJECTID", cmd)
+
+    def test_build_ogr2ogr_command_includes_progress(self) -> None:
+        from noise_artifacts.ogr_ingest import build_ogr2ogr_command
+
+        cmd = build_ogr2ogr_command(
+            engine=self._fake_engine(),
+            source_path=Path("C:/tmp/layer.shp"),
+            stage_table="_noise_raw_test",
+        )
+        self.assertIn("-progress", cmd)
 
     def test_select_existing_noise_fields_excludes_shape_metadata_fields(self) -> None:
         from noise_artifacts.ogr_ingest import _select_existing_noise_fields
@@ -223,6 +299,131 @@ class NoiseOgrIngestTests(TestCase):
 
             extracted = extract_source_archive_if_needed(zip_path)
             self.assertTrue((extracted / "Folder" / "Sub" / "layer.shp").exists())
+
+    def test_run_ogr2ogr_import_streams_output(self) -> None:
+        from noise_artifacts.ogr_ingest import _run_ogr2ogr_import
+
+        progress_events: list[str] = []
+        fake_proc = _FakePopenProcess(
+            [
+                "0...10...20\n",
+                "ERROR simulated failure signal\n",
+            ],
+            returncode=0,
+        )
+
+        with patch("noise_artifacts.ogr_ingest.subprocess.Popen", return_value=fake_proc):
+            _run_ogr2ogr_import(
+                engine=self._fake_engine(),
+                source_path=Path("C:/tmp/noise.shp"),
+                stage_table="_noise_raw_stage",
+                layer_name=None,
+                selected_fields=["DB_LOW"],
+                progress_cb=lambda _kind, detail, force_log: progress_events.append(str(detail)),
+                timeout_seconds=None,
+            )
+
+        starting = next(msg for msg in progress_events if "starting ogr2ogr import" in msg)
+        self.assertIn("password=***", starting)
+        self.assertNotIn("password=pass", starting)
+        self.assertTrue(any("ERROR simulated failure signal" in msg for msg in progress_events))
+
+    def test_road_gdb_uses_chunked_import(self) -> None:
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
+
+        roi_spec = SimpleNamespace(
+            zip_name="Rd4-2022.zip",
+            member="Noise_R4_Road.gdb",
+            file_format="gdb",
+            source_type="road",
+            round_number=4,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            source_path = tmp / roi_spec.member
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_text("stub", encoding="utf-8")
+
+            engine = _FakeIngestEngine(_FakeIngestConn())
+            with patch("noise.loader.ROI_SOURCE_SPECS", [roi_spec]):
+                with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                    with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                        with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=["OBJECTID", "Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                            with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=["OBJECTID", "Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=["OBJECTID", "Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"]):
+                                    with patch("noise_artifacts.ogr_ingest._discover_road_gdb_chunks", return_value=("OBJECTID", [(1, 25), (26, 50), (51, 75)], 462)):
+                                        with patch("noise_artifacts.ogr_ingest._run_ogr2ogr_import") as mock_import:
+                                            with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", return_value=75):
+                                                with patch("noise_artifacts.ogr_ingest._prepare_stage_table"):
+                                                    with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=0):
+                                                        ingest_noise_normalized_ogr2ogr(
+                                                            engine,
+                                                            "h1",
+                                                            tmp,
+                                                            None,
+                                                        )
+
+        self.assertGreaterEqual(mock_import.call_count, 3)
+        first = mock_import.call_args_list[0].kwargs
+        second = mock_import.call_args_list[1].kwargs
+        self.assertFalse(first["append"])
+        self.assertTrue(second["append"])
+        self.assertIn("OBJECTID", first["where_clause"])
+        self.assertIn(">=", first["where_clause"])
+
+    def test_chunk_size_env(self) -> None:
+        from noise_artifacts.ogr_ingest import _discover_road_gdb_chunks
+
+        class _FakeSeries:
+            def __init__(self, values):
+                self._values = values
+
+            def tolist(self):
+                return list(self._values)
+
+        class _FakeFrame:
+            def __init__(self, values):
+                self._values = values
+
+            def __getitem__(self, key):
+                del key
+                return _FakeSeries(self._values)
+
+        fake_info = {
+            "features": 462,
+            "fields": ["OBJECTID"],
+            "fid_column": "",
+        }
+        ids = list(range(1, 463))
+        fake_pyogrio = SimpleNamespace(
+            read_info=lambda *args, **kwargs: fake_info,
+            read_dataframe=lambda *args, **kwargs: _FakeFrame(ids),
+        )
+        with patch.dict(os.environ, {"NOISE_OGR2OGR_GDB_CHUNK_SIZE": "25"}, clear=False):
+            with patch.dict("sys.modules", {"pyogrio": fake_pyogrio}):
+                    id_column, ranges, feature_count = _discover_road_gdb_chunks(
+                        Path("C:/tmp/Noise_R4_Road.gdb"),
+                        "Noise_R4_Road",
+                    )
+        self.assertEqual(id_column, "OBJECTID")
+        self.assertEqual(feature_count, 462)
+        self.assertEqual(len(ranges), 19)
+
+    def test_stage_count_logged_after_import(self) -> None:
+        from noise_artifacts.ogr_ingest import _imported_stage_row_count_or_fail
+
+        progress_events: list[str] = []
+        with patch("noise_artifacts.ogr_ingest._stage_row_count", return_value=462):
+            rows = _imported_stage_row_count_or_fail(
+                _FakeIngestConn(),
+                stage_table="_noise_raw_stage",
+                source_label="ROI layer Noise_R4_Road.gdb",
+                elapsed_seconds=73.2,
+                progress_cb=lambda _kind, detail, force_log: progress_events.append(str(detail)),
+            )
+        self.assertEqual(rows, 462)
+        self.assertTrue(any("rows=462" in msg for msg in progress_events))
 
     def test_mode_ogr2ogr_raises_when_binary_missing(self) -> None:
         from noise_artifacts.exceptions import NoiseIngestError

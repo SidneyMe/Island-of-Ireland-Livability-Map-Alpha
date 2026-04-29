@@ -4,10 +4,12 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -22,6 +24,9 @@ log = logging.getLogger(__name__)
 
 _GDAL_CACHE_ENV = "NOISE_GDAL_CACHE_DIR"
 _DEFAULT_GDAL_CACHE_DIR = Path(".livability_cache") / "noise_gdal"
+_OGR2OGR_TIMEOUT_ENV = "NOISE_OGR2OGR_TIMEOUT_SECONDS"
+_OGR2OGR_GDB_CHUNK_SIZE_ENV = "NOISE_OGR2OGR_GDB_CHUNK_SIZE"
+_DEFAULT_OGR2OGR_GDB_CHUNK_SIZE = 25
 _ROI_OGR_CANDIDATE_FIELDS = [
     "Time",
     "TIME",
@@ -87,6 +92,39 @@ def _progress(progress_cb, message: str) -> None:
 
 def _timing(progress_cb, label: str, seconds: float) -> None:
     _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(f"{name} must be an integer; got {raw!r}") from exc
+    return value
+
+
+def _ogr2ogr_timeout_seconds() -> float | None:
+    value = _env_int(_OGR2OGR_TIMEOUT_ENV, 0)
+    if value <= 0:
+        return None
+    return float(value)
+
+
+def _ogr2ogr_gdb_chunk_size() -> int:
+    value = _env_int(_OGR2OGR_GDB_CHUNK_SIZE_ENV, _DEFAULT_OGR2OGR_GDB_CHUNK_SIZE)
+    if value <= 0:
+        raise NoiseIngestError(f"{_OGR2OGR_GDB_CHUNK_SIZE_ENV} must be > 0; got {value}")
+    return value
+
+
+def _format_elapsed(seconds: float) -> str:
+    total = max(int(seconds), 0)
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    secs = total % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
 
 
 def ogr2ogr_available() -> bool:
@@ -160,6 +198,10 @@ def _find_column(columns: list[str], *candidates: str) -> str | None:
 
 def _quote_ident(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _quote_ogr_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '\\"') + '"'
 
 
 def _col_expr(alias: str, col_name: str | None, cast_sql: str | None = None) -> str:
@@ -281,6 +323,11 @@ def _pg_ogr_conn_string(engine: Engine) -> str:
     if not parts:
         raise NoiseIngestError("could not derive PostgreSQL connection details for ogr2ogr")
     return "PG:" + " ".join(parts)
+
+
+def _redact_pg_password(cmd: list[str]) -> str:
+    redacted_parts = [re.sub(r"(?i)(password=)([^ ]+)", r"\1***", part) for part in cmd]
+    return " ".join(redacted_parts)
 
 
 def _noise_ogr_candidate_fields(
@@ -491,6 +538,9 @@ def build_ogr2ogr_command(
     stage_table: str,
     layer_name: str | None = None,
     selected_fields: list[str] | None = None,
+    append: bool = False,
+    where_clause: str | None = None,
+    progress: bool = True,
 ) -> list[str]:
     cmd = [
         "ogr2ogr",
@@ -500,7 +550,7 @@ def build_ogr2ogr_command(
         str(source_path),
         "-nln",
         stage_table,
-        "-overwrite",
+        "-append" if append else "-overwrite",
         "-t_srs",
         "EPSG:2157",
         "-nlt",
@@ -512,7 +562,11 @@ def build_ogr2ogr_command(
         "-lco",
         "PRECISION=NO",
     ]
-    if selected_fields:
+    if progress:
+        cmd.append("-progress")
+    if where_clause:
+        cmd.extend(["-where", where_clause])
+    if selected_fields and not append:
         cmd.extend(["-select", ",".join(selected_fields)])
     if layer_name:
         cmd.append(layer_name)
@@ -526,6 +580,10 @@ def _run_ogr2ogr_import(
     stage_table: str,
     layer_name: str | None,
     selected_fields: list[str] | None = None,
+    append: bool = False,
+    where_clause: str | None = None,
+    progress_cb=None,
+    timeout_seconds: float | None = None,
 ) -> None:
     cmd = build_ogr2ogr_command(
         engine=engine,
@@ -533,12 +591,83 @@ def _run_ogr2ogr_import(
         stage_table=stage_table,
         layer_name=layer_name,
         selected_fields=selected_fields,
+        append=append,
+        where_clause=where_clause,
+        progress=True,
     )
-    completed = subprocess.run(cmd, capture_output=True, text=True)
-    if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
+    safe_cmd = _redact_pg_password(cmd)
+    _progress(
+        progress_cb,
+        f"starting ogr2ogr import: stage={stage_table} source={source_path.name} append={append} cmd={safe_cmd}",
+    )
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if proc.stdout is None:
+        proc.kill()
+        raise NoiseIngestError(f"ogr2ogr did not provide stdout pipe for stage={stage_table}")
+
+    output_queue: queue.Queue[str] = queue.Queue()
+
+    def _pump_output() -> None:
+        assert proc.stdout is not None
+        for raw_line in iter(proc.stdout.readline, ""):
+            output_queue.put(raw_line)
+        proc.stdout.close()
+
+    pump_thread = threading.Thread(target=_pump_output, daemon=True)
+    pump_thread.start()
+
+    start = time.monotonic()
+    last_line_log = start
+    last_heartbeat = start
+    lines: list[str] = []
+
+    while True:
+        try:
+            line = output_queue.get(timeout=1.0)
+        except queue.Empty:
+            line = None
+
+        now = time.monotonic()
+        elapsed = now - start
+
+        if line is not None:
+            stripped = line.strip()
+            if stripped:
+                lines.append(stripped)
+                if "ERROR" in stripped.upper() or (now - last_line_log) >= 15.0:
+                    _progress(progress_cb, f"ogr2ogr {stage_table}: {stripped}")
+                    last_line_log = now
+
+        if (now - last_heartbeat) >= 30.0 and proc.poll() is None:
+            _progress(
+                progress_cb,
+                f"ogr2ogr still running: source={source_path.name} stage={stage_table} elapsed={_format_elapsed(elapsed)}",
+            )
+            last_heartbeat = now
+
+        if timeout_seconds is not None and elapsed > timeout_seconds and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+            raise NoiseIngestError(
+                "ogr2ogr import timed out "
+                f"for {source_path} -> {stage_table} after {_format_elapsed(elapsed)}; cmd={safe_cmd}"
+            )
+
+        if proc.poll() is not None and output_queue.empty():
+            break
+
+    rc = proc.wait()
+    if rc != 0:
         raise NoiseIngestError(
-            f"ogr2ogr import failed for {source_path} -> {stage_table}: {stderr}"
+            f"ogr2ogr import failed for {source_path} -> {stage_table}: returncode={rc}\n"
+            + "\n".join(lines[-50:])
         )
 
 
@@ -842,6 +971,116 @@ def _short_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
+def _stage_row_count(conn, stage_table: str) -> int:
+    row = conn.execute(text(f"SELECT COUNT(*) FROM {_quote_ident(stage_table)}")).fetchone()
+    if row is None:
+        return 0
+    return int(row[0] or 0)
+
+
+def _supports_chunked_road_gdb_import(
+    *,
+    source_type: str,
+    file_format: str,
+    round_number: int,
+) -> bool:
+    return (
+        str(source_type).strip().lower() == "road"
+        and str(file_format).strip().lower() == "gdb"
+        and int(round_number) == 4
+    )
+
+
+def _discover_road_gdb_chunks(source_path: Path, layer_name: str) -> tuple[str | None, list[tuple[int, int]], int]:
+    try:
+        import pyogrio
+    except ImportError as exc:
+        raise NoiseIngestError(
+            "ROI Round 4 road chunked import requires pyogrio for feature discovery"
+        ) from exc
+
+    info_kwargs: dict[str, Any] = {"layer": layer_name}
+    try:
+        info_kwargs["force_feature_count"] = True
+        info = pyogrio.read_info(str(source_path), **info_kwargs)
+    except TypeError:
+        info_kwargs.pop("force_feature_count", None)
+        info = pyogrio.read_info(str(source_path), **info_kwargs)
+    except Exception as exc:
+        raise NoiseIngestError(
+            f"failed to inspect Road GDB layer for chunking: source={source_path} layer={layer_name}: {exc}"
+        ) from exc
+
+    feature_count = int(((info or {}).get("features", 0) if isinstance(info, dict) else 0) or 0)
+    if feature_count <= 0:
+        return None, [], 0
+
+    fields = [
+        str(field)
+        for field in (((info or {}).get("fields", ()) if isinstance(info, dict) else ()))
+        if str(field)
+    ]
+    id_column = _find_column(fields, "OBJECTID", "ObjectID", "FID", "ID")
+    if not id_column:
+        fid_column = (info or {}).get("fid_column") if isinstance(info, dict) else None
+        fid_column_text = str(fid_column or "").strip()
+        if fid_column_text:
+            id_column = fid_column_text
+    if not id_column:
+        return None, [], feature_count
+
+    try:
+        id_df = pyogrio.read_dataframe(
+            str(source_path),
+            layer=layer_name,
+            columns=[id_column],
+            read_geometry=False,
+        )
+    except Exception as exc:
+        raise NoiseIngestError(
+            f"failed to read Road GDB id column for chunking: source={source_path} layer={layer_name} id={id_column}: {exc}"
+        ) from exc
+
+    id_values: list[int] = []
+    for value in id_df[id_column].tolist():
+        if value is None:
+            continue
+        try:
+            id_values.append(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    if not id_values:
+        return None, [], feature_count
+
+    id_values = sorted(set(id_values))
+    chunk_size = _ogr2ogr_gdb_chunk_size()
+    ranges: list[tuple[int, int]] = []
+    for idx in range(0, len(id_values), chunk_size):
+        group = id_values[idx : idx + chunk_size]
+        if group:
+            ranges.append((group[0], group[-1]))
+    return id_column, ranges, feature_count
+
+
+def _imported_stage_row_count_or_fail(
+    conn,
+    *,
+    stage_table: str,
+    source_label: str,
+    elapsed_seconds: float,
+    progress_cb=None,
+) -> int:
+    row_count = _stage_row_count(conn, stage_table)
+    _progress(
+        progress_cb,
+        f"ogr2ogr imported {source_label} -> {stage_table} rows={row_count:,} elapsed={elapsed_seconds:.1f}s",
+    )
+    if row_count <= 0:
+        raise NoiseIngestError(f"ogr2ogr imported zero rows for {source_label} -> {stage_table}")
+    return row_count
+
+
 def ingest_noise_normalized_ogr2ogr(
     engine: Engine,
     noise_source_hash: str,
@@ -863,6 +1102,7 @@ def ingest_noise_normalized_ogr2ogr(
     raw_extract_seconds = 0.0
     normalize_insert_seconds = 0.0
     total_inserted = 0
+    timeout_seconds = _ogr2ogr_timeout_seconds()
 
     with engine.connect() as conn:
         for spec in ROI_SOURCE_SPECS:
@@ -900,16 +1140,70 @@ def ingest_noise_normalized_ogr2ogr(
             stage_table = f"_noise_raw_{_short_hash(f'roi:{spec.zip_name}:{spec.member}')}"
             conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
 
-            started = time.perf_counter()
-            _run_ogr2ogr_import(
-                engine=engine,
-                source_path=source_path,
+            import_started = time.perf_counter()
+            used_chunking = False
+            if layer_name and _supports_chunked_road_gdb_import(
+                source_type=spec.source_type,
+                file_format=spec.file_format,
+                round_number=spec.round_number,
+            ):
+                id_column, chunk_ranges, feature_count = _discover_road_gdb_chunks(source_path, layer_name)
+                if id_column and chunk_ranges:
+                    used_chunking = True
+                    total_chunks = len(chunk_ranges)
+                    _progress(
+                        progress_cb,
+                        f"ogr2ogr Road GDB chunking enabled: layer={layer_name} id_column={id_column} features={feature_count} chunk_size={_ogr2ogr_gdb_chunk_size()} chunks={total_chunks}",
+                    )
+                    for idx, (chunk_low, chunk_high) in enumerate(chunk_ranges, start=1):
+                        where_clause = f"{_quote_ogr_identifier(id_column)} >= {chunk_low} AND {_quote_ogr_identifier(id_column)} <= {chunk_high}"
+                        _progress(
+                            progress_cb,
+                            f"ogr2ogr Road GDB chunk {idx}/{total_chunks} {id_column} {chunk_low}-{chunk_high}",
+                        )
+                        chunk_started = time.perf_counter()
+                        _run_ogr2ogr_import(
+                            engine=engine,
+                            source_path=source_path,
+                            stage_table=stage_table,
+                            layer_name=layer_name,
+                            selected_fields=selected_fields,
+                            append=idx > 1,
+                            where_clause=where_clause,
+                            progress_cb=progress_cb,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        _progress(
+                            progress_cb,
+                            f"ogr2ogr Road GDB chunk {idx}/{total_chunks} done in {time.perf_counter() - chunk_started:.1f}s",
+                        )
+                else:
+                    _progress(
+                        progress_cb,
+                        (
+                            "WARNING: Road GDB chunk plan unavailable; falling back to one-shot import "
+                            f"for {source_path.name} layer={layer_name}. This may run for a long time."
+                        ),
+                    )
+            if not used_chunking:
+                _run_ogr2ogr_import(
+                    engine=engine,
+                    source_path=source_path,
+                    stage_table=stage_table,
+                    layer_name=layer_name,
+                    selected_fields=selected_fields,
+                    progress_cb=progress_cb,
+                    timeout_seconds=timeout_seconds,
+                )
+            import_elapsed = time.perf_counter() - import_started
+            raw_extract_seconds += import_elapsed
+            _imported_stage_row_count_or_fail(
+                conn,
                 stage_table=stage_table,
-                layer_name=layer_name,
-                selected_fields=selected_fields,
+                source_label=f"ROI layer {spec.member}",
+                elapsed_seconds=import_elapsed,
+                progress_cb=progress_cb,
             )
-            raw_extract_seconds += time.perf_counter() - started
-            _progress(progress_cb, f"ogr2ogr imported ROI layer {spec.member} -> {stage_table}")
 
             _prepare_stage_table(conn, stage_table)
             started = time.perf_counter()
@@ -976,9 +1270,18 @@ def ingest_noise_normalized_ogr2ogr(
                     stage_table=stage_table,
                     layer_name=None,
                     selected_fields=selected_fields,
+                    progress_cb=progress_cb,
+                    timeout_seconds=timeout_seconds,
                 )
-                raw_extract_seconds += time.perf_counter() - started
-                _progress(progress_cb, f"ogr2ogr imported NI layer {member} -> {stage_table}")
+                import_elapsed = time.perf_counter() - started
+                raw_extract_seconds += import_elapsed
+                _imported_stage_row_count_or_fail(
+                    conn,
+                    stage_table=stage_table,
+                    source_label=f"NI layer {member}",
+                    elapsed_seconds=import_elapsed,
+                    progress_cb=progress_cb,
+                )
 
                 _prepare_stage_table(conn, stage_table)
                 started = time.perf_counter()
