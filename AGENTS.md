@@ -29,10 +29,16 @@ Do not open these unless directly required by the task:
 - Do not add dependencies.
 
 ## Windows GDAL/Noise execution
+- First-time setup:
+  - `scripts\win\bootstrap_geo_env.cmd`
 - For Windows GDAL/noise work, run through:
   - `scripts\win\check_geo_env.cmd`
+  - `scripts\win\selftest_geo_env.cmd`
   - `scripts\win\precompute_noise_dev.cmd`
   - `scripts\win\test_noise.cmd`
+- To reuse an existing conda base env:
+  - `set GEO_CONDA_ENV=base`
+  - `scripts\win\check_geo_env.cmd`
 - Do not run raw `python main.py ...` for noise/GDAL tasks on Windows.
 - Do not rely on random shell env state; use the launcher wrappers.
 - Do not commit Miniforge installs, conda env directories, `.venv`, `.env`, local dataset zips, `.livability_cache`, generated PMTiles, or generated local DB/cache files.

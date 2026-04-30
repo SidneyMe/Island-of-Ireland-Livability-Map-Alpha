@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-04-29. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-04-30. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -86,6 +86,12 @@
 - Standalone validation CLI used by CI and scheduled refresh. (Confirmed, LOC: 349)
 - `--validate-only` checks fixture structure only.
 - Normal mode resolves the active completed build, then reads scores through fine-surface runtime lookups when enabled, otherwise through `grid_walk` point lookups. (Confirmed from file and tests)
+
+### `scripts/win/run_noise_precompute_watchdog.ps1`
+
+- Windows wrapper for noise-focused dev precompute with enforced wall-clock timeout. (Confirmed)
+- Runs `scripts/win/geo_env.cmd` with project `.venv` Python and standard noise artifact rebuild flags. (Confirmed)
+- On timeout, kills the spawned process tree (and attempts cleanup of lingering `ogr2ogr` processes) and returns exit code `124`. (Confirmed)
 
 ---
 
@@ -529,7 +535,9 @@ tests/test_server_behavior.py
 | `environment.yml` | Conda-forge Windows GDAL/PostGIS runtime spec (`livability-gdal`) |
 | `.env.example` | Local env template |
 | `scripts/win/geo_env.cmd` | Windows CMD launcher that activates Miniforge env and pins GDAL/PROJ/noise env vars |
+| `scripts/win/bootstrap_geo_env.cmd` | Windows first-time setup wrapper: activates conda base, creates `%GEO_CONDA_ENV%` from `environment.yml` via mamba when missing, then runs env checks |
 | `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
+| `scripts/win/selftest_geo_env.cmd` | Windows post-check smoke script for `ogr2ogr` path, GDAL/PROJ env vars, PostgreSQL GDAL driver, and core Python imports |
 | `scripts/win/precompute_noise_dev.cmd` | Windows noise artifact dev precompute wrapper via `geo_env.cmd` |
 | `scripts/win/test_noise.cmd` | Windows targeted noise test wrapper via `geo_env.cmd` |
 | `pytest.ini` | Pytest collection scope and generated-directory exclusions |

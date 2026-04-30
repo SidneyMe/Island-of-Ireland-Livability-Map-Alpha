@@ -588,6 +588,45 @@ class NoiseOgrIngestTests(TestCase):
         self.assertIn("context=road-chunk idx=1/3 fid=0-24", message)
         self.assertIn("cmd=ogr2ogr", message)
 
+    def test_timeout_kills_process_tree(self) -> None:
+        from noise_artifacts.exceptions import NoiseIngestError
+        from noise_artifacts.ogr_ingest import _run_ogr2ogr_import
+
+        class _Proc:
+            def __init__(self):
+                self.stdout = _FakeStream([])
+                self.pid = 777
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout=None):
+                del timeout
+                return 0
+
+            def kill(self):
+                return None
+
+            def terminate(self):
+                return None
+
+        proc = _Proc()
+        monotonic_values = iter([0.0, 2.0, 2.1, 2.2, 2.3, 2.4])
+        with patch("noise_artifacts.ogr_ingest.subprocess.Popen", return_value=proc):
+            with patch("noise_artifacts.ogr_ingest.time.monotonic", side_effect=lambda: next(monotonic_values)):
+                with patch("noise_artifacts.ogr_ingest._kill_process_tree_windows") as mock_tree_kill:
+                    with patch("noise_artifacts.ogr_ingest._terminate_active_ogr2ogr_processes", return_value=1):
+                        with self.assertRaises(NoiseIngestError):
+                            _run_ogr2ogr_import(
+                                engine=self._fake_engine(),
+                                source_path=Path("C:/tmp/noise.shp"),
+                                stage_table="_noise_raw_stage",
+                                layer_name=None,
+                                selected_fields=["DB_LOW"],
+                                timeout_seconds=1.0,
+                            )
+        mock_tree_kill.assert_called()
+
     def test_ogr2ogr_heartbeat_includes_timeout_pid_and_last_output_age(self) -> None:
         from noise_artifacts.ogr_ingest import _run_ogr2ogr_import
 
@@ -702,6 +741,17 @@ class NoiseOgrIngestTests(TestCase):
             self.assertTrue(commit_counts_at_import)
             self.assertGreaterEqual(commit_counts_at_import[0], 1)
 
+    def test_stale_stage_cleanup_targets_stage_prefix_only(self) -> None:
+        from noise_artifacts.ogr_ingest import _prepare_stage_table_for_external_import
+
+        conn = _FakeIngestConn()
+        conn.pg_tables = ["_noise_raw_x", "_noise_raw_x_c001"]
+        _prepare_stage_table_for_external_import(conn, stage_table="_noise_raw_x")
+        sql_blob = "\n".join(conn.sql)
+        self.assertIn("tablename = :stage_table OR tablename LIKE :chunk_like", sql_blob)
+        self.assertIn('DROP TABLE IF EXISTS "_noise_raw_x" CASCADE', sql_blob)
+        self.assertIn('DROP TABLE IF EXISTS "_noise_raw_x_c001" CASCADE', sql_blob)
+
     def test_stale_lock_diagnostic_query_runs_before_import(self) -> None:
         from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
 
@@ -730,14 +780,21 @@ class NoiseOgrIngestTests(TestCase):
                                                     ingest_noise_normalized_ogr2ogr(engine, "h1", tmp, None)
             self.assertTrue(any("JOIN pg_locks" in sql for sql in conn.sql))
 
+    def test_windows_runner_scripts_use_venv_python(self) -> None:
+        precompute_script = Path("scripts/win/precompute_noise_dev.cmd").read_text(encoding="utf-8")
+        test_script = Path("scripts/win/test_noise.cmd").read_text(encoding="utf-8")
+        self.assertIn(".\\.venv\\Scripts\\python.exe", precompute_script)
+        self.assertIn(".\\.venv\\Scripts\\python.exe", test_script)
+
     def test_stage_lock_diagnostic_failure_rolls_back_and_does_not_block_drop(self) -> None:
         from noise_artifacts.ogr_ingest import _prepare_stage_table_for_external_import
 
         conn = _FakeIngestConn()
         conn.raise_on_lock_diag = True
+        conn.pg_tables = ["_noise_raw_abc123"]
         _prepare_stage_table_for_external_import(conn, stage_table="_noise_raw_abc123")
         self.assertGreaterEqual(conn.rollback_count, 1)
-        self.assertTrue(any('DROP TABLE IF EXISTS "_noise_raw_abc123"' in sql for sql in conn.sql))
+        self.assertTrue(any('DROP TABLE IF EXISTS "_noise_raw_abc123" CASCADE' in sql for sql in conn.sql))
 
     def test_road_gdb_path_does_not_call_chunk_import(self) -> None:
         from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
@@ -831,7 +888,7 @@ class NoiseOgrIngestTests(TestCase):
                                                 with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", return_value=25):
                                                     with patch("noise_artifacts.ogr_ingest._normalize_roi_stage_batched", return_value=1):
                                                         with patch("noise_artifacts.ogr_ingest.os.name", "nt"):
-                                                            with patch.dict(os.environ, {"NOISE_OGR2OGR_GDB_WORKERS": "2"}, clear=False):
+                                                            with patch.dict(os.environ, {"NOISE_OGR2OGR_GDB_WORKERS": "3"}, clear=False):
                                                                 ingest_noise_normalized_ogr2ogr(
                                                                     engine,
                                                                     "h1",
@@ -1052,6 +1109,25 @@ class NoiseOgrIngestTests(TestCase):
         self.assertEqual(feature_count, 75)
         self.assertEqual(ranges, [(0, 24), (25, 49), (50, 74)])
 
+    def test_discover_road_gdb_chunks_for_gpkg_defaults_to_rowid(self) -> None:
+        from noise_artifacts.ogr_ingest import _discover_road_gdb_chunks
+
+        fake_pyogrio = SimpleNamespace(
+            read_info=lambda *args, **kwargs: {  # noqa: ANN001
+                "features": 60,
+                "fields": ["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod"],
+            }
+        )
+        with patch.dict(os.environ, {"NOISE_OGR2OGR_GDB_CHUNK_SIZE": "25"}, clear=False):
+            with patch.dict("sys.modules", {"pyogrio": fake_pyogrio}):
+                id_column, ranges, feature_count = _discover_road_gdb_chunks(
+                    Path("C:/tmp/road_raw.gpkg"),
+                    "road_raw",
+                )
+        self.assertEqual(id_column, "rowid")
+        self.assertEqual(feature_count, 60)
+        self.assertEqual(ranges, [(0, 24), (25, 49), (50, 59)])
+
     def test_worker_default_is_conservative(self) -> None:
         from noise_artifacts.ogr_ingest import _ogr2ogr_gdb_workers
 
@@ -1059,13 +1135,13 @@ class NoiseOgrIngestTests(TestCase):
             with patch("noise_artifacts.ogr_ingest.os.cpu_count", return_value=16):
                 self.assertLessEqual(_ogr2ogr_gdb_workers(), 2)
 
-    def test_windows_default_road_gdb_workers_is_one(self) -> None:
+    def test_windows_default_road_gdb_workers_is_two(self) -> None:
         from noise_artifacts.ogr_ingest import _ogr2ogr_gdb_workers
 
         with patch.dict(os.environ, {}, clear=True):
             with patch("noise_artifacts.ogr_ingest.os.name", "nt"):
                 with patch("noise_artifacts.ogr_ingest.os.cpu_count", return_value=16):
-                    self.assertEqual(_ogr2ogr_gdb_workers(), 1)
+                    self.assertEqual(_ogr2ogr_gdb_workers(), 2)
 
     def test_non_windows_default_road_gdb_workers_is_two(self) -> None:
         from noise_artifacts.ogr_ingest import _ogr2ogr_gdb_workers
