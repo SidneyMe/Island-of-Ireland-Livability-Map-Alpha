@@ -90,7 +90,7 @@
 ### `scripts/win/run_noise_precompute_watchdog.ps1`
 
 - Windows wrapper for noise-focused dev precompute with enforced wall-clock timeout. (Confirmed)
-- Runs `scripts/win/geo_env.cmd` with project `.venv` Python and standard noise artifact rebuild flags. (Confirmed)
+- Runs `scripts/win/geo_env.cmd` with project `.venv` Python; default mode keeps standard full-reimport noise artifact rebuild flags, and `-Incremental` runs the lighter `--precompute-dev --refresh-noise-artifact` path. (Confirmed)
 - On timeout, kills the spawned process tree (and attempts cleanup of lingering `ogr2ogr` processes) and returns exit code `124`. (Confirmed)
 
 ---
@@ -538,7 +538,7 @@ tests/test_server_behavior.py
 | `scripts/win/bootstrap_geo_env.cmd` | Windows first-time setup wrapper: activates conda base, creates `%GEO_CONDA_ENV%` from `environment.yml` via mamba when missing, then runs env checks |
 | `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
 | `scripts/win/selftest_geo_env.cmd` | Windows post-check smoke script for `ogr2ogr` path, GDAL/PROJ env vars, PostgreSQL GDAL driver, and core Python imports |
-| `scripts/win/precompute_noise_dev.cmd` | Windows noise artifact dev precompute wrapper via `geo_env.cmd` |
+| `scripts/win/precompute_noise_dev.cmd` | Windows fast incremental noise artifact dev precompute wrapper via `run_noise_precompute_watchdog.ps1 -Incremental`; defaults to `--precompute-dev --refresh-noise-artifact`, a 20-minute watchdog (`NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=1200`), and overrideable `NOISE_OGR2OGR_*` speed/timeouts |
 | `scripts/win/test_noise.cmd` | Windows targeted noise test wrapper via `geo_env.cmd` |
 | `pytest.ini` | Pytest collection scope and generated-directory exclusions |
 | `frontend/package.json` | Frontend dependency and build scripts |
@@ -579,6 +579,7 @@ tests/test_server_behavior.py
 - NI Round 1 shapefiles are class-coded (`GRIDCODE` 1..7 with `Noise_Cl` labels), not threshold-coded. Reusing threshold arithmetic on Round 1 creates invalid synthetic labels like `2-6`.
 - Noise artifact ingest now stages rows in a temp table (`noise_ingest_stage_*`) and then runs SQL geometry normalization (`ST_GeomFromWKB` -> `ST_Transform` -> `ST_MakeValid`) instead of building giant 500-row inline `VALUES` statements with huge WKB hex params.
 - Noise force semantics are split: resolved rebuild (`--force-noise-artifact`) is separate from source re-import (`--reimport-noise-source`), and `--force-noise-all` does both.
+- `scripts/win/precompute_noise_dev.cmd` is incremental by default and no longer forces source re-import each run; it now enforces a 20-minute watchdog timeout unless overridden via `NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC`. Use `scripts/win/run_noise_precompute_watchdog.ps1` without `-Incremental` for heavy full-reimport debug runs.
 - `progress_tracker.py` is intentionally defensive. If tracking breaks, the build keeps going, so ETA regressions can hide without breaking tests.
 - Reachability large-cache recovery is mixed-format now: `{key}.pkl(.gz)` is the base snapshot and `{key}.chunks.pkl(.gz)` is an overlay journal. If you touch cache loaders, preserve that merge order and fallback behavior.
 - Reachability origin-node helpers now assume a split contract: `normalize_origin_node_ids(...)` produces sorted unique lists, and `merge_normalized_origin_node_ids(...)` unions already-normalized lists. Do not fall back to `sorted(set(...))` on multi-million origin sequences.
@@ -699,8 +700,9 @@ Areas still relatively fragile:
 ### `noise_artifacts/ogr_ingest.py`
 
 - Purpose: high-throughput raw source import path using GDAL `ogr2ogr` direct to PostGIS staging tables.
-- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `--config PG_USE_COPY YES`, `-preserve_fid`, `-lco PRECISION=NO`, and SQL normalization into `noise_normalized`.
+- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `--config PG_USE_COPY YES`, `-preserve_fid`, `-lco PRECISION=NO`, `-makevalid` pre-validation in ogr2ogr import/extract paths, and SQL normalization into `noise_normalized`.
 - ROI Round 4 Road FileGDB now uses a canonical three-phase path: extract once to local GPKG cache (`road_raw`), import GPKG to one PostgreSQL stage table with `PG_USE_COPY`, then normalize from that stage (optional `source_fid` batches) without direct FileGDB `fid` chunk imports.
+- Road chunk failure cleanup now rolls back the current transaction before best-effort chunk-table drops, preventing `InFailedSqlTransaction` cascades during cleanup.
 - All `ogr2ogr` subprocesses now run with enforced non-`None` timeouts, enhanced heartbeat diagnostics (`pid`, elapsed, timeout, last output age, context), and stronger interrupt/timeout cleanup paths that terminate active processes and process trees on Windows.
 - Stage imports now preflight stale backend and lock diagnostics, commit stage `DROP TABLE` before external `ogr2ogr` runs, and can optionally terminate stale blocking sessions via env toggles.
 - Command building now blocks `-append` + `-select` combinations with an internal ingest error guard.

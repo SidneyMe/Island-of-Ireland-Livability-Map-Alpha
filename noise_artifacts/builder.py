@@ -6,6 +6,8 @@ Called only by `python -m noise_artifacts`. The livability build does NOT call t
 from __future__ import annotations
 
 import logging
+import os
+import shutil
 import time
 import traceback
 from typing import Any
@@ -13,6 +15,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .dev_fast import (
+    apply_accurate_simplification,
+    build_dev_fast_road_rail_grid,
+    materialize_dev_fast_resolved,
+)
 from .dissolve import dissolve_noise_into_staging, drop_staging_tables
 from .ingest import INGEST_SCHEMA_VERSION, ingest_noise_normalized
 from .manifest import (
@@ -27,6 +34,12 @@ from .resolve import materialize_resolved_display
 
 log = logging.getLogger(__name__)
 
+_MIN_FREE_DISK_GB_ENV = "NOISE_MIN_FREE_DISK_GB"
+_MIN_FREE_DISK_GB_DEV_ENV = "NOISE_MIN_FREE_DISK_GB_DEV_FAST"
+_MIN_FREE_DISK_GB_ACCURATE_ENV = "NOISE_MIN_FREE_DISK_GB_ACCURATE"
+_DEFAULT_MIN_FREE_DISK_GB_DEV = 10.0
+_DEFAULT_MIN_FREE_DISK_GB_ACCURATE = 30.0
+
 
 def _progress(progress_cb, message: str) -> None:
     if progress_cb:
@@ -37,6 +50,46 @@ def _progress(progress_cb, message: str) -> None:
 
 def _timing(progress_cb, label: str, seconds: float) -> None:
     _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
+
+
+def _min_free_disk_gb_for_mode(mode: str) -> float:
+    raw_global = (os.getenv(_MIN_FREE_DISK_GB_ENV) or "").strip()
+    if raw_global:
+        return float(raw_global)
+    if mode == "accurate":
+        raw_mode = (os.getenv(_MIN_FREE_DISK_GB_ACCURATE_ENV) or "").strip()
+        if raw_mode:
+            return float(raw_mode)
+        return _DEFAULT_MIN_FREE_DISK_GB_ACCURATE
+    raw_mode = (os.getenv(_MIN_FREE_DISK_GB_DEV_ENV) or "").strip()
+    if raw_mode:
+        return float(raw_mode)
+    return _DEFAULT_MIN_FREE_DISK_GB_DEV
+
+
+def _free_disk_gb(path: str) -> float:
+    usage = shutil.disk_usage(path)
+    return float(usage.free) / (1024.0 ** 3)
+
+
+def _assert_disk_preflight(engine: Engine, *, mode: str, progress_cb=None) -> None:
+    min_free_gb = _min_free_disk_gb_for_mode(mode)
+    cache_root = os.path.abspath(".livability_cache")
+    with engine.connect() as conn:
+        pg_data_directory = str(conn.execute(text("SHOW data_directory")).scalar_one())
+    cache_free = _free_disk_gb(cache_root)
+    pg_free = _free_disk_gb(pg_data_directory)
+    _progress(progress_cb, f"disk preflight: mode={mode} min_free_gb={min_free_gb:.1f}")
+    _progress(progress_cb, f"disk preflight: cache_root={cache_root} free_gb={cache_free:.1f}")
+    _progress(progress_cb, f"disk preflight: pg_data={pg_data_directory} free_gb={pg_free:.1f}")
+    if cache_free < min_free_gb:
+        raise RuntimeError(
+            f"insufficient free disk in cache root for noise build: {cache_free:.1f}GB < {min_free_gb:.1f}GB"
+        )
+    if pg_free < min_free_gb:
+        raise RuntimeError(
+            f"insufficient free disk in postgres data_directory for noise build: {pg_free:.1f}GB < {min_free_gb:.1f}GB"
+        )
 
 
 def _advisory_lock_key(resolved_hash: str) -> str:
@@ -65,6 +118,10 @@ def build_noise_artifact(
     resolved_hash: str,
     tile_size_metres: float = 10_000.0,
     topology_grid_metres: float = 0.1,
+    noise_accuracy_mode: str = "dev_fast",
+    grid_size_m: int = 1000,
+    accurate_simplify_m: float = 25.0,
+    latest_rounds_by_group: dict[str, int] | None = None,
     force: bool = False,
     force_resolved: bool = False,
     reimport_source: bool = False,
@@ -116,61 +173,127 @@ def build_noise_artifact(
             dissolve_table = None
             round_table = None
             try:
+                mode_norm = str(noise_accuracy_mode or "dev_fast").strip().lower()
+                _assert_disk_preflight(engine, mode=mode_norm, progress_cb=progress_cb)
                 _progress(progress_cb, "ingest start")
                 log.info("ingesting raw source -> noise_normalized (source_hash=%s)", source_hash)
                 ingest_started = time.perf_counter()
-                n_ingested = ingest_noise_normalized(
-                    engine,
-                    source_hash,
-                    data_dir,
-                    domain_wgs84,
-                    reimport_source=(reimport_source or src_status == "reset"),
-                    progress_cb=progress_cb,
-                )
+                latest_round_only = True
+                if mode_norm == "dev_fast":
+                    exact_source_types = {"airport", "industry"}
+                    n_ingested = ingest_noise_normalized(
+                        engine,
+                        source_hash,
+                        data_dir,
+                        domain_wgs84,
+                        reimport_source=(reimport_source or src_status == "reset"),
+                        source_types=exact_source_types,
+                        latest_round_only=latest_round_only,
+                        progress_cb=progress_cb,
+                    )
+                else:
+                    n_ingested = ingest_noise_normalized(
+                        engine,
+                        source_hash,
+                        data_dir,
+                        domain_wgs84,
+                        reimport_source=(reimport_source or src_status == "reset"),
+                        source_types=None,
+                        latest_round_only=latest_round_only,
+                        progress_cb=progress_cb,
+                    )
                 _timing(progress_cb, "ingest.total", time.perf_counter() - ingest_started)
                 source_rows_total = _source_row_count(engine, source_hash)
                 _progress(progress_cb, f"source ingest complete rows={source_rows_total:,}")
                 _progress(progress_cb, f"ingest done: {n_ingested} rows")
+                if mode_norm == "dev_fast":
+                    _progress(progress_cb, "dev-fast: building road/rail coarse grid artifact")
+                    grid_started = time.perf_counter()
+                    grid_result = build_dev_fast_road_rail_grid(
+                        engine,
+                        data_dir=data_dir,
+                        noise_source_hash=source_hash,
+                        artifact_hash=resolved_hash,
+                        grid_size_m=int(grid_size_m),
+                        progress_cb=progress_cb,
+                    )
+                    _timing(progress_cb, "dev_fast.grid_build", time.perf_counter() - grid_started)
+                    _progress(
+                        progress_cb,
+                        "dev-fast road/rail grid: "
+                        f"grid_size={int(grid_size_m)}m source_rows={int(grid_result.get('source_rows', 0)):,} "
+                        f"cells={int(grid_result.get('cell_rows', 0)):,}",
+                    )
+                    resolve_started = time.perf_counter()
+                    resolved_rows = materialize_dev_fast_resolved(
+                        engine,
+                        noise_source_hash=source_hash,
+                        noise_resolved_hash=resolved_hash,
+                        grid_size_m=int(grid_size_m),
+                        progress_cb=progress_cb,
+                    )
+                    _timing(progress_cb, "resolve.total", time.perf_counter() - resolve_started)
+                    _progress(progress_cb, f"resolve done: {resolved_rows:,} rows")
+                else:
+                    _progress(
+                        progress_cb,
+                        f"accurate: simplifying road/rail polygons tolerance={float(accurate_simplify_m):.2f}m",
+                    )
+                    apply_accurate_simplification(
+                        engine,
+                        noise_source_hash=source_hash,
+                        simplify_tolerance_m=float(accurate_simplify_m),
+                        progress_cb=progress_cb,
+                    )
+                    _progress(progress_cb, f"dissolve start source_hash={source_hash}")
+                    _progress(
+                        progress_cb,
+                        f"dissolve start: tile_size={tile_size_metres}m grid={topology_grid_metres}m",
+                    )
+                    log.info("running two-pass dissolve (source_hash=%s resolved_hash=%s)", source_hash, resolved_hash)
+                    dissolve_started = time.perf_counter()
+                    dissolve_table, round_table = dissolve_noise_into_staging(
+                        engine,
+                        source_hash=source_hash,
+                        resolved_hash=resolved_hash,
+                        tile_size_metres=tile_size_metres,
+                        topology_grid_metres=topology_grid_metres,
+                        progress_cb=progress_cb,
+                    )
+                    _timing(progress_cb, "dissolve.total", time.perf_counter() - dissolve_started)
 
-                _progress(progress_cb, f"dissolve start source_hash={source_hash}")
-                _progress(
-                    progress_cb,
-                    f"dissolve start: tile_size={tile_size_metres}m grid={topology_grid_metres}m",
-                )
-                log.info("running two-pass dissolve (source_hash=%s resolved_hash=%s)", source_hash, resolved_hash)
-                dissolve_started = time.perf_counter()
-                dissolve_table, round_table = dissolve_noise_into_staging(
-                    engine,
-                    source_hash=source_hash,
-                    resolved_hash=resolved_hash,
-                    tile_size_metres=tile_size_metres,
-                    topology_grid_metres=topology_grid_metres,
-                    progress_cb=progress_cb,
-                )
-                _timing(progress_cb, "dissolve.total", time.perf_counter() - dissolve_started)
-
-                _progress(progress_cb, "resolve start")
-                log.info("materializing resolved display (resolved_hash=%s)", resolved_hash)
-                resolve_started = time.perf_counter()
-                resolve_result = materialize_resolved_display(
-                    engine,
-                    noise_resolved_hash=resolved_hash,
-                    round_table=round_table,
-                    domain_wkb=domain_wkb,
-                    topology_grid_metres=topology_grid_metres,
-                    progress_cb=progress_cb,
-                )
-                resolve_elapsed = time.perf_counter() - resolve_started
-                _timing(progress_cb, "resolve.total", resolve_elapsed)
-                groups_processed = int(resolve_result.get("groups_processed", 0) or 0)
-                if groups_processed > 0:
-                    _progress(progress_cb, f"resolve start groups={groups_processed}")
-                _progress(progress_cb, f"resolve complete rows={resolve_result['total_inserted']} elapsed={resolve_elapsed:.1f}s")
-                _progress(progress_cb, f"resolve done: {resolve_result['total_inserted']} rows")
-                log.info("resolved: %s", resolve_result)
+                    _progress(progress_cb, "resolve start")
+                    log.info("materializing resolved display (resolved_hash=%s)", resolved_hash)
+                    resolve_started = time.perf_counter()
+                    resolve_result = materialize_resolved_display(
+                        engine,
+                        noise_resolved_hash=resolved_hash,
+                        round_table=round_table,
+                        domain_wkb=domain_wkb,
+                        topology_grid_metres=topology_grid_metres,
+                        progress_cb=progress_cb,
+                    )
+                    resolve_elapsed = time.perf_counter() - resolve_started
+                    _timing(progress_cb, "resolve.total", resolve_elapsed)
+                    groups_processed = int(resolve_result.get("groups_processed", 0) or 0)
+                    if groups_processed > 0:
+                        _progress(progress_cb, f"resolve start groups={groups_processed}")
+                    _progress(progress_cb, f"resolve complete rows={resolve_result['total_inserted']} elapsed={resolve_elapsed:.1f}s")
+                    _progress(progress_cb, f"resolve done: {resolve_result['total_inserted']} rows")
+                    log.info("resolved: %s", resolve_result)
 
                 counts = _compute_artifact_counts(engine, resolved_hash)
-                mark_artifact_complete(engine, resolved_hash, updated_manifest_json=counts)
+                mark_artifact_complete(
+                    engine,
+                    resolved_hash,
+                    updated_manifest_json={
+                        **counts,
+                        "noise_accuracy_mode": mode_norm,
+                        "grid_size_m": int(grid_size_m),
+                        "accurate_simplify_m": float(accurate_simplify_m),
+                        "latest_rounds_by_group": dict(latest_rounds_by_group or {}),
+                    },
+                )
                 mark_artifact_complete(
                     engine,
                     source_hash,
@@ -178,6 +301,10 @@ def build_noise_artifact(
                         "row_count": source_rows_total,
                         "ingest_schema_version": INGEST_SCHEMA_VERSION,
                         "ingest_complete": True,
+                        "noise_accuracy_mode": mode_norm,
+                        "grid_size_m": int(grid_size_m),
+                        "accurate_simplify_m": float(accurate_simplify_m),
+                        "latest_rounds_by_group": dict(latest_rounds_by_group or {}),
                     },
                 )
                 mark_artifact_complete(engine, domain_hash, updated_manifest_json={})
@@ -266,6 +393,10 @@ def _delete_prior_canonical_rows(
             )
             conn.execute(
                 text("DELETE FROM noise_resolved_display WHERE noise_resolved_hash = :h"),
+                {"h": artifact_hash},
+            )
+            conn.execute(
+                text("DELETE FROM noise_grid_artifact WHERE artifact_hash = :h"),
                 {"h": artifact_hash},
             )
 

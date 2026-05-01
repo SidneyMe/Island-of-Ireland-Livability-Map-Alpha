@@ -26,11 +26,13 @@ log = logging.getLogger(__name__)
 _GDAL_CACHE_ENV = "NOISE_GDAL_CACHE_DIR"
 _DEFAULT_GDAL_CACHE_DIR = Path(".livability_cache") / "noise_gdal"
 _OGR2OGR_TIMEOUT_ENV = "NOISE_OGR2OGR_TIMEOUT_SECONDS"
+_OGR2OGR_HARD_TIMEOUT_ENV = "NOISE_OGR2OGR_HARD_TIMEOUT_SECONDS"
 _OGR2OGR_IDLE_TIMEOUT_ENV = "NOISE_OGR2OGR_IDLE_TIMEOUT_SEC"
+_OGR2OGR_NO_PROGRESS_TIMEOUT_ENV = "NOISE_OGR2OGR_NO_PROGRESS_TIMEOUT_SECONDS"
 _OGR2OGR_TOTAL_TIMEOUT_ENV = "NOISE_OGR2OGR_TOTAL_TIMEOUT_SEC"
 _OGR2OGR_ROAD_CHUNK_TIMEOUT_ENV = "NOISE_OGR2OGR_ROAD_CHUNK_TIMEOUT_SEC"
-_DEFAULT_OGR2OGR_TIMEOUT_SECONDS = 300
-_DEFAULT_OGR2OGR_IDLE_TIMEOUT_SECONDS = 600
+_DEFAULT_OGR2OGR_TIMEOUT_SECONDS = 900
+_DEFAULT_OGR2OGR_IDLE_TIMEOUT_SECONDS = 180
 _DEFAULT_OGR2OGR_TOTAL_TIMEOUT_SECONDS = 1800
 _DEFAULT_OGR2OGR_ROAD_CHUNK_TIMEOUT_SECONDS = 1200
 _SMALL_SOURCE_OGR2OGR_TIMEOUT_SECONDS = 120
@@ -128,6 +130,11 @@ def _timing(progress_cb, label: str, seconds: float) -> None:
     _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
 
 
+def _progress_event(progress_cb, **fields: Any) -> None:
+    payload = " ".join(f"{key}={value}" for key, value in fields.items())
+    _progress(progress_cb, f"[noise:progress] {payload}")
+
+
 def _env_int(name: str, default: int) -> int:
     raw = (os.getenv(name) or "").strip()
     if not raw:
@@ -140,6 +147,12 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _ogr2ogr_idle_timeout_seconds() -> float:
+    raw_new = (os.getenv(_OGR2OGR_NO_PROGRESS_TIMEOUT_ENV) or "").strip()
+    if raw_new:
+        value = _env_int(_OGR2OGR_NO_PROGRESS_TIMEOUT_ENV, 0)
+        if value <= 0:
+            raise NoiseIngestError(f"{_OGR2OGR_NO_PROGRESS_TIMEOUT_ENV} must be > 0; got {value}")
+        return float(value)
     raw = (os.getenv(_OGR2OGR_IDLE_TIMEOUT_ENV) or "").strip()
     if not raw:
         return float(_DEFAULT_OGR2OGR_IDLE_TIMEOUT_SECONDS)
@@ -170,15 +183,27 @@ def _ogr2ogr_road_chunk_timeout_seconds() -> float:
 
 
 def _ogr2ogr_timeout_seconds(*, default: int = _DEFAULT_OGR2OGR_TIMEOUT_SECONDS, road_gdb_chunk: bool = False) -> float:
+    raw_hard = (os.getenv(_OGR2OGR_HARD_TIMEOUT_ENV) or "").strip()
+    if raw_hard:
+        value = _env_int(_OGR2OGR_HARD_TIMEOUT_ENV, 0)
+        if value <= 0:
+            raise NoiseIngestError(f"{_OGR2OGR_HARD_TIMEOUT_ENV} must be > 0; got {value}")
+        return float(value)
     raw = (os.getenv(_OGR2OGR_TIMEOUT_ENV) or "").strip()
     if raw:
         value = _env_int(_OGR2OGR_TIMEOUT_ENV, 0)
         if value <= 0:
             raise NoiseIngestError(f"{_OGR2OGR_TIMEOUT_ENV} must be > 0; got {value}")
         return float(value)
+    raw_total = (os.getenv(_OGR2OGR_TOTAL_TIMEOUT_ENV) or "").strip()
+    if raw_total:
+        value = _env_int(_OGR2OGR_TOTAL_TIMEOUT_ENV, 0)
+        if value <= 0:
+            raise NoiseIngestError(f"{_OGR2OGR_TOTAL_TIMEOUT_ENV} must be > 0; got {value}")
+        return float(value)
     if road_gdb_chunk:
         return _ogr2ogr_road_chunk_timeout_seconds()
-    return _ogr2ogr_total_timeout_seconds(default=default)
+    return float(default)
 
 
 def _ogr2ogr_gdb_chunk_size() -> int:
@@ -349,12 +374,21 @@ def _ogr_source_feature_count(source_path: Path, layer_name: str | None) -> int 
 
 
 def _ogr2ogr_timeout_for_source(*, source_path: Path, layer_name: str | None) -> float:
+    resolved_timeout = _ogr2ogr_timeout_seconds()
     if source_path.suffix.lower() != ".shp":
-        return _ogr2ogr_timeout_seconds()
+        return resolved_timeout
     feature_count = _ogr_source_feature_count(source_path, layer_name)
     if feature_count is not None and feature_count < 1000:
-        return min(float(_SMALL_SOURCE_OGR2OGR_TIMEOUT_SECONDS), _ogr2ogr_timeout_seconds())
-    return _ogr2ogr_timeout_seconds()
+        # Keep the small-shapefile fast-fail default unless the user explicitly
+        # set a global hard timeout and intentionally wants a larger cap.
+        explicit_timeout = (
+            (os.getenv(_OGR2OGR_HARD_TIMEOUT_ENV) or "").strip()
+            or (os.getenv(_OGR2OGR_TIMEOUT_ENV) or "").strip()
+        )
+        if explicit_timeout:
+            return resolved_timeout
+        return min(float(_SMALL_SOURCE_OGR2OGR_TIMEOUT_SECONDS), resolved_timeout)
+    return resolved_timeout
 
 
 def ogr2ogr_available() -> bool:
@@ -482,6 +516,7 @@ def _build_ogr2ogr_gdb_to_gpkg_command(
         "EPSG:2157",
         "-nlt",
         "PROMOTE_TO_MULTI",
+        "-makevalid",
         "-progress",
     ]
     if selected_fields:
@@ -899,6 +934,7 @@ def build_ogr2ogr_command(
         "EPSG:2157",
         "-nlt",
         "MULTIPOLYGON",
+        "-makevalid",
         "-lco",
         "GEOMETRY_NAME=geom",
         "-lco",
@@ -974,6 +1010,15 @@ def _run_ogr2ogr_command(
         else _ogr2ogr_timeout_seconds()
     )
     idle_timeout = _ogr2ogr_idle_timeout_seconds()
+    _progress_event(
+        progress_cb,
+        phase="ogr2ogr_start",
+        source=source_name,
+        target=target_label,
+        timeout_s=int(effective_timeout),
+        no_progress_timeout_s=int(idle_timeout),
+        context=context_label,
+    )
 
     try:
         while True:
@@ -1006,6 +1051,16 @@ def _run_ogr2ogr_command(
                     f"idle_timeout={_format_elapsed(idle_timeout)} last_output_age={int(last_output_age)}s "
                     f"last_line={last_output_line or '(none)'} context={context_label}",
                 )
+                _progress_event(
+                    progress_cb,
+                    phase="ogr2ogr_heartbeat",
+                    source=source_name,
+                    target=target_label,
+                    pid=pid,
+                    elapsed_s=int(elapsed),
+                    last_output_age_s=int(last_output_age),
+                    context=context_label,
+                )
                 last_heartbeat = now
 
             if (now - last_output_at) > idle_timeout and proc.poll() is None:
@@ -1014,10 +1069,10 @@ def _run_ogr2ogr_command(
                 _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
                 last_lines = "\n".join(lines[-20:])
                 raise NoiseIngestError(
-                    "ogr2ogr import idle timeout "
+                    "ogr2ogr import no-progress timeout "
                     f"for source={source_name} target={target_label} context={context_label} "
                     f"pid={getattr(proc, 'pid', 'unknown')} "
-                    f"after {_format_elapsed(elapsed)} idle_timeout={_format_elapsed(idle_timeout)} "
+                    f"after {_format_elapsed(elapsed)} no_progress_timeout={_format_elapsed(idle_timeout)} "
                     f"last_line={last_output_line or '(none)'}; cmd={safe_cmd}\n"
                     f"last_output_lines:\n{last_lines}"
                 )
@@ -1048,6 +1103,15 @@ def _run_ogr2ogr_command(
         pump_thread.join(timeout=1.0)
 
     rc = proc.wait()
+    _progress_event(
+        progress_cb,
+        phase="ogr2ogr_exit",
+        source=source_name,
+        target=target_label,
+        returncode=rc,
+        elapsed_s=int(max(time.monotonic() - start, 0.0)),
+        context=context_label,
+    )
     if rc != 0:
         raise NoiseIngestError(
             f"ogr2ogr import failed for source={source_name} target={target_label}: returncode={rc}\n"
@@ -1123,6 +1187,7 @@ def _run_small_shapefile_fallback_import(
             "EPSG:2157",
             "-nlt",
             "PROMOTE_TO_MULTI",
+            "-makevalid",
             "-progress",
         ]
         if selected_fields:
@@ -1617,6 +1682,133 @@ def _iter_ni_members(extracted_zip_dir: Path) -> list[str]:
     return _preferred_ni_entries(members)
 
 
+def _selected_roi_specs(
+    specs: list[Any] | tuple[Any, ...],
+    *,
+    source_types: set[str] | None,
+    latest_round_only: bool,
+) -> tuple[list[Any], dict[tuple[str, str], int], dict[tuple[str, str], list[int]]]:
+    def _stype(spec: Any) -> str:
+        return str(getattr(spec, "source_type", "") or "").strip().lower()
+
+    def _round(spec: Any) -> int:
+        return int(getattr(spec, "round_number", 0) or 0)
+
+    selected: list[Any] = []
+    latest_by_group: dict[tuple[str, str], int] = {}
+    all_rounds_by_group: dict[tuple[str, str], list[int]] = {}
+
+    for spec in specs:
+        source_type = _stype(spec)
+        if source_types is not None and source_type not in source_types:
+            continue
+        group = ("roi", source_type)
+        round_number = _round(spec)
+        all_rounds_by_group.setdefault(group, []).append(round_number)
+        prev = latest_by_group.get(group)
+        if prev is None or round_number > prev:
+            latest_by_group[group] = round_number
+
+    for spec in specs:
+        source_type = _stype(spec)
+        if source_types is not None and source_type not in source_types:
+            continue
+        group = ("roi", source_type)
+        if latest_round_only and _round(spec) != latest_by_group.get(group):
+            continue
+        selected.append(spec)
+
+    return selected, latest_by_group, all_rounds_by_group
+
+
+def _collect_ni_member_specs(
+    *,
+    data_dir: Path,
+    source_types: set[str] | None,
+) -> list[dict[str, Any]]:
+    from noise.loader import NI_ZIP_BY_ROUND, _metric_from_ni_member, _source_type_from_ni_member
+
+    specs: list[dict[str, Any]] = []
+    for round_number, zip_name in sorted(NI_ZIP_BY_ROUND.items(), reverse=True):
+        zip_path = Path(data_dir) / zip_name
+        if not zip_path.exists():
+            continue
+        extracted = extract_source_archive_if_needed(zip_path)
+        for member in _iter_ni_members(extracted):
+            metric = _metric_from_ni_member(member)
+            source_type = _source_type_from_ni_member(member)
+            if metric is None or source_type is None:
+                continue
+            source_type_norm = str(source_type).strip().lower()
+            if source_types is not None and source_type_norm not in source_types:
+                continue
+            source_path = extracted / member
+            if not source_path.exists():
+                continue
+            specs.append(
+                {
+                    "jurisdiction": "ni",
+                    "round_number": int(round_number),
+                    "zip_name": str(zip_name),
+                    "member": str(member),
+                    "source_type": source_type_norm,
+                    "metric": str(metric),
+                    "source_path": source_path,
+                }
+            )
+    return specs
+
+
+def _selected_ni_member_specs(
+    *,
+    data_dir: Path,
+    source_types: set[str] | None,
+    latest_round_only: bool,
+) -> tuple[list[dict[str, Any]], dict[tuple[str, str], int], dict[tuple[str, str], list[int]]]:
+    specs = _collect_ni_member_specs(data_dir=data_dir, source_types=source_types)
+    latest_by_group: dict[tuple[str, str], int] = {}
+    all_rounds_by_group: dict[tuple[str, str], list[int]] = {}
+    for spec in specs:
+        source_type = str(spec["source_type"]).strip().lower()
+        group = ("ni", source_type)
+        round_number = int(spec["round_number"])
+        all_rounds_by_group.setdefault(group, []).append(round_number)
+        prev = latest_by_group.get(group)
+        if prev is None or round_number > prev:
+            latest_by_group[group] = round_number
+
+    if not latest_round_only:
+        return specs, latest_by_group, all_rounds_by_group
+
+    selected = [
+        spec
+        for spec in specs
+        if int(spec["round_number"]) == latest_by_group.get(("ni", str(spec["source_type"]).strip().lower()))
+    ]
+    return selected, latest_by_group, all_rounds_by_group
+
+
+def discover_latest_rounds_by_group(data_dir: Path) -> dict[str, int]:
+    from noise.loader import ROI_SOURCE_SPECS
+
+    roi_selected, roi_latest, _ = _selected_roi_specs(
+        list(ROI_SOURCE_SPECS),
+        source_types=None,
+        latest_round_only=True,
+    )
+    del roi_selected
+    ni_selected, ni_latest, _ = _selected_ni_member_specs(
+        data_dir=Path(data_dir),
+        source_types=None,
+        latest_round_only=True,
+    )
+    del ni_selected
+    payload: dict[str, int] = {}
+    for group, round_number in {**roi_latest, **ni_latest}.items():
+        payload[f"{group[0]}:{group[1]}"] = int(round_number)
+    return payload
+
+
 def _short_hash(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
@@ -2029,6 +2221,11 @@ def _cleanup_road_chunk_tables_after_failure(
             "Road GDB keeping failed chunk staging tables because NOISE_KEEP_FAILED_STAGE_TABLES=1",
         )
         return
+
+    try:
+        conn.rollback()
+    except Exception:
+        pass
 
     discovered_chunk_tables: list[str] = []
     try:
@@ -2453,24 +2650,50 @@ def ingest_noise_normalized_ogr2ogr(
     data_dir,
     domain_wgs84,
     *,
+    source_types: set[str] | None = None,
+    latest_round_only: bool = False,
     progress_cb=None,
 ) -> int:
     del domain_wgs84  # ogr2ogr path does not materialize shapely candidates.
 
-    from noise.loader import (
-        NI_ZIP_BY_ROUND,
-        ROI_SOURCE_SPECS,
-        _metric_from_ni_member,
-        _source_type_from_ni_member,
-    )
+    from noise.loader import ROI_SOURCE_SPECS
 
     total_started = time.perf_counter()
     raw_extract_seconds = 0.0
     normalize_insert_seconds = 0.0
     total_inserted = 0
+    selected_roi_specs, roi_latest_by_group, roi_rounds_by_group = _selected_roi_specs(
+        list(ROI_SOURCE_SPECS),
+        source_types={str(s).strip().lower() for s in source_types} if source_types is not None else None,
+        latest_round_only=latest_round_only,
+    )
+    selected_ni_specs, ni_latest_by_group, ni_rounds_by_group = _selected_ni_member_specs(
+        data_dir=Path(data_dir),
+        source_types={str(s).strip().lower() for s in source_types} if source_types is not None else None,
+        latest_round_only=latest_round_only,
+    )
+    latest_rounds = {**roi_latest_by_group, **ni_latest_by_group}
+    if latest_round_only:
+        latest_parts = ", ".join(
+            f"{jur}:{stype}=Round {rnd}"
+            for (jur, stype), rnd in sorted(latest_rounds.items())
+        )
+        if latest_parts:
+            _progress(progress_cb, f"selected latest round per group: {latest_parts}")
+        skipped_parts: list[str] = []
+        for group, rounds in sorted({**roi_rounds_by_group, **ni_rounds_by_group}.items()):
+            latest = latest_rounds.get(group)
+            if latest is None:
+                continue
+            skipped = sorted({int(r) for r in rounds if int(r) != int(latest)})
+            if skipped:
+                skipped_parts.append(f"{group[0]}:{group[1]} -> {','.join(f'Round {r}' for r in skipped)}")
+        if skipped_parts:
+            _progress(progress_cb, f"skipped historical rounds: {'; '.join(skipped_parts)}")
+
     with engine.connect() as conn:
         _cleanup_stale_noise_import_backends(conn, progress_cb=progress_cb)
-        for spec in ROI_SOURCE_SPECS:
+        for spec in selected_roi_specs:
             zip_path = Path(data_dir) / spec.zip_name
             extracted = extract_source_archive_if_needed(zip_path)
             source_path = extracted / spec.member
@@ -2782,20 +3005,13 @@ def ingest_noise_normalized_ogr2ogr(
                 _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
                 raise
 
-        for round_number, zip_name in sorted(NI_ZIP_BY_ROUND.items(), reverse=True):
-            zip_path = Path(data_dir) / zip_name
-            extracted = extract_source_archive_if_needed(zip_path)
-            members = _iter_ni_members(extracted)
-            for member in members:
-                metric = _metric_from_ni_member(member)
-                source_type = _source_type_from_ni_member(member)
-                if metric is None or source_type is None:
-                    continue
-
-                source_path = extracted / member
-                if not source_path.exists():
-                    continue
-
+        for ni_spec in selected_ni_specs:
+                round_number = int(ni_spec["round_number"])
+                zip_name = str(ni_spec["zip_name"])
+                member = str(ni_spec["member"])
+                metric = str(ni_spec["metric"])
+                source_type = str(ni_spec["source_type"])
+                source_path = Path(ni_spec["source_path"])
                 available_fields = _available_ogr_fields(source_path, None)
                 candidate_fields = _noise_ogr_candidate_fields(
                     jurisdiction="ni",

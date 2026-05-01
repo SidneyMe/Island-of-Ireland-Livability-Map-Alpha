@@ -1,3 +1,7 @@
+param(
+    [switch]$Incremental
+)
+
 $ErrorActionPreference = "Stop"
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -16,19 +20,16 @@ if ($env:NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC) {
 }
 
 $geoCmd = Join-Path $scriptDir "geo_env.cmd"
-$argList = @(
-    "/c"
-    "`"$geoCmd`""
-    ".\.venv\Scripts\python.exe"
-    "main.py"
-    "--precompute-dev"
-    "--refresh-noise-artifact"
-    "--reimport-noise-source"
-    "--force-noise-artifact"
-    "--force-precompute"
-)
+$argList = @("/c", "`"$geoCmd`"", ".\.venv\Scripts\python.exe", "main.py", "--precompute-dev", "--refresh-noise-artifact")
+if (-not $Incremental) {
+    $argList += @("--reimport-noise-source", "--force-noise-artifact", "--force-precompute")
+}
 
-Write-Host "[watchdog] starting precompute timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+if ($Incremental) {
+    Write-Host "[watchdog] starting precompute (incremental) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+} else {
+    Write-Host "[watchdog] starting precompute (full-reimport) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+}
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -PassThru -NoNewWindow
 
 if ($proc.WaitForExit($timeoutSeconds * 1000)) {

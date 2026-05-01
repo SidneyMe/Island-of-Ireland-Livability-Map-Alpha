@@ -506,6 +506,8 @@ def ingest_noise_normalized(
     *,
     force: bool = False,
     reimport_source: bool = False,
+    source_types: set[str] | None = None,
+    latest_round_only: bool = False,
     progress_cb=None,
 ) -> int:
     """
@@ -582,6 +584,8 @@ def ingest_noise_normalized(
                 noise_source_hash,
                 data_dir,
                 domain_wgs84,
+                source_types=source_types,
+                latest_round_only=latest_round_only,
                 progress_cb=progress_cb,
             )
 

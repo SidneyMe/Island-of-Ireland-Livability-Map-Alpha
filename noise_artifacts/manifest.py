@@ -55,12 +55,18 @@ def noise_resolved_hash(
     dissolve_rules_version: int,
     round_priority_version: int,
     topology_grid_metres: float,
+    identity_payload: dict[str, Any] | None = None,
 ) -> str:
     """Deterministic identity hash for a 'resolved' artifact."""
+    if identity_payload:
+        import json
+        payload = json.dumps(identity_payload, sort_keys=True, default=str)
+    else:
+        payload = ""
     raw = (
         f"{source_hash}:{domain_hash}"
         f":{topology_rules_version}:{dissolve_rules_version}"
-        f":{round_priority_version}:{topology_grid_metres}"
+        f":{round_priority_version}:{topology_grid_metres}:{payload}"
     ).encode()
     return hashlib.sha256(raw).hexdigest()[:16]
 

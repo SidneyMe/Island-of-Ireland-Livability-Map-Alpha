@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,12 @@ TOPOLOGY_RULES_VERSION = 1
 DISSOLVE_RULES_VERSION = 1
 ROUND_PRIORITY_VERSION = 1
 EXTENT_VERSION = 1
+ACCURACY_MODE_VERSION = 1
+
+_NOISE_GRID_SIZE_ENV = "NOISE_GRID_SIZE_M"
+_NOISE_ACCURATE_SIMPLIFY_ENV = "NOISE_ACCURATE_SIMPLIFY_M"
+_DEFAULT_NOISE_GRID_SIZE_M = 1000
+_DEFAULT_NOISE_ACCURATE_SIMPLIFY_M = 25.0
 
 
 def _progress(progress_cb, message: str) -> None:
@@ -38,6 +45,32 @@ def _progress(progress_cb, message: str) -> None:
 
 def _timing(progress_cb, label: str, seconds: float) -> None:
     _progress(progress_cb, f"[noise:timing] {label} {seconds:.1f}s")
+
+
+def _env_positive_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return int(default)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {value}")
+    return value
+
+
+def _env_positive_float(name: str, default: float) -> float:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a number, got {raw!r}") from exc
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got {value}")
+    return float(value)
 
 
 def _load_domain_boundary_bytes(config) -> bytes:
@@ -69,6 +102,7 @@ def build_default_noise_artifact(
     force_resolved: bool = False,
     reimport_source: bool = False,
     force_all: bool = False,
+    noise_accuracy_mode: str | None = None,
     data_dir: Path | None = None,
     progress_cb=None,
 ) -> dict[str, Any]:
@@ -101,6 +135,8 @@ def build_default_noise_artifact(
         noise_resolved_hash,
         noise_source_hash,
     )
+    from .modes import normalize_noise_accuracy_mode, noise_accuracy_mode_label
+    from .ogr_ingest import discover_latest_rounds_by_group
 
     build_started = time.perf_counter()
 
@@ -109,6 +145,19 @@ def build_default_noise_artifact(
     reimport_source = bool(reimport_source or force_all or force)
     if reimport_source:
         force_resolved = True
+
+    accuracy_mode = normalize_noise_accuracy_mode(noise_accuracy_mode)
+    grid_size_m = _env_positive_int(_NOISE_GRID_SIZE_ENV, _DEFAULT_NOISE_GRID_SIZE_M)
+    simplify_m = _env_positive_float(_NOISE_ACCURATE_SIMPLIFY_ENV, _DEFAULT_NOISE_ACCURATE_SIMPLIFY_M)
+    latest_rounds = discover_latest_rounds_by_group(resolved_data_dir)
+    _progress(progress_cb, f"noise mode: {noise_accuracy_mode_label(accuracy_mode)}")
+    if accuracy_mode == "dev_fast":
+        _progress(progress_cb, f"dev-fast grid size: {grid_size_m}m")
+    else:
+        _progress(progress_cb, f"accurate simplify tolerance: {simplify_m:.2f}m")
+    if latest_rounds:
+        round_parts = ", ".join(f"{k}={v}" for k, v in sorted(latest_rounds.items()))
+        _progress(progress_cb, f"selected latest round per group: {round_parts}")
 
     _progress(progress_cb, f"computing raw noise source signature from {resolved_data_dir}")
     log.info("computing source signature from %s", resolved_data_dir)
@@ -127,10 +176,18 @@ def build_default_noise_artifact(
     _timing(progress_cb, "noise.domain_load", time.perf_counter() - domain_started)
 
     topology_grid_m = float(getattr(config, "NOISE_TOPOLOGY_GRID_METRES", 0.1))
+    resolved_identity_payload: dict[str, Any] = {
+        "accuracy_mode_version": ACCURACY_MODE_VERSION,
+        "noise_accuracy_mode": accuracy_mode,
+        "noise_grid_size_m": int(grid_size_m),
+        "noise_accurate_simplify_m": float(simplify_m),
+        "latest_rounds_by_group": latest_rounds,
+    }
     res_hash = noise_resolved_hash(
         src_hash, dom_hash,
         TOPOLOGY_RULES_VERSION, DISSOLVE_RULES_VERSION, ROUND_PRIORITY_VERSION,
         topology_grid_m,
+        identity_payload=resolved_identity_payload,
     )
     _progress(progress_cb, f"resolved hash: {res_hash}")
 
@@ -155,6 +212,10 @@ def build_default_noise_artifact(
         resolved_hash=res_hash,
         tile_size_metres=tile_size_m,
         topology_grid_metres=topology_grid_m,
+        noise_accuracy_mode=accuracy_mode,
+        grid_size_m=grid_size_m,
+        accurate_simplify_m=simplify_m,
+        latest_rounds_by_group=latest_rounds,
         force_resolved=force_resolved,
         reimport_source=reimport_source,
         progress_cb=progress_cb,

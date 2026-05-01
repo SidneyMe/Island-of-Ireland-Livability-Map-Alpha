@@ -503,6 +503,25 @@ noise_resolved_provenance = Table(
     Column("source_refs_hash", Text, nullable=False),
 )
 
+noise_grid_artifact = Table(
+    "noise_grid_artifact",
+    metadata,
+    Column("artifact_hash", Text, nullable=False),
+    Column("noise_source_hash", Text, nullable=False),
+    Column("jurisdiction", Text, nullable=False),
+    Column("source_type", Text, nullable=False),
+    Column("metric", Text, nullable=False),
+    Column("grid_size_m", Integer, nullable=False),
+    Column("cell_x", Integer, nullable=False),
+    Column("cell_y", Integer, nullable=False),
+    Column("round_number", Integer, nullable=False),
+    Column("report_period", Text, nullable=True),
+    Column("db_low", Float, nullable=True),
+    Column("db_high", Float, nullable=True),
+    Column("db_value", Text, nullable=False),
+    Column("geom", Geometry("MULTIPOLYGON", srid=2157), nullable=False),
+)
+
 
 REQUIRED_PUBLIC_TABLES = {
     "grid_walk",
@@ -517,6 +536,7 @@ REQUIRED_PUBLIC_TABLES = {
     "noise_normalized",
     "noise_resolved_display",
     "noise_resolved_provenance",
+    "noise_grid_artifact",
 }
 
 REQUIRED_RAW_TABLES = {
@@ -580,4 +600,5 @@ GEOMETRY_FIELDS = {
     _table_key(transit_service_desert_cells): ("cell_geom",),
     _table_key(noise_normalized): ("geom",),
     _table_key(noise_resolved_display): ("geom",),
+    _table_key(noise_grid_artifact): ("geom",),
 }

@@ -112,6 +112,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--noise-accurate",
+        action="store_true",
+        help=(
+            "Use accurate noise processing mode for artifact build/publish. "
+            "Default is dev-fast mode."
+        ),
+    )
+    parser.add_argument(
         "--auto-refresh-import",
         action="store_true",
         help="Allow --precompute/--precompute-dev/--precompute-test to refresh raw OSM import state when it is missing instead of failing fast.",
@@ -198,6 +206,7 @@ def main() -> int:
                 force_noise_artifact=args.force_noise_artifact,
                 reimport_noise_source=args.reimport_noise_source,
                 force_noise_all=args.force_noise_all,
+                noise_accurate=args.noise_accurate,
                 refresh_noise_artifact=(
                     args.refresh_noise_artifact
                     or args.force_noise_artifact

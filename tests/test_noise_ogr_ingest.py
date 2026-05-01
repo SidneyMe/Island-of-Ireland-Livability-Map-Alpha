@@ -220,6 +220,7 @@ class NoiseOgrIngestTests(TestCase):
         self.assertIn("PG_USE_COPY", cmd)
         self.assertIn("YES", cmd)
         self.assertIn("-preserve_fid", cmd)
+        self.assertIn("-makevalid", cmd)
         self.assertIn("-progress", cmd)
 
     def test_build_ogr2ogr_command_adds_select_clause_when_fields_provided(self) -> None:
@@ -258,6 +259,30 @@ class NoiseOgrIngestTests(TestCase):
         )
         self.assertIn("-progress", cmd)
 
+    def test_small_shapefile_fallback_extract_command_includes_makevalid(self) -> None:
+        from noise_artifacts.ogr_ingest import _run_small_shapefile_fallback_import
+
+        captured_cmds: list[list[str]] = []
+
+        def _capture_run_ogr2ogr_command(**kwargs):  # noqa: ANN001
+            captured_cmds.append(list(kwargs["cmd"]))
+            return None
+
+        with patch(
+            "noise_artifacts.ogr_ingest._run_ogr2ogr_command",
+            side_effect=_capture_run_ogr2ogr_command,
+        ):
+            with patch("noise_artifacts.ogr_ingest._run_ogr2ogr_import"):
+                _run_small_shapefile_fallback_import(
+                    engine=self._fake_engine(),
+                    source_path=Path("C:/tmp/layer.shp"),
+                    stage_table="_noise_raw_test",
+                    selected_fields=["DB_LOW", "DB_HIGH"],
+                )
+
+        self.assertTrue(captured_cmds)
+        self.assertIn("-makevalid", captured_cmds[0])
+
     def test_select_existing_noise_fields_excludes_shape_metadata_fields(self) -> None:
         from noise_artifacts.ogr_ingest import _select_existing_noise_fields
 
@@ -292,6 +317,46 @@ class NoiseOgrIngestTests(TestCase):
         self.assertIn("noise.shp", message)
         self.assertIn("Noise_R4_Airport", message)
         self.assertIn("shape_star", message)
+
+    def test_selected_roi_specs_choose_latest_round_per_source_type(self) -> None:
+        from noise_artifacts.ogr_ingest import _selected_roi_specs
+
+        specs = [
+            SimpleNamespace(source_type="airport", round_number=2),
+            SimpleNamespace(source_type="airport", round_number=4),
+            SimpleNamespace(source_type="road", round_number=3),
+            SimpleNamespace(source_type="road", round_number=4),
+        ]
+        selected, latest_by_group, rounds_by_group = _selected_roi_specs(
+            specs,
+            source_types=None,
+            latest_round_only=True,
+        )
+        selected_pairs = sorted((str(s.source_type), int(s.round_number)) for s in selected)
+        self.assertEqual(selected_pairs, [("airport", 4), ("road", 4)])
+        self.assertEqual(latest_by_group[("roi", "airport")], 4)
+        self.assertEqual(latest_by_group[("roi", "road")], 4)
+        self.assertEqual(sorted(rounds_by_group[("roi", "airport")]), [2, 4])
+
+    def test_selected_ni_specs_choose_latest_round_per_source_type(self) -> None:
+        from noise_artifacts.ogr_ingest import _selected_ni_member_specs
+
+        fake_specs = [
+            {"round_number": 2, "source_type": "road", "metric": "Lden", "zip_name": "r2.zip", "member": "road2.shp", "source_path": Path("road2.shp")},
+            {"round_number": 3, "source_type": "road", "metric": "Lden", "zip_name": "r3.zip", "member": "road3.shp", "source_path": Path("road3.shp")},
+            {"round_number": 1, "source_type": "rail", "metric": "Lden", "zip_name": "r1.zip", "member": "rail1.shp", "source_path": Path("rail1.shp")},
+            {"round_number": 2, "source_type": "rail", "metric": "Lden", "zip_name": "r2.zip", "member": "rail2.shp", "source_path": Path("rail2.shp")},
+        ]
+        with patch("noise_artifacts.ogr_ingest._collect_ni_member_specs", return_value=fake_specs):
+            selected, latest_by_group, _ = _selected_ni_member_specs(
+                data_dir=Path("."),
+                source_types=None,
+                latest_round_only=True,
+            )
+        selected_pairs = sorted((str(s["source_type"]), int(s["round_number"])) for s in selected)
+        self.assertEqual(selected_pairs, [("rail", 2), ("road", 3)])
+        self.assertEqual(latest_by_group[("ni", "road")], 3)
+        self.assertEqual(latest_by_group[("ni", "rail")], 2)
 
     def test_roi_round4_airport_regression_never_selects_shape_fields(self) -> None:
         from noise_artifacts.ogr_ingest import (
@@ -674,7 +739,40 @@ class NoiseOgrIngestTests(TestCase):
         from noise_artifacts.ogr_ingest import _ogr2ogr_timeout_seconds
 
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(_ogr2ogr_timeout_seconds(), 300.0)
+            self.assertEqual(_ogr2ogr_timeout_seconds(), 900.0)
+
+    def test_small_shapefile_timeout_clamps_without_global_override(self) -> None:
+        from noise_artifacts.ogr_ingest import _ogr2ogr_timeout_for_source
+
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("noise_artifacts.ogr_ingest._ogr_source_feature_count", return_value=500):
+                timeout = _ogr2ogr_timeout_for_source(
+                    source_path=Path("C:/tmp/small_noise.shp"),
+                    layer_name=None,
+                )
+        self.assertEqual(timeout, 120.0)
+
+    def test_small_shapefile_timeout_uses_explicit_global_override(self) -> None:
+        from noise_artifacts.ogr_ingest import _ogr2ogr_timeout_for_source
+
+        with patch.dict(os.environ, {"NOISE_OGR2OGR_TIMEOUT_SECONDS": "900"}, clear=True):
+            with patch("noise_artifacts.ogr_ingest._ogr_source_feature_count", return_value=500):
+                timeout = _ogr2ogr_timeout_for_source(
+                    source_path=Path("C:/tmp/small_noise.shp"),
+                    layer_name=None,
+                )
+        self.assertEqual(timeout, 900.0)
+
+    def test_small_shapefile_timeout_uses_explicit_hard_timeout_override(self) -> None:
+        from noise_artifacts.ogr_ingest import _ogr2ogr_timeout_for_source
+
+        with patch.dict(os.environ, {"NOISE_OGR2OGR_HARD_TIMEOUT_SECONDS": "1200"}, clear=True):
+            with patch("noise_artifacts.ogr_ingest._ogr_source_feature_count", return_value=500):
+                timeout = _ogr2ogr_timeout_for_source(
+                    source_path=Path("C:/tmp/small_noise.shp"),
+                    layer_name=None,
+                )
+        self.assertEqual(timeout, 1200.0)
 
     def test_non_road_roi_import_passes_non_none_timeout(self) -> None:
         from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
@@ -783,8 +881,15 @@ class NoiseOgrIngestTests(TestCase):
     def test_windows_runner_scripts_use_venv_python(self) -> None:
         precompute_script = Path("scripts/win/precompute_noise_dev.cmd").read_text(encoding="utf-8")
         test_script = Path("scripts/win/test_noise.cmd").read_text(encoding="utf-8")
-        self.assertIn(".\\.venv\\Scripts\\python.exe", precompute_script)
+        watchdog_script = Path("scripts/win/run_noise_precompute_watchdog.ps1").read_text(encoding="utf-8")
+        self.assertIn("run_noise_precompute_watchdog.ps1", precompute_script)
+        self.assertIn("-Incremental", precompute_script)
+        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=1200", precompute_script)
         self.assertIn(".\\.venv\\Scripts\\python.exe", test_script)
+        self.assertIn(".\\.venv\\Scripts\\python.exe", watchdog_script)
+        self.assertNotIn("--reimport-noise-source", precompute_script)
+        self.assertNotIn("--force-noise-artifact", precompute_script)
+        self.assertNotIn("--force-precompute", precompute_script)
 
     def test_stage_lock_diagnostic_failure_rolls_back_and_does_not_block_drop(self) -> None:
         from noise_artifacts.ogr_ingest import _prepare_stage_table_for_external_import
@@ -1311,6 +1416,7 @@ class NoiseOgrIngestTests(TestCase):
         )
         cmd_text = " ".join(cmd)
         self.assertIn("-select Time,Db_Low,Db_High,DbValue,ReportPeriod", cmd_text)
+        self.assertIn("-makevalid", cmd_text)
         self.assertNotIn("Shape_Length", cmd_text)
         self.assertNotIn("Shape_Area", cmd_text)
 
@@ -1475,6 +1581,7 @@ class NoiseOgrIngestTests(TestCase):
         self.assertIn("_noise_raw_a_c001", flattened)
         self.assertIn("_noise_raw_a_c002", flattened)
         self.assertIn("_noise_raw_a_c003", flattened)
+        self.assertEqual(conn.rollback_count, 1)
 
     def test_failed_chunk_cleanup_respects_noise_keep_failed_stage_tables(self) -> None:
         from noise_artifacts.ogr_ingest import _cleanup_road_chunk_tables_after_failure
@@ -1488,6 +1595,7 @@ class NoiseOgrIngestTests(TestCase):
                     known_chunk_tables={"_noise_raw_a_c001"},
                 )
         mock_drop.assert_not_called()
+        self.assertEqual(conn.rollback_count, 0)
 
     def test_normalize_union_not_called_after_road_import_failure(self) -> None:
         from noise_artifacts.exceptions import NoiseIngestError

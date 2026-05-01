@@ -719,6 +719,11 @@ class MainCliNoiseFlagsTests(TestCase):
         args = parser.parse_args(["--precompute", "--force-noise-all"])
         self.assertTrue(args.force_noise_all)
 
+    def test_noise_accurate_flag_exists(self) -> None:
+        parser = self._build_parser()
+        args = parser.parse_args(["--precompute", "--noise-accurate"])
+        self.assertTrue(args.noise_accurate)
+
     def test_force_noise_artifact_requires_precompute_is_validated(self) -> None:
         """main() must validate that --force-noise-artifact requires a precompute flag."""
         import inspect
@@ -775,6 +780,12 @@ class WorkflowNoiseAutoBuildsTests(TestCase):
         from precompute import workflow
         sig = inspect.signature(workflow.run_precompute_impl)
         self.assertIn("force_noise_all", sig.parameters)
+
+    def test_workflow_has_noise_accurate_param(self) -> None:
+        import inspect
+        from precompute import workflow
+        sig = inspect.signature(workflow.run_precompute_impl)
+        self.assertIn("noise_accurate", sig.parameters)
 
     def test_workflow_calls_build_default_noise_artifact(self) -> None:
         import inspect

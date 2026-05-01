@@ -111,6 +111,11 @@ class MainCliTests(TestCase):
             profile="dev",
             force_precompute=False,
             auto_refresh_import=False,
+            force_noise_artifact=False,
+            reimport_noise_source=False,
+            force_noise_all=False,
+            noise_accurate=False,
+            refresh_noise_artifact=False,
         )
 
     def test_precompute_dev_passes_force_and_auto_refresh_flags(self) -> None:
@@ -132,6 +137,11 @@ class MainCliTests(TestCase):
             profile="dev",
             force_precompute=True,
             auto_refresh_import=True,
+            force_noise_artifact=False,
+            reimport_noise_source=False,
+            force_noise_all=False,
+            noise_accurate=False,
+            refresh_noise_artifact=False,
         )
 
     def test_precompute_test_dispatches_test_profile(self) -> None:
@@ -153,6 +163,37 @@ class MainCliTests(TestCase):
             profile="test",
             force_precompute=True,
             auto_refresh_import=True,
+            force_noise_artifact=False,
+            reimport_noise_source=False,
+            force_noise_all=False,
+            noise_accurate=False,
+            refresh_noise_artifact=False,
+        )
+
+    def test_noise_accurate_flag_dispatches_accurate_mode(self) -> None:
+        precompute_mock = mock.Mock(return_value="build-key-dev")
+        fake_precompute_module = SimpleNamespace(run_precompute=precompute_mock)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--precompute-dev", "--noise-accurate"],
+            ),
+            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        precompute_mock.assert_called_once_with(
+            profile="dev",
+            force_precompute=False,
+            auto_refresh_import=False,
+            force_noise_artifact=False,
+            reimport_noise_source=False,
+            force_noise_all=False,
+            noise_accurate=True,
+            refresh_noise_artifact=False,
         )
 
     def test_serve_dev_dispatches_dev_profile(self) -> None:
