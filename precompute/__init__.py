@@ -333,6 +333,7 @@ def run_precompute(
     reimport_noise_source: bool = False,
     force_noise_all: bool = False,
     noise_accurate: bool = False,
+    require_active_noise_artifact: bool = False,
     refresh_noise_artifact: bool = False,
 ) -> str:
     normalized_profile = normalize_build_profile(profile)
@@ -343,6 +344,7 @@ def run_precompute(
         reimport_noise_source=reimport_noise_source,
         force_noise_all=force_noise_all,
         noise_accurate=noise_accurate,
+        require_active_noise_artifact=require_active_noise_artifact,
         refresh_noise_artifact=refresh_noise_artifact,
         cache_dir=CACHE_DIR,
         build_profile=normalized_profile,

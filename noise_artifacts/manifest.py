@@ -5,8 +5,8 @@ All artifact identity hashes are deterministic: same inputs → same hash.
 Multiple failed/retried attempts of the same artifact reset status to 'building'
 via reset_artifact_for_retry() on --force; they do not create new rows.
 
-The livability build must ONLY call get_active_artifact(). It must NOT compute
-source hashes, read data_dir, or call noise.loader.
+The livability build must ONLY call SQL metadata lookup helpers from this
+module. It must NOT compute source hashes, read data_dir, or call noise.loader.
 """
 from __future__ import annotations
 
@@ -304,6 +304,81 @@ def get_active_artifact(
     )
 
 
+def get_resolved_artifact_for_mode(
+    engine: Engine,
+    required_mode: str,
+) -> ArtifactManifest | None:
+    """
+    Resolve a completed resolved artifact for a canonical mode.
+
+    Lookup order:
+      1. active resolved pointer when manifest mode matches required_mode
+      2. latest completed resolved artifact with matching manifest mode
+
+    Mode matching is strict against manifest_json->>'noise_accuracy_mode'.
+    Missing/null/unknown values are treated as non-match.
+    """
+    mode = str(required_mode or "").strip().lower()
+    if mode not in {"dev_fast", "accurate"}:
+        raise ValueError(
+            f"required_mode must be one of 'dev_fast' or 'accurate', got {required_mode!r}"
+        )
+
+    with engine.connect() as conn:
+        active_row = conn.execute(
+            text(
+                """
+                SELECT
+                    m.artifact_hash,
+                    m.artifact_type,
+                    m.status,
+                    m.manifest_json,
+                    m.created_at,
+                    m.completed_at
+                FROM noise_active_artifact a
+                JOIN noise_artifact_manifest m
+                    ON m.artifact_hash = a.artifact_hash
+                WHERE a.artifact_type = 'resolved'
+                  AND m.artifact_type = 'resolved'
+                  AND m.status = 'complete'
+                  AND COALESCE(m.manifest_json ->> 'noise_accuracy_mode', '') = :required_mode
+                LIMIT 1
+                """
+            ),
+            {"required_mode": mode},
+        ).mappings().first()
+        if active_row is not None:
+            return _row_to_manifest(active_row)
+
+        fallback_row = conn.execute(
+            text(
+                """
+                SELECT
+                    m.artifact_hash,
+                    m.artifact_type,
+                    m.status,
+                    m.manifest_json,
+                    m.created_at,
+                    m.completed_at
+                FROM noise_artifact_manifest m
+                WHERE m.artifact_type = 'resolved'
+                  AND m.status = 'complete'
+                  AND COALESCE(m.manifest_json ->> 'noise_accuracy_mode', '') = :required_mode
+                ORDER BY
+                    m.completed_at DESC NULLS LAST,
+                    m.created_at DESC,
+                    m.artifact_hash DESC
+                LIMIT 1
+                """
+            ),
+            {"required_mode": mode},
+        ).mappings().first()
+
+    if fallback_row is None:
+        return None
+    return _row_to_manifest(fallback_row)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -319,3 +394,14 @@ def _ensure_utc(dt: datetime) -> datetime:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+def _row_to_manifest(row) -> ArtifactManifest:
+    return ArtifactManifest(
+        artifact_hash=str(row["artifact_hash"]),
+        artifact_type=str(row["artifact_type"]),
+        status=str(row["status"]),
+        manifest_json=dict(row["manifest_json"] or {}),
+        created_at=_ensure_utc(row["created_at"]),
+        completed_at=_ensure_utc(row["completed_at"]) if row["completed_at"] else None,
+    )

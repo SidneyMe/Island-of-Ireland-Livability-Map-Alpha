@@ -2406,6 +2406,141 @@ class WorkflowTests(TestCase):
         kwargs["tracker_factory"].assert_called_once()
         kwargs["publish_precomputed_artifacts"].assert_not_called()
 
+    def _workflow_db_engine(self):
+        engine = mock.Mock()
+        conn = mock.Mock()
+        connect_ctx = mock.MagicMock()
+        connect_ctx.__enter__.return_value = conn
+        connect_ctx.__exit__.return_value = False
+        engine.connect.return_value = connect_ctx
+        return engine
+
+    def test_require_active_artifact_uses_mode_scoped_lookup_without_build(self) -> None:
+        engine = self._workflow_db_engine()
+        artifact = SimpleNamespace(artifact_hash="res-dev-123")
+        kwargs = _workflow_kwargs(
+            build_engine=mock.Mock(return_value=engine),
+            has_complete_build=mock.Mock(return_value=True),
+        )
+
+        with (
+            mock.patch("config.NOISE_MODE", "artifact"),
+            mock.patch(
+                "noise_artifacts.manifest.get_resolved_artifact_for_mode",
+                return_value=artifact,
+            ) as mode_lookup_mock,
+            mock.patch(
+                "noise_artifacts.runner.build_default_noise_artifact",
+                side_effect=AssertionError("DevReuse must not build noise artifacts"),
+            ),
+            mock.patch("noise.loader.dataset_signature", side_effect=AssertionError("DevReuse must not compute source signatures")),
+            mock.patch("noise_artifacts.ogr_ingest.discover_latest_rounds_by_group", side_effect=AssertionError("DevReuse must not discover rounds")),
+            mock.patch("noise_artifacts.ingest.ingest_noise_normalized", side_effect=AssertionError("DevReuse must not ingest source rows")),
+            mock.patch("builtins.print") as print_mock,
+        ):
+            build_key = precompute._workflow.run_precompute_impl(
+                require_active_noise_artifact=True,
+                **kwargs,
+            )
+
+        self.assertEqual(build_key, "build-key-123")
+        mode_lookup_mock.assert_called_once_with(engine, "dev_fast")
+        log_text = "\n".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("active resolved artifact required and found", log_text)
+        forbidden_markers = (
+            "ingest start",
+            "starting ogr2ogr import",
+            "dev-fast: building road/rail coarse grid artifact",
+            "computing raw noise source signature",
+            "selected latest round",
+            "loading ROI noise",
+            "loading NI noise",
+            "noise_datasets",
+            "source hash:",
+            "resolved hash:",
+            "artifact build start",
+            "ensuring artifact manifests",
+        )
+        log_lower = log_text.lower()
+        for marker in forbidden_markers:
+            self.assertNotIn(marker.lower(), log_lower)
+
+    def test_require_active_artifact_missing_raises_fast_for_dev_fast(self) -> None:
+        engine = self._workflow_db_engine()
+        kwargs = _workflow_kwargs(
+            build_engine=mock.Mock(return_value=engine),
+            has_complete_build=mock.Mock(return_value=True),
+        )
+
+        with (
+            mock.patch("config.NOISE_MODE", "artifact"),
+            mock.patch(
+                "noise_artifacts.manifest.get_resolved_artifact_for_mode",
+                return_value=None,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Noise artifact missing for mode=dev_fast.*DevReuse never builds noise artifacts.*prepare_noise_artifact_dev\.cmd",
+            ):
+                precompute._workflow.run_precompute_impl(
+                    require_active_noise_artifact=True,
+                    **kwargs,
+                )
+
+    def test_require_active_artifact_missing_raises_fast_for_accurate(self) -> None:
+        engine = self._workflow_db_engine()
+        kwargs = _workflow_kwargs(
+            build_engine=mock.Mock(return_value=engine),
+            has_complete_build=mock.Mock(return_value=True),
+        )
+
+        with (
+            mock.patch("config.NOISE_MODE", "artifact"),
+            mock.patch(
+                "noise_artifacts.manifest.get_resolved_artifact_for_mode",
+                return_value=None,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"Noise artifact missing for mode=accurate.*DevReuse never builds noise artifacts.*prepare_noise_artifact_accurate\.cmd",
+            ):
+                precompute._workflow.run_precompute_impl(
+                    require_active_noise_artifact=True,
+                    noise_accurate=True,
+                    **kwargs,
+                )
+
+    def test_normal_mode_missing_artifact_builds(self) -> None:
+        engine = self._workflow_db_engine()
+        kwargs = _workflow_kwargs(
+            build_engine=mock.Mock(return_value=engine),
+            has_complete_build=mock.Mock(return_value=True),
+        )
+        build_result = {"status": "up_to_date", "artifact_hash": "res-x", "row_count": 0}
+        built_artifact = SimpleNamespace(artifact_hash="res-x")
+
+        with (
+            mock.patch("config.NOISE_MODE", "artifact"),
+            mock.patch(
+                "noise_artifacts.manifest.get_active_artifact",
+                side_effect=[None, built_artifact],
+            ),
+            mock.patch(
+                "noise_artifacts.runner.build_default_noise_artifact",
+                return_value=build_result,
+            ) as build_mock,
+        ):
+            build_key = precompute._workflow.run_precompute_impl(
+                require_active_noise_artifact=False,
+                refresh_noise_artifact=True,
+                **kwargs,
+            )
+
+        self.assertEqual(build_key, "build-key-123")
+        build_mock.assert_called_once()
+
 
 class TransitRefreshPreflightTests(TestCase):
     def test_refresh_transit_fails_before_geometry_when_gtfs_preflight_fails(self) -> None:

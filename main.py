@@ -120,6 +120,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--require-active-noise-artifact",
+        action="store_true",
+        help=(
+            "Require an existing active resolved noise artifact for the selected "
+            "noise mode and fail fast if none is available. "
+            "This mode never builds or refreshes noise artifacts."
+        ),
+    )
+    parser.add_argument(
         "--auto-refresh-import",
         action="store_true",
         help="Allow --precompute/--precompute-dev/--precompute-test to refresh raw OSM import state when it is missing instead of failing fast.",
@@ -169,6 +178,16 @@ def main() -> int:
         parser.error("--reimport-noise-source requires --precompute, --precompute-dev, or --precompute-test")
     if args.force_noise_all and not precompute_requested:
         parser.error("--force-noise-all requires --precompute, --precompute-dev, or --precompute-test")
+    if args.require_active_noise_artifact and not precompute_requested:
+        parser.error("--require-active-noise-artifact requires --precompute, --precompute-dev, or --precompute-test")
+    if args.require_active_noise_artifact and args.refresh_noise_artifact:
+        parser.error("--require-active-noise-artifact cannot be combined with --refresh-noise-artifact")
+    if args.require_active_noise_artifact and args.reimport_noise_source:
+        parser.error("--require-active-noise-artifact cannot be combined with --reimport-noise-source")
+    if args.require_active_noise_artifact and args.force_noise_artifact:
+        parser.error("--require-active-noise-artifact cannot be combined with --force-noise-artifact")
+    if args.require_active_noise_artifact and args.force_noise_all:
+        parser.error("--require-active-noise-artifact cannot be combined with --force-noise-all")
     if args.force_transit_refresh and not args.refresh_transit:
         parser.error("--force-transit-refresh requires --refresh-transit")
     if args.auto_refresh_import and not precompute_requested:
@@ -207,6 +226,7 @@ def main() -> int:
                 reimport_noise_source=args.reimport_noise_source,
                 force_noise_all=args.force_noise_all,
                 noise_accurate=args.noise_accurate,
+                require_active_noise_artifact=args.require_active_noise_artifact,
                 refresh_noise_artifact=(
                     args.refresh_noise_artifact
                     or args.force_noise_artifact

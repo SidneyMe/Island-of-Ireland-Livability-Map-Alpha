@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,11 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from .exceptions import NoiseIngestError
-from .ogr_ingest import _selected_ni_member_specs, _selected_roi_specs
+from .ogr_ingest import (
+    _ensure_road_gdb_canonical_cache,
+    _selected_ni_member_specs,
+    _selected_roi_specs,
+)
 
 
 def _progress(progress_cb, message: str) -> None:
@@ -165,6 +170,40 @@ def _max_cells_per_feature() -> int:
     return max(1, value)
 
 
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _dev_fast_use_arrow() -> bool:
+    return _env_flag("NOISE_DEV_FAST_USE_ARROW", default=True)
+
+
+def _dev_fast_use_vsizip() -> bool:
+    return _env_flag("NOISE_DEV_FAST_USE_VSIZIP", default=True)
+
+
+def _dev_fast_parallel_specs() -> bool:
+    return _env_flag("NOISE_DEV_FAST_PARALLEL_SPECS", default=True)
+
+
+def _dev_fast_arrow_batch_size() -> int:
+    raw = os.getenv("NOISE_DEV_FAST_ARROW_BATCH_SIZE", "65536")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_ARROW_BATCH_SIZE must be a positive integer, got {raw!r}"
+        ) from exc
+    return max(1, value)
+
+
+def _vsizip_uri(zip_path: Path, member: str) -> str:
+    return f"/vsizip/{Path(zip_path).resolve().as_posix()}/{str(member).replace(chr(92), '/')}"
+
+
 def _read_feature_count(source_path: Path, layer_name: str | None) -> int | None:
     import pyogrio
 
@@ -290,6 +329,102 @@ def _iter_noise_gdf_chunks(
         yield frame, chunk_index, chunk_count
 
 
+def _iter_noise_arrow_batches(
+    *,
+    source_path_or_uri,
+    layer_name: str | None,
+    columns: list[str] | None,
+    target_crs: int = 2157,
+    source_label: str,
+    progress_cb=None,
+):
+    """Stream OGR features as GeoDataFrame batches via pyogrio.raw.open_arrow.
+
+    Single sequential GDAL pass, bounded memory per batch. Replaces
+    `_iter_noise_gdf_chunks` for the common case (skip_features=offset is
+    O(N) per call on FileGDB and most other drivers, making the legacy
+    chunked path O(N^2) over the source).
+    """
+    import geopandas as gpd
+    import shapely
+    from pyogrio.raw import open_arrow
+
+    batch_size = _dev_fast_arrow_batch_size()
+    started_total = time.perf_counter()
+
+    with open_arrow(
+        str(source_path_or_uri),
+        layer=layer_name,
+        columns=columns,
+        use_pyarrow=True,
+        batch_size=batch_size,
+    ) as source:
+        meta, reader = source
+        geom_col = meta.get("geometry_name") or "wkb_geometry"
+        crs = meta.get("crs")
+        chunk_index = 0
+        for batch in reader:
+            if batch.num_rows == 0:
+                continue
+            chunk_index += 1
+            chunk_started = time.perf_counter()
+            df = batch.to_pandas()
+            geoms = shapely.from_wkb(df[geom_col].to_numpy())
+            if geom_col != "geometry":
+                df = df.drop(columns=[geom_col])
+            df["geometry"] = geoms
+            frame = gpd.GeoDataFrame(df, geometry="geometry", crs=crs)
+            if frame.crs is not None and str(frame.crs).upper() != f"EPSG:{int(target_crs)}":
+                frame = frame.to_crs(target_crs)
+            _progress(
+                progress_cb,
+                f"[noise:progress] phase=dev_fast_read_chunk source={source_label} "
+                f"chunk={chunk_index} rows={len(frame)} "
+                f"elapsed={time.perf_counter() - chunk_started:.1f}s",
+            )
+            yield frame, chunk_index, None
+    _ = started_total  # silence unused warning when reader yields no batches
+
+
+def _iter_noise_frames(
+    *,
+    source_path_or_uri,
+    layer_name: str | None,
+    columns: list[str] | None,
+    target_crs: int = 2157,
+    chunk_size: int,
+    source_label: str,
+    progress_cb=None,
+):
+    """Dispatch between the new Arrow-streaming path and the legacy offset-chunked path."""
+    if _dev_fast_use_arrow():
+        try:
+            yield from _iter_noise_arrow_batches(
+                source_path_or_uri=source_path_or_uri,
+                layer_name=layer_name,
+                columns=columns,
+                target_crs=target_crs,
+                source_label=source_label,
+                progress_cb=progress_cb,
+            )
+            return
+        except Exception as exc:
+            _progress(
+                progress_cb,
+                f"[noise] arrow streaming failed for source={source_label}: {exc!r}; "
+                "falling back to legacy offset-chunked read",
+            )
+    yield from _iter_noise_gdf_chunks(
+        source_path=source_path_or_uri,  # str or Path; legacy reader str()s it
+        layer_name=layer_name,
+        columns=columns,
+        target_crs=target_crs,
+        chunk_size=chunk_size,
+        source_label=source_label,
+        progress_cb=progress_cb,
+    )
+
+
 @dataclass
 class _GridRow:
     jurisdiction: str
@@ -377,6 +512,209 @@ def _add_geom_cells(
     return touched
 
 
+_ROI_REQUESTED_FIELDS = ["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod", "ReportPeri"]
+_NI_REQUESTED_FIELDS = [
+    "GRIDCODE",
+    "GridCode",
+    "gridcode",
+    "NoiseBand",
+    "noiseband",
+    "Noise_Cl",
+    "NOISE_CL",
+    "noise_cl",
+    "NoiseCl",
+    "NOISECL",
+]
+
+
+def _merge_grid_acc(
+    global_acc: dict[tuple[str, str, str, int, int], _GridRow],
+    local_acc: dict[tuple[str, str, str, int, int], _GridRow],
+) -> None:
+    """Merge a per-spec accumulator into the global one, preserving the original
+    tie-break rule (`>=` keeps the most-recent rank-tied record).
+
+    Iteration order over `local_acc` is the per-spec insertion order, which
+    matches what the serial code path observed when mutating the shared dict.
+    """
+    for key, rec in local_acc.items():
+        existing = global_acc.get(key)
+        if existing is None or rec.rank >= existing.rank:
+            global_acc[key] = rec
+
+
+def _process_roi_spec_grid(
+    spec,
+    *,
+    data_dir: Path,
+    grid_size_m: int,
+    chunk_size: int,
+    use_vsizip: bool,
+    started: float,
+    progress_cb=None,
+) -> tuple[dict[tuple[str, str, str, int, int], _GridRow], int]:
+    from .ogr_ingest import extract_source_archive_if_needed
+
+    local_acc: dict[tuple[str, str, str, int, int], _GridRow] = {}
+    local_rows = 0
+    zip_path = Path(data_dir) / spec.zip_name
+    file_format = str(spec.file_format).lower()
+    columns: list[str] | None
+    if file_format == "gdb":
+        # FileGDB cannot be streamed efficiently via /vsizip/. Extract once,
+        # then convert to a canonical GPKG (cached on disk), then stream that.
+        extracted = extract_source_archive_if_needed(zip_path)
+        gdb_path = extracted / spec.member
+        if not gdb_path.exists():
+            return local_acc, local_rows
+        gdb_layer = gdb_path.stem
+        selected_fields = (
+            _existing_requested_columns(gdb_path, gdb_layer, _ROI_REQUESTED_FIELDS) or []
+        )
+        canonical_path = _ensure_road_gdb_canonical_cache(
+            source_path=gdb_path,
+            layer_name=gdb_layer,
+            selected_fields=selected_fields,
+            progress_cb=progress_cb,
+        )
+        source_path_or_uri: Any = str(canonical_path)
+        layer_name: str | None = "road_raw"
+        columns = selected_fields or None
+    elif use_vsizip:
+        source_path_or_uri = _vsizip_uri(zip_path, spec.member)
+        layer_name = None
+        columns = _existing_requested_columns(
+            source_path_or_uri, None, _ROI_REQUESTED_FIELDS
+        )
+    else:
+        extracted = extract_source_archive_if_needed(zip_path)
+        member_path = extracted / spec.member
+        if not member_path.exists():
+            return local_acc, local_rows
+        source_path_or_uri = str(member_path)
+        layer_name = None
+        columns = _existing_requested_columns(member_path, None, _ROI_REQUESTED_FIELDS)
+
+    source_label = f"{spec.zip_name}:{spec.member}"
+    row_touched = 0
+    for frame, chunk_index, chunk_count in _iter_noise_frames(
+        source_path_or_uri=source_path_or_uri,
+        layer_name=layer_name,
+        columns=columns,
+        chunk_size=chunk_size,
+        source_label=source_label,
+        progress_cb=progress_cb,
+    ):
+        chunk_touched = 0
+        for row in frame.itertuples(index=False):
+            metric = _metric_from_time(_lookup_ci(row, "Time", "TIME"))
+            if metric is None:
+                continue
+            db_low, db_high, db_value = _normalize_roi_band(row)
+            if db_value is None:
+                continue
+            geom = getattr(row, "geometry", None)
+            chunk_touched += _add_geom_cells(
+                local_acc,
+                jurisdiction="roi",
+                source_type=str(spec.source_type),
+                metric=metric,
+                round_number=int(spec.round_number),
+                report_period=f"Round {int(spec.round_number)}",
+                db_low=db_low,
+                db_high=db_high,
+                db_value=str(db_value),
+                geom=geom,
+                grid_size_m=int(grid_size_m),
+            )
+            local_rows += 1
+        row_touched += chunk_touched
+        chunk_pos = (
+            f"{chunk_index}/{chunk_count}" if chunk_count is not None else str(chunk_index)
+        )
+        _progress(
+            progress_cb,
+            f"[noise:progress] phase=dev_fast_grid_roi_chunk source={source_label} "
+            f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
+        )
+        del frame
+    _progress_event(
+        progress_cb,
+        phase="dev_fast_grid_roi",
+        source=source_label,
+        rows=row_touched,
+        elapsed=max(time.perf_counter() - started, 0.0),
+    )
+    return local_acc, local_rows
+
+
+def _process_ni_spec_grid(
+    spec: dict[str, Any],
+    *,
+    grid_size_m: int,
+    chunk_size: int,
+    started: float,
+    progress_cb=None,
+) -> tuple[dict[tuple[str, str, str, int, int], _GridRow], int]:
+    local_acc: dict[tuple[str, str, str, int, int], _GridRow] = {}
+    local_rows = 0
+    source_path = Path(spec["source_path"])
+    columns = _existing_requested_columns(source_path, None, _NI_REQUESTED_FIELDS)
+    source_label = f"{spec['zip_name']}:{spec['member']}"
+    row_touched = 0
+    for frame, chunk_index, chunk_count in _iter_noise_frames(
+        source_path_or_uri=str(source_path),
+        layer_name=None,
+        columns=columns,
+        chunk_size=chunk_size,
+        source_label=source_label,
+        progress_cb=progress_cb,
+    ):
+        chunk_touched = 0
+        for row in frame.itertuples(index=False):
+            db_low, db_high, db_value = _normalize_ni_band(
+                round_number=int(spec["round_number"]),
+                source_type=str(spec["source_type"]),
+                metric=str(spec["metric"]),
+                row=row,
+            )
+            if db_value is None:
+                continue
+            geom = getattr(row, "geometry", None)
+            chunk_touched += _add_geom_cells(
+                local_acc,
+                jurisdiction="ni",
+                source_type=str(spec["source_type"]),
+                metric=str(spec["metric"]),
+                round_number=int(spec["round_number"]),
+                report_period=f"Round {int(spec['round_number'])}",
+                db_low=db_low,
+                db_high=db_high,
+                db_value=str(db_value),
+                geom=geom,
+                grid_size_m=int(grid_size_m),
+            )
+            local_rows += 1
+        row_touched += chunk_touched
+        chunk_pos = (
+            f"{chunk_index}/{chunk_count}" if chunk_count is not None else str(chunk_index)
+        )
+        _progress(
+            progress_cb,
+            f"[noise:progress] phase=dev_fast_grid_ni_chunk source={source_label} "
+            f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
+        )
+        del frame
+    _progress_event(
+        progress_cb,
+        phase="dev_fast_grid_ni",
+        source=source_label,
+        rows=row_touched,
+        elapsed=max(time.perf_counter() - started, 0.0),
+    )
+    return local_acc, local_rows
+
+
 def build_dev_fast_road_rail_grid(
     engine: Engine,
     *,
@@ -404,139 +742,72 @@ def build_dev_fast_road_rail_grid(
     )
     acc: dict[tuple[str, str, str, int, int], _GridRow] = {}
     source_rows = 0
+    use_vsizip = _dev_fast_use_vsizip()
+    parallel = _dev_fast_parallel_specs()
 
-    from .ogr_ingest import extract_source_archive_if_needed
-
-    for spec in selected_roi_specs:
-        zip_path = Path(data_dir) / spec.zip_name
-        extracted = extract_source_archive_if_needed(zip_path)
-        source_path = extracted / spec.member
-        if not source_path.exists():
-            continue
-        layer_name = source_path.stem if str(spec.file_format).lower() == "gdb" else None
-        columns = _existing_requested_columns(
-            source_path,
-            layer_name,
-            ["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod", "ReportPeri"],
-        )
-        source_label = f"{spec.zip_name}:{spec.member}"
-        row_touched = 0
-        for frame, chunk_index, chunk_count in _iter_noise_gdf_chunks(
-            source_path=source_path,
-            layer_name=layer_name,
-            columns=columns,
-            chunk_size=chunk_size,
-            source_label=source_label,
-            progress_cb=progress_cb,
-        ):
-            chunk_touched = 0
-            for row in frame.itertuples(index=False):
-                metric = _metric_from_time(_lookup_ci(row, "Time", "TIME"))
-                if metric is None:
-                    continue
-                db_low, db_high, db_value = _normalize_roi_band(row)
-                if db_value is None:
-                    continue
-                geom = getattr(row, "geometry", None)
-                chunk_touched += _add_geom_cells(
-                    acc,
-                    jurisdiction="roi",
-                    source_type=str(spec.source_type),
-                    metric=metric,
-                    round_number=int(spec.round_number),
-                    report_period=f"Round {int(spec.round_number)}",
-                    db_low=db_low,
-                    db_high=db_high,
-                    db_value=str(db_value),
-                    geom=geom,
+    if parallel and (len(selected_roi_specs) + len(selected_ni_specs)) > 1:
+        max_workers = min(4, len(selected_roi_specs) + len(selected_ni_specs))
+        roi_results: list[tuple[dict, int]] = [({}, 0)] * len(selected_roi_specs)
+        ni_results: list[tuple[dict, int]] = [({}, 0)] * len(selected_ni_specs)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            roi_futs = {
+                ex.submit(
+                    _process_roi_spec_grid,
+                    spec,
+                    data_dir=data_dir,
                     grid_size_m=int(grid_size_m),
-                )
-                source_rows += 1
-            row_touched += chunk_touched
-            chunk_pos = (
-                f"{chunk_index}/{chunk_count}"
-                if chunk_count is not None
-                else str(chunk_index)
-            )
-            _progress(
-                progress_cb,
-                f"[noise:progress] phase=dev_fast_grid_roi_chunk source={source_label} "
-                f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
-            )
-            del frame
-        _progress_event(
-            progress_cb,
-            phase="dev_fast_grid_roi",
-            source=source_label,
-            rows=row_touched,
-            elapsed=max(time.perf_counter() - started, 0.0),
-        )
-
-    for spec in selected_ni_specs:
-        source_path = Path(spec["source_path"])
-        columns = _existing_requested_columns(
-            source_path,
-            None,
-            [
-                "GRIDCODE",
-                "GridCode",
-                "gridcode",
-                "NoiseBand",
-                "noiseband",
-                "Noise_Cl",
-                "NOISE_CL",
-                "noise_cl",
-                "NoiseCl",
-                "NOISECL",
-            ],
-        )
-        source_label = f"{spec['zip_name']}:{spec['member']}"
-        row_touched = 0
-        for frame, chunk_index, chunk_count in _iter_noise_gdf_chunks(
-            source_path=source_path,
-            layer_name=None,
-            columns=columns,
-            chunk_size=chunk_size,
-            source_label=source_label,
-            progress_cb=progress_cb,
-        ):
-            chunk_touched = 0
-            for row in frame.itertuples(index=False):
-                db_low, db_high, db_value = _normalize_ni_band(
-                    round_number=int(spec["round_number"]),
-                    source_type=str(spec["source_type"]),
-                    metric=str(spec["metric"]),
-                    row=row,
-                )
-                if db_value is None:
-                    continue
-                geom = getattr(row, "geometry", None)
-                chunk_touched += _add_geom_cells(
-                    acc,
-                    jurisdiction="ni",
-                    source_type=str(spec["source_type"]),
-                    metric=str(spec["metric"]),
-                    round_number=int(spec["round_number"]),
-                    report_period=f"Round {int(spec['round_number'])}",
-                    db_low=db_low,
-                    db_high=db_high,
-                    db_value=str(db_value),
-                    geom=geom,
+                    chunk_size=chunk_size,
+                    use_vsizip=use_vsizip,
+                    started=started,
+                    progress_cb=progress_cb,
+                ): idx
+                for idx, spec in enumerate(selected_roi_specs)
+            }
+            ni_futs = {
+                ex.submit(
+                    _process_ni_spec_grid,
+                    spec,
                     grid_size_m=int(grid_size_m),
-                )
-                source_rows += 1
-            row_touched += chunk_touched
-            chunk_pos = (
-                f"{chunk_index}/{chunk_count}"
-                if chunk_count is not None
-                else str(chunk_index)
+                    chunk_size=chunk_size,
+                    started=started,
+                    progress_cb=progress_cb,
+                ): idx
+                for idx, spec in enumerate(selected_ni_specs)
+            }
+            for fut, idx in roi_futs.items():
+                roi_results[idx] = fut.result()
+            for fut, idx in ni_futs.items():
+                ni_results[idx] = fut.result()
+        # Merge in original spec order to preserve tie-break ordering.
+        for local_acc, local_rows in roi_results:
+            _merge_grid_acc(acc, local_acc)
+            source_rows += local_rows
+        for local_acc, local_rows in ni_results:
+            _merge_grid_acc(acc, local_acc)
+            source_rows += local_rows
+    else:
+        for spec in selected_roi_specs:
+            local_acc, local_rows = _process_roi_spec_grid(
+                spec,
+                data_dir=data_dir,
+                grid_size_m=int(grid_size_m),
+                chunk_size=chunk_size,
+                use_vsizip=use_vsizip,
+                started=started,
+                progress_cb=progress_cb,
             )
-            _progress(
-                progress_cb,
-                f"[noise:progress] phase=dev_fast_grid_ni_chunk source={source_label} "
-                f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
+            _merge_grid_acc(acc, local_acc)
+            source_rows += local_rows
+        for spec in selected_ni_specs:
+            local_acc, local_rows = _process_ni_spec_grid(
+                spec,
+                grid_size_m=int(grid_size_m),
+                chunk_size=chunk_size,
+                started=started,
+                progress_cb=progress_cb,
             )
-            del frame
+            _merge_grid_acc(acc, local_acc)
+            source_rows += local_rows
         _progress_event(
             progress_cb,
             phase="dev_fast_grid_ni",
@@ -579,55 +850,131 @@ def build_dev_fast_road_rail_grid(
             {"h": artifact_hash},
         )
         if rows:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO noise_grid_artifact (
-                        artifact_hash,
-                        noise_source_hash,
-                        jurisdiction,
-                        source_type,
-                        metric,
-                        grid_size_m,
-                        cell_x,
-                        cell_y,
-                        round_number,
-                        report_period,
-                        db_low,
-                        db_high,
-                        db_value,
-                        geom
-                    )
-                    VALUES (
-                        :artifact_hash,
-                        :noise_source_hash,
-                        :jurisdiction,
-                        :source_type,
-                        :metric,
-                        :grid_size_m,
-                        :cell_x,
-                        :cell_y,
-                        :round_number,
-                        :report_period,
-                        :db_low,
-                        :db_high,
-                        :db_value,
-                        ST_Multi(
-                            ST_SetSRID(
-                                ST_MakeEnvelope(:minx, :miny, :maxx, :maxy),
-                                2157
-                            )
-                        )
-                    )
-                    """
-                ),
-                rows,
-            )
+            _bulk_load_grid_rows(conn, rows)
     _progress(
         progress_cb,
         f"road/rail grid build complete: grid_size={grid_size_m}m source_rows={source_rows:,} cells={len(rows):,}",
     )
     return {"source_rows": int(source_rows), "cell_rows": int(len(rows))}
+
+
+_GRID_STAGE_COLUMNS = (
+    "artifact_hash",
+    "noise_source_hash",
+    "jurisdiction",
+    "source_type",
+    "metric",
+    "grid_size_m",
+    "cell_x",
+    "cell_y",
+    "round_number",
+    "report_period",
+    "db_low",
+    "db_high",
+    "db_value",
+    "minx",
+    "miny",
+    "maxx",
+    "maxy",
+)
+
+
+def _bulk_load_grid_rows(conn, rows: list[dict]) -> None:
+    """Load grid rows into noise_grid_artifact.
+
+    Uses psycopg3 COPY into a TEMP staging table when available
+    (mirrors `_copy_rows_into_stage_via_psycopg` in noise_artifacts/ingest.py);
+    otherwise falls back to a single executemany-style INSERT. The driver
+    detection happens before any SQL is issued, so a fallback is taken on a
+    clean transaction state — never mid-statement.
+    """
+    driver_conn = None
+    try:
+        driver_conn = conn.connection.driver_connection
+    except Exception:
+        driver_conn = None
+    if driver_conn is not None:
+        _bulk_load_grid_rows_via_copy(conn, driver_conn, rows)
+        return
+    conn.execute(
+        text(
+            """
+            INSERT INTO noise_grid_artifact (
+                artifact_hash, noise_source_hash, jurisdiction, source_type, metric,
+                grid_size_m, cell_x, cell_y, round_number, report_period,
+                db_low, db_high, db_value, geom
+            )
+            VALUES (
+                :artifact_hash, :noise_source_hash, :jurisdiction, :source_type, :metric,
+                :grid_size_m, :cell_x, :cell_y, :round_number, :report_period,
+                :db_low, :db_high, :db_value,
+                ST_Multi(
+                    ST_SetSRID(
+                        ST_MakeEnvelope(:minx, :miny, :maxx, :maxy),
+                        2157
+                    )
+                )
+            )
+            """
+        ),
+        rows,
+    )
+
+
+def _bulk_load_grid_rows_via_copy(conn, driver_conn, rows: list[dict]) -> None:
+    cols = ", ".join(_GRID_STAGE_COLUMNS)
+    conn.execute(
+        text(
+            """
+            CREATE TEMP TABLE _stage_noise_grid (
+                artifact_hash text,
+                noise_source_hash text,
+                jurisdiction text,
+                source_type text,
+                metric text,
+                grid_size_m int,
+                cell_x int,
+                cell_y int,
+                round_number int,
+                report_period text,
+                db_low double precision,
+                db_high double precision,
+                db_value text,
+                minx double precision,
+                miny double precision,
+                maxx double precision,
+                maxy double precision
+            ) ON COMMIT DROP
+            """
+        )
+    )
+    copy_sql = f"COPY _stage_noise_grid ({cols}) FROM STDIN"
+    with driver_conn.cursor() as cur:
+        with cur.copy(copy_sql) as copy:
+            for row in rows:
+                copy.write_row(tuple(row.get(c) for c in _GRID_STAGE_COLUMNS))
+    conn.execute(
+        text(
+            """
+            INSERT INTO noise_grid_artifact (
+                artifact_hash, noise_source_hash, jurisdiction, source_type, metric,
+                grid_size_m, cell_x, cell_y, round_number, report_period,
+                db_low, db_high, db_value, geom
+            )
+            SELECT
+                artifact_hash, noise_source_hash, jurisdiction, source_type, metric,
+                grid_size_m, cell_x, cell_y, round_number, report_period,
+                db_low, db_high, db_value,
+                ST_Multi(
+                    ST_SetSRID(
+                        ST_MakeEnvelope(minx, miny, maxx, maxy),
+                        2157
+                    )
+                )
+            FROM _stage_noise_grid
+            """
+        )
+    )
 
 
 def materialize_dev_fast_resolved(

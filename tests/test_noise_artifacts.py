@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, call, patch
 from noise_artifacts.manifest import (
     ArtifactManifest,
     get_active_artifact,
+    get_resolved_artifact_for_mode,
     mark_artifact_complete,
     mark_artifact_failed,
     noise_domain_hash,
@@ -284,6 +285,78 @@ class GetActiveArtifactTests(TestCase):
         self.assertIn("noise_artifact_manifest", sql_text)
 
 
+class GetResolvedArtifactForModeTests(TestCase):
+
+    def _make_engine_for_rows(self, rows):
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        mapping_results = []
+        for row in rows:
+            mapping_mock = MagicMock()
+            mapping_mock.first.return_value = row
+            mapping_results.append(mapping_mock)
+
+        execute_results = []
+        for mapping in mapping_results:
+            execute_result = MagicMock()
+            execute_result.mappings.return_value = mapping
+            execute_results.append(execute_result)
+        conn.execute.side_effect = execute_results
+        return engine, conn
+
+    def test_active_mode_match_returns_active_artifact(self) -> None:
+        now = datetime.now(timezone.utc)
+        active_row = {
+            "artifact_hash": "active-dev",
+            "artifact_type": "resolved",
+            "status": "complete",
+            "manifest_json": {"noise_accuracy_mode": "dev_fast"},
+            "created_at": now,
+            "completed_at": now,
+        }
+        engine, conn = self._make_engine_for_rows([active_row])
+        result = get_resolved_artifact_for_mode(engine, "dev_fast")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.artifact_hash, "active-dev")
+        first_sql = str(conn.execute.call_args_list[0][0][0].text)
+        self.assertIn("noise_active_artifact", first_sql)
+        self.assertIn("noise_accuracy_mode", first_sql)
+
+    def test_active_mismatch_falls_back_to_latest_completed_for_mode(self) -> None:
+        now = datetime.now(timezone.utc)
+        fallback_row = {
+            "artifact_hash": "fallback-dev",
+            "artifact_type": "resolved",
+            "status": "complete",
+            "manifest_json": {"noise_accuracy_mode": "dev_fast"},
+            "created_at": now,
+            "completed_at": now,
+        }
+        engine, conn = self._make_engine_for_rows([None, fallback_row])
+        result = get_resolved_artifact_for_mode(engine, "dev_fast")
+        self.assertIsNotNone(result)
+        self.assertEqual(result.artifact_hash, "fallback-dev")
+        self.assertEqual(conn.execute.call_count, 2)
+        fallback_sql = str(conn.execute.call_args_list[1][0][0].text)
+        self.assertIn("ORDER BY", fallback_sql)
+        self.assertIn("completed_at DESC NULLS LAST", fallback_sql)
+        self.assertIn("created_at DESC", fallback_sql)
+        self.assertIn("artifact_hash DESC", fallback_sql)
+
+    def test_missing_mode_rows_are_non_match(self) -> None:
+        engine, conn = self._make_engine_for_rows([None, None])
+        result = get_resolved_artifact_for_mode(engine, "accurate")
+        self.assertIsNone(result)
+        self.assertEqual(conn.execute.call_count, 2)
+
+    def test_unknown_required_mode_raises(self) -> None:
+        engine = MagicMock()
+        with self.assertRaises(ValueError):
+            get_resolved_artifact_for_mode(engine, "dev-fast")
+
+
 # ---------------------------------------------------------------------------
 # DB table registration tests
 # ---------------------------------------------------------------------------
@@ -465,22 +538,45 @@ class DevFastModeTests(TestCase):
         import inspect
         import noise_artifacts.dev_fast as _df
 
-        src = inspect.getsource(_df.build_dev_fast_road_rail_grid)
-        self.assertIn("_iter_noise_gdf_chunks(", src)
-        self.assertNotIn("pyogrio.read_dataframe(str(source_path), layer=layer_name)", src)
-        self.assertNotIn("pyogrio.read_dataframe(str(source_path))", src)
+        # Per-spec helpers must route reads through the unified dispatcher.
+        roi_src = inspect.getsource(_df._process_roi_spec_grid)
+        ni_src = inspect.getsource(_df._process_ni_spec_grid)
+        self.assertIn("_iter_noise_frames(", roi_src)
+        self.assertIn("_iter_noise_frames(", ni_src)
+        # Dev_fast must never load the entire source in one untruncated read.
+        for src in (roi_src, ni_src):
+            self.assertNotIn("pyogrio.read_dataframe(str(source_path), layer=layer_name)", src)
+            self.assertNotIn("pyogrio.read_dataframe(str(source_path))", src)
 
+        # Dispatcher must offer both the streaming Arrow path and the legacy
+        # offset-chunked fallback.
+        frames_src = inspect.getsource(_df._iter_noise_frames)
+        self.assertIn("_iter_noise_arrow_batches", frames_src)
+        self.assertIn("_iter_noise_gdf_chunks", frames_src)
+
+        # Arrow streaming path must use pyogrio.raw.open_arrow for true streaming.
+        arrow_src = inspect.getsource(_df._iter_noise_arrow_batches)
+        self.assertIn("open_arrow", arrow_src)
+
+        # Legacy fallback path must still implement chunked offset reads.
         chunk_src = inspect.getsource(_df._iter_noise_gdf_chunks)
         self.assertIn("skip_features=", chunk_src)
         self.assertIn("max_features=", chunk_src)
 
     def test_dev_fast_never_uses_ogr2ogr_import_paths(self) -> None:
         import inspect
-        from noise_artifacts.dev_fast import build_dev_fast_road_rail_grid
+        import noise_artifacts.dev_fast as _df
 
-        src = inspect.getsource(build_dev_fast_road_rail_grid)
-        self.assertNotIn("ingest_noise_normalized_ogr2ogr", src)
-        self.assertNotIn("_run_ogr2ogr_import", src)
+        # Inspect the orchestrator and per-spec helpers; none of them should
+        # reach into the heavy accurate-mode ingest paths.
+        srcs = [
+            inspect.getsource(_df.build_dev_fast_road_rail_grid),
+            inspect.getsource(_df._process_roi_spec_grid),
+            inspect.getsource(_df._process_ni_spec_grid),
+        ]
+        for src in srcs:
+            self.assertNotIn("ingest_noise_normalized_ogr2ogr", src)
+            self.assertNotIn("_run_ogr2ogr_import", src)
 
     def test_dev_fast_grid_uses_max_band_per_cell_key(self) -> None:
         from shapely.geometry import box
@@ -603,6 +699,131 @@ class DevFastModeTests(TestCase):
         self.assertIn("artifact_hash = :resolved_hash", src)
         self.assertIn("FROM noise_grid_artifact", src)
         self.assertIn("GROUP BY jurisdiction, source_type, metric, round_number", src)
+
+    def test_iter_noise_arrow_batches_streams_vsizip_shapefile(self) -> None:
+        import zipfile
+        from pathlib import Path
+
+        import geopandas as gpd
+        from shapely.geometry import Polygon
+
+        from noise_artifacts.dev_fast import _iter_noise_arrow_batches, _vsizip_uri
+
+        polys = [
+            Polygon([(0, 0), (100, 0), (100, 100), (0, 100)]),
+            Polygon([(200, 200), (300, 200), (300, 300), (200, 300)]),
+        ]
+        gdf = gpd.GeoDataFrame(
+            {
+                "Time": ["Lden", "Lnight"],
+                "DbValue": ["55-59", "60-64"],
+                "Db_Low": [55.0, 60.0],
+                "Db_High": [59.0, 64.0],
+                "geometry": polys,
+            },
+            crs="EPSG:2157",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            shp_path = Path(tmp) / "noise.shp"
+            gdf.to_file(shp_path, driver="ESRI Shapefile")
+            zip_path = Path(tmp) / "noise.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for ext in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                    sibling = shp_path.with_suffix(ext)
+                    if sibling.exists():
+                        zf.write(sibling, sibling.name)
+            uri = _vsizip_uri(zip_path, "noise.shp")
+            batches = list(
+                _iter_noise_arrow_batches(
+                    source_path_or_uri=uri,
+                    layer_name=None,
+                    columns=["Time", "DbValue", "Db_Low", "Db_High"],
+                    source_label="test",
+                )
+            )
+
+        self.assertGreaterEqual(len(batches), 1)
+        total_rows = sum(len(frame) for frame, _, _ in batches)
+        self.assertEqual(total_rows, 2)
+        first_frame, first_idx, first_count = batches[0]
+        self.assertEqual(first_idx, 1)
+        self.assertIsNone(first_count)  # streaming: total unknown
+        self.assertIn("geometry", first_frame.columns)
+
+    def test_merge_grid_acc_preserves_rank_tiebreak(self) -> None:
+        from noise_artifacts.dev_fast import _GridRow, _merge_grid_acc
+
+        def _row(rank: float, db_value: str) -> _GridRow:
+            return _GridRow(
+                jurisdiction="roi",
+                source_type="road",
+                metric="Lden",
+                round_number=4,
+                report_period="Round 4",
+                db_low=rank - 4,
+                db_high=rank,
+                db_value=db_value,
+                rank=rank,
+            )
+
+        global_acc: dict = {}
+        key = ("roi", "road", "Lden", 0, 0)
+        # Apply increasing rank then a lower-rank record; lower rank must NOT overwrite.
+        _merge_grid_acc(global_acc, {key: _row(49.0, "45-49")})
+        _merge_grid_acc(global_acc, {key: _row(74.0, "70-74")})
+        _merge_grid_acc(global_acc, {key: _row(54.0, "50-54")})
+        self.assertEqual(global_acc[key].db_value, "70-74")
+        # Equal-rank record overwrites (matches the existing `>=` semantics).
+        _merge_grid_acc(global_acc, {key: _row(74.0, "70-74-tie")})
+        self.assertEqual(global_acc[key].db_value, "70-74-tie")
+
+    def test_dev_fast_env_flags_default_on_and_respect_opt_out(self) -> None:
+        from noise_artifacts.dev_fast import (
+            _dev_fast_parallel_specs,
+            _dev_fast_use_arrow,
+            _dev_fast_use_vsizip,
+        )
+
+        flags = (
+            "NOISE_DEV_FAST_USE_ARROW",
+            "NOISE_DEV_FAST_USE_VSIZIP",
+            "NOISE_DEV_FAST_PARALLEL_SPECS",
+        )
+        with patch.dict(os.environ, {}, clear=False):
+            for var in flags:
+                os.environ.pop(var, None)
+            self.assertTrue(_dev_fast_use_arrow())
+            self.assertTrue(_dev_fast_use_vsizip())
+            self.assertTrue(_dev_fast_parallel_specs())
+        with patch.dict(
+            os.environ,
+            {f: "0" for f in flags},
+            clear=False,
+        ):
+            self.assertFalse(_dev_fast_use_arrow())
+            self.assertFalse(_dev_fast_use_vsizip())
+            self.assertFalse(_dev_fast_parallel_specs())
+
+    def test_bulk_load_grid_rows_uses_copy_when_psycopg3_available(self) -> None:
+        import inspect
+        from noise_artifacts.dev_fast import (
+            _bulk_load_grid_rows,
+            _bulk_load_grid_rows_via_copy,
+        )
+
+        copy_src = inspect.getsource(_bulk_load_grid_rows_via_copy)
+        self.assertIn("CREATE TEMP TABLE _stage_noise_grid", copy_src)
+        self.assertIn("ON COMMIT DROP", copy_src)
+        self.assertIn("COPY _stage_noise_grid", copy_src)
+        self.assertIn("FROM STDIN", copy_src)
+        self.assertIn("ST_MakeEnvelope(minx, miny, maxx, maxy)", copy_src)
+
+        # Driver-detection happens before any SQL statement is issued.
+        loader_src = inspect.getsource(_bulk_load_grid_rows)
+        self.assertIn("driver_connection", loader_src)
+        # Fallback INSERT must still be present for non-psycopg3 connections.
+        self.assertIn("INSERT INTO noise_grid_artifact", loader_src)
 
 
 class NoiseGridArtifactIndexTests(TestCase):

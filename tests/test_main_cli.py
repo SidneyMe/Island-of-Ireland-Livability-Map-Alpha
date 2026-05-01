@@ -115,6 +115,7 @@ class MainCliTests(TestCase):
             reimport_noise_source=False,
             force_noise_all=False,
             noise_accurate=False,
+            require_active_noise_artifact=False,
             refresh_noise_artifact=False,
         )
 
@@ -141,6 +142,7 @@ class MainCliTests(TestCase):
             reimport_noise_source=False,
             force_noise_all=False,
             noise_accurate=False,
+            require_active_noise_artifact=False,
             refresh_noise_artifact=False,
         )
 
@@ -167,6 +169,7 @@ class MainCliTests(TestCase):
             reimport_noise_source=False,
             force_noise_all=False,
             noise_accurate=False,
+            require_active_noise_artifact=False,
             refresh_noise_artifact=False,
         )
 
@@ -193,7 +196,107 @@ class MainCliTests(TestCase):
             reimport_noise_source=False,
             force_noise_all=False,
             noise_accurate=True,
+            require_active_noise_artifact=False,
             refresh_noise_artifact=False,
+        )
+
+    def test_require_active_noise_artifact_flag_dispatches(self) -> None:
+        precompute_mock = mock.Mock(return_value="build-key-dev")
+        fake_precompute_module = SimpleNamespace(run_precompute=precompute_mock)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--precompute-dev", "--require-active-noise-artifact"],
+            ),
+            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        precompute_mock.assert_called_once_with(
+            profile="dev",
+            force_precompute=False,
+            auto_refresh_import=False,
+            force_noise_artifact=False,
+            reimport_noise_source=False,
+            force_noise_all=False,
+            noise_accurate=False,
+            require_active_noise_artifact=True,
+            refresh_noise_artifact=False,
+        )
+
+    def test_require_active_noise_artifact_conflicts_with_refresh(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--precompute-dev", "--require-active-noise-artifact", "--refresh-noise-artifact"],
+            ),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--require-active-noise-artifact cannot be combined with --refresh-noise-artifact",
+            stderr.getvalue(),
+        )
+
+    def test_require_active_noise_artifact_conflicts_with_reimport(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--precompute-dev", "--require-active-noise-artifact", "--reimport-noise-source"],
+            ),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--require-active-noise-artifact cannot be combined with --reimport-noise-source",
+            stderr.getvalue(),
+        )
+
+    def test_require_active_noise_artifact_conflicts_with_force_noise_artifact(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--precompute-dev", "--require-active-noise-artifact", "--force-noise-artifact"],
+            ),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--require-active-noise-artifact cannot be combined with --force-noise-artifact",
+            stderr.getvalue(),
+        )
+
+    def test_require_active_noise_artifact_conflicts_with_force_noise_all(self) -> None:
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--precompute-dev", "--require-active-noise-artifact", "--force-noise-all"],
+            ),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--require-active-noise-artifact cannot be combined with --force-noise-all",
+            stderr.getvalue(),
         )
 
     def test_serve_dev_dispatches_dev_profile(self) -> None:

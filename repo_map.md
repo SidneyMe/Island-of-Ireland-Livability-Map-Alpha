@@ -90,7 +90,7 @@
 ### `scripts/win/run_noise_precompute_watchdog.ps1`
 
 - Windows wrapper for noise-focused dev precompute with enforced wall-clock timeout. (Confirmed)
-- Runs `scripts/win/geo_env.cmd` with project `.venv` Python; default mode now runs full-reimport (`--precompute-dev --refresh-noise-artifact --reimport-noise-source --force-noise-artifact --force-precompute`), `-Incremental` runs the lighter refresh path, and `-Accurate` appends `--noise-accurate`. (Confirmed)
+- Runs `scripts/win/geo_env.cmd` with project `.venv` Python and explicit mode selection: `DevReuse` (reuse-only fast path, never rebuilds), `DevPrepare` (slow dev-fast artifact build/reimport), and `AccuratePrepare` (slow accurate artifact build/reimport). (Confirmed)
 - On timeout, kills the spawned process tree (and attempts cleanup of lingering `ogr2ogr` processes) and returns exit code `124`. (Confirmed)
 
 ---
@@ -538,8 +538,10 @@ tests/test_server_behavior.py
 | `scripts/win/bootstrap_geo_env.cmd` | Windows first-time setup wrapper: activates conda base, creates `%GEO_CONDA_ENV%` from `environment.yml` via mamba when missing, then runs env checks |
 | `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
 | `scripts/win/selftest_geo_env.cmd` | Windows post-check smoke script for `ogr2ogr` path, GDAL/PROJ env vars, PostgreSQL GDAL driver, and core Python imports |
-| `scripts/win/precompute_noise_dev.cmd` | Windows noise artifact dev precompute wrapper via `run_noise_precompute_watchdog.ps1`; now defaults to full-reimport dev-fast runs (30-minute watchdog by default), while `run_noise_precompute_watchdog.ps1 -Incremental` keeps the lighter refresh path |
-| `scripts/win/precompute_noise_accurate.cmd` | Windows accurate-mode wrapper via `run_noise_precompute_watchdog.ps1 -Accurate`; defaults to a 2-hour watchdog and full-reimport accurate runs |
+| `scripts/win/precompute_noise_dev.cmd` | Windows fast DevReuse wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevReuse`; requires an existing mode-matched resolved artifact and never rebuilds noise artifacts |
+| `scripts/win/prepare_noise_artifact_dev.cmd` | Windows slow dev-fast artifact build/reimport wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevPrepare` |
+| `scripts/win/prepare_noise_artifact_accurate.cmd` | Windows slow accurate artifact build/reimport wrapper via `run_noise_precompute_watchdog.ps1 -Mode AccuratePrepare` |
+| `scripts/win/precompute_noise_accurate.cmd` | Compatibility wrapper that maps to `run_noise_precompute_watchdog.ps1 -Mode AccuratePrepare` |
 | `scripts/win/test_noise.cmd` | Windows targeted noise test wrapper via `geo_env.cmd` |
 | `pytest.ini` | Pytest collection scope and generated-directory exclusions |
 | `frontend/package.json` | Frontend dependency and build scripts |
@@ -580,7 +582,7 @@ tests/test_server_behavior.py
 - NI Round 1 shapefiles are class-coded (`GRIDCODE` 1..7 with `Noise_Cl` labels), not threshold-coded. Reusing threshold arithmetic on Round 1 creates invalid synthetic labels like `2-6`.
 - Noise artifact ingest now stages rows in a temp table (`noise_ingest_stage_*`) and then runs SQL geometry normalization (`ST_GeomFromWKB` -> `ST_Transform` -> `ST_MakeValid`) instead of building giant 500-row inline `VALUES` statements with huge WKB hex params.
 - Noise force semantics are split: resolved rebuild (`--force-noise-artifact`) is separate from source re-import (`--reimport-noise-source`), and `--force-noise-all` does both.
-- `scripts/win/precompute_noise_dev.cmd` now defaults to full-reimport dev-fast runs and a 30-minute watchdog; use `scripts/win/run_noise_precompute_watchdog.ps1 -Incremental` for lightweight refreshes, or `scripts/win/precompute_noise_accurate.cmd` / `-Accurate` for polygon-accurate runs.
+- `scripts/win/precompute_noise_dev.cmd` is now strict DevReuse: it requires a prebuilt mode-matched artifact and fails fast when missing. Use `scripts/win/prepare_noise_artifact_dev.cmd` or `scripts/win/prepare_noise_artifact_accurate.cmd` for slow build/reimport workflows.
 - `progress_tracker.py` is intentionally defensive. If tracking breaks, the build keeps going, so ETA regressions can hide without breaking tests.
 - Reachability large-cache recovery is mixed-format now: `{key}.pkl(.gz)` is the base snapshot and `{key}.chunks.pkl(.gz)` is an overlay journal. If you touch cache loaders, preserve that merge order and fallback behavior.
 - Reachability origin-node helpers now assume a split contract: `normalize_origin_node_ids(...)` produces sorted unique lists, and `merge_normalized_origin_node_ids(...)` unions already-normalized lists. Do not fall back to `sorted(set(...))` on multi-million origin sequences.

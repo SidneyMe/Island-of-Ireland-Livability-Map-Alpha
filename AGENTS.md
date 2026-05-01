@@ -36,8 +36,13 @@ Do not open these unless directly required by the task:
   - `scripts\win\selftest_geo_env.cmd`
   - `scripts\win\geo_env.cmd .\.venv\Scripts\python.exe ...`
   - `scripts\win\precompute_noise_dev.cmd`
+  - `scripts\win\prepare_noise_artifact_dev.cmd`
+  - `scripts\win\prepare_noise_artifact_accurate.cmd`
   - `scripts\win\precompute_noise_accurate.cmd`
   - `scripts\win\test_noise.cmd`
+- Noise workflow split:
+  - `precompute_noise_dev.cmd` is reuse-only and never builds/reimports artifacts.
+  - `prepare_noise_artifact_*.cmd` commands are the slow artifact build/refresh path.
 - To reuse an existing conda base env:
   - `set GEO_CONDA_ENV=base`
   - `scripts\win\check_geo_env.cmd`

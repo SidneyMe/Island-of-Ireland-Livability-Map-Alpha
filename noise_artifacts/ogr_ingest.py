@@ -32,7 +32,7 @@ _OGR2OGR_NO_PROGRESS_TIMEOUT_ENV = "NOISE_OGR2OGR_NO_PROGRESS_TIMEOUT_SECONDS"
 _OGR2OGR_TOTAL_TIMEOUT_ENV = "NOISE_OGR2OGR_TOTAL_TIMEOUT_SEC"
 _OGR2OGR_ROAD_CHUNK_TIMEOUT_ENV = "NOISE_OGR2OGR_ROAD_CHUNK_TIMEOUT_SEC"
 _DEFAULT_OGR2OGR_TIMEOUT_SECONDS = 900
-_DEFAULT_OGR2OGR_IDLE_TIMEOUT_SECONDS = 180
+_DEFAULT_OGR2OGR_IDLE_TIMEOUT_SECONDS = 900
 _DEFAULT_OGR2OGR_TOTAL_TIMEOUT_SECONDS = 1800
 _DEFAULT_OGR2OGR_ROAD_CHUNK_TIMEOUT_SECONDS = 1200
 _SMALL_SOURCE_OGR2OGR_TIMEOUT_SECONDS = 120
@@ -60,7 +60,7 @@ _DEFAULT_SQL_STATEMENT_TIMEOUT_SECONDS = 900
 _DEFAULT_SQL_LOCK_TIMEOUT_SECONDS = 30
 _TERMINATE_STALE_IMPORT_BACKENDS_ENV = "NOISE_TERMINATE_STALE_IMPORT_BACKENDS"
 _TERMINATE_STALE_STAGE_LOCKS_ENV = "NOISE_TERMINATE_STALE_STAGE_LOCKS"
-_ROAD_GDB_CANONICAL_VERSION = "road-gdb-canonical-v1"
+_ROAD_GDB_CANONICAL_VERSION = "road-gdb-canonical-v2-only-ccw"
 _ACTIVE_OGR_PROCS_LOCK = threading.Lock()
 _ACTIVE_OGR_PROCS: dict[int, tuple[subprocess.Popen, str]] = {}
 _ROI_OGR_CANDIDATE_FIELDS = [
@@ -504,6 +504,14 @@ def _build_ogr2ogr_gdb_to_gpkg_command(
 ) -> list[str]:
     cmd = [
         "ogr2ogr",
+        # Skip GDAL's slow polygon containment analysis for source features
+        # with many rings. organizePolygons() is O(N^2) on the ring count
+        # and stalls for >15min on noise polygons with 100+ parts. ONLY_CCW
+        # classifies inner/outer rings by winding orientation alone (OGC
+        # convention), which the noise source data follows.
+        "--config",
+        "OGR_ORGANIZE_POLYGONS",
+        "ONLY_CCW",
         "-f",
         "GPKG",
         str(cache_gpkg_path),

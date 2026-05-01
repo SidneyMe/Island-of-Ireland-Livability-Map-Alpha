@@ -162,6 +162,7 @@ def run_precompute_impl(
     reimport_noise_source: bool = False,
     force_noise_all: bool = False,
     noise_accurate: bool = False,
+    require_active_noise_artifact: bool = False,
     refresh_noise_artifact: bool = False,
     *,
     build_profile: str = "full",
@@ -237,6 +238,10 @@ def run_precompute_impl(
     # need the study area computed by phase_geometry below.
     if _config.NOISE_MODE == "artifact":
         if not hasattr(engine, "connect"):
+            if require_active_noise_artifact:
+                raise RuntimeError(
+                    "BUG: --require-active-noise-artifact requires an engine with DB connectivity."
+                )
             # Unit tests often pass sentinel/mock engines that intentionally do
             # not implement DB connectivity; skip artifact DB preflight there.
             print(
@@ -245,65 +250,87 @@ def run_precompute_impl(
             )
             _active_artifact = None
         else:
-            from noise_artifacts.manifest import get_active_artifact as _get_active_artifact
-            print("[noise] checking active resolved artifact", flush=True)
-            _active_artifact = _get_active_artifact(engine, "resolved")
-
-            _force_resolved = bool(force_noise_artifact or force_noise_all)
-            _reimport_source = bool(reimport_noise_source or force_noise_all)
-            if _reimport_source:
-                _force_resolved = True
-
-            _need_build = (
-                _active_artifact is None
-                or refresh_noise_artifact
-                or _force_resolved
-                or _reimport_source
+            from noise_artifacts.manifest import (
+                get_active_artifact as _get_active_artifact,
+                get_resolved_artifact_for_mode as _get_resolved_artifact_for_mode,
             )
-            if _need_build:
+            if require_active_noise_artifact:
+                _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
                 if _active_artifact is None:
-                    _build_reason = "no active resolved artifact"
-                elif force_noise_all:
-                    _build_reason = "--force-noise-all"
-                elif reimport_noise_source:
-                    _build_reason = "--reimport-noise-source"
-                elif force_noise_artifact:
-                    _build_reason = "--force-noise-artifact"
-                else:
-                    _build_reason = "--refresh-noise-artifact"
-                print(f"[noise] {_build_reason}; building noise artifact...", flush=True)
-                from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
-
-                def _noise_progress_cb(action, *, detail="", force_log=False):
-                    if detail:
-                        print(f"[noise] {detail}", flush=True)
-
-                _build_result = _build_artifact(
-                    engine,
-                    force_resolved=_force_resolved,
-                    reimport_source=_reimport_source,
-                    noise_accuracy_mode=noise_accuracy_mode,
-                    progress_cb=_noise_progress_cb,
+                    if noise_accuracy_mode == "accurate":
+                        raise RuntimeError(
+                            "Noise artifact missing for mode=accurate. "
+                            "DevReuse never builds noise artifacts. "
+                            "Run scripts\\win\\prepare_noise_artifact_accurate.cmd first."
+                        )
+                    raise RuntimeError(
+                        "Noise artifact missing for mode=dev_fast. "
+                        "DevReuse never builds noise artifacts. "
+                        "Run scripts\\win\\prepare_noise_artifact_dev.cmd first."
+                    )
+                print(
+                    "[noise] active resolved artifact required and found: "
+                    f"{_active_artifact.artifact_hash} (mode={noise_accuracy_mode})",
+                    flush=True,
                 )
-                if _build_result["status"] == "built":
-                    print(
-                        f"[noise] artifact built: {_build_result['artifact_hash']} "
-                        f"rows={_build_result.get('row_count', 0)}",
-                        flush=True,
-                    )
-                elif _build_result["status"] == "up_to_date":
-                    print(
-                        f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
-                        flush=True,
-                    )
+            else:
                 _active_artifact = _get_active_artifact(engine, "resolved")
 
-            if _active_artifact is None:
-                raise RuntimeError(
-                    "BUG: noise artifact build completed but no active resolved artifact exists. "
-                    "Check noise_artifact_manifest for errors."
+                _force_resolved = bool(force_noise_artifact or force_noise_all)
+                _reimport_source = bool(reimport_noise_source or force_noise_all)
+                if _reimport_source:
+                    _force_resolved = True
+
+                _need_build = (
+                    _active_artifact is None
+                    or refresh_noise_artifact
+                    or _force_resolved
+                    or _reimport_source
                 )
-            print(f"[noise] active resolved artifact: {_active_artifact.artifact_hash}", flush=True)
+                if _need_build:
+                    if _active_artifact is None:
+                        _build_reason = "no active resolved artifact"
+                    elif force_noise_all:
+                        _build_reason = "--force-noise-all"
+                    elif reimport_noise_source:
+                        _build_reason = "--reimport-noise-source"
+                    elif force_noise_artifact:
+                        _build_reason = "--force-noise-artifact"
+                    else:
+                        _build_reason = "--refresh-noise-artifact"
+                    print(f"[noise] {_build_reason}; building noise artifact...", flush=True)
+                    from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
+
+                    def _noise_progress_cb(action, *, detail="", force_log=False):
+                        if detail:
+                            print(f"[noise] {detail}", flush=True)
+
+                    _build_result = _build_artifact(
+                        engine,
+                        force_resolved=_force_resolved,
+                        reimport_source=_reimport_source,
+                        noise_accuracy_mode=noise_accuracy_mode,
+                        progress_cb=_noise_progress_cb,
+                    )
+                    if _build_result["status"] == "built":
+                        print(
+                            f"[noise] artifact built: {_build_result['artifact_hash']} "
+                            f"rows={_build_result.get('row_count', 0)}",
+                            flush=True,
+                        )
+                    elif _build_result["status"] == "up_to_date":
+                        print(
+                            f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
+                            flush=True,
+                        )
+                    _active_artifact = _get_active_artifact(engine, "resolved")
+
+                if _active_artifact is None:
+                    raise RuntimeError(
+                        "BUG: noise artifact build completed but no active resolved artifact exists. "
+                        "Check noise_artifact_manifest for errors."
+                    )
+                print(f"[noise] active resolved artifact: {_active_artifact.artifact_hash}", flush=True)
     elif _config.NOISE_MODE == "legacy":
         print(
             "[noise] WARNING: NOISE_MODE=legacy is the slow debug path. "

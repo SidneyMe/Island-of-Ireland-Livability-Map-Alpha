@@ -1,6 +1,6 @@
 param(
-    [switch]$Incremental,
-    [switch]$Accurate
+    [ValidateSet("DevReuse", "DevPrepare", "AccuratePrepare")]
+    [string]$Mode = "DevReuse"
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,41 +12,41 @@ Set-Location $projectRoot
 if (-not $env:GEO_CONDA_ENV) { $env:GEO_CONDA_ENV = "base" }
 if (-not $env:MINIFORGE_ROOT) { $env:MINIFORGE_ROOT = Join-Path $env:USERPROFILE "miniforge3" }
 if (-not $env:NOISE_INGEST_MODE) { $env:NOISE_INGEST_MODE = "ogr2ogr" }
-if (-not $env:NOISE_OGR2OGR_GDB_WORKERS) { $env:NOISE_OGR2OGR_GDB_WORKERS = "2" }
-if (-not $env:NOISE_OGR2OGR_GDB_CHUNK_SIZE) { $env:NOISE_OGR2OGR_GDB_CHUNK_SIZE = "25" }
-
-$timeoutSeconds = 7200
-if ($env:NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC) {
-    $timeoutSeconds = [int]$env:NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC
-}
-
 $geoCmd = Join-Path $scriptDir "geo_env.cmd"
-$argList = @(
+$baseArgs = @(
     "/c",
     "`"$geoCmd`"",
     ".\.venv\Scripts\python.exe",
     "main.py",
-    "--precompute-dev",
-    "--refresh-noise-artifact"
+    "--precompute-dev"
 )
 
-if ($Accurate) {
-    $argList += "--noise-accurate"
+switch ($Mode) {
+    "DevReuse" {
+        $modeArgs = @("--force-precompute", "--require-active-noise-artifact")
+        $defaultTimeoutSeconds = 1200
+    }
+    "DevPrepare" {
+        $modeArgs = @("--refresh-noise-artifact", "--reimport-noise-source", "--force-noise-artifact", "--force-precompute")
+        $defaultTimeoutSeconds = 3600
+    }
+    "AccuratePrepare" {
+        $modeArgs = @("--noise-accurate", "--refresh-noise-artifact", "--reimport-noise-source", "--force-noise-artifact", "--force-precompute")
+        $defaultTimeoutSeconds = 7200
+    }
+    default {
+        throw "Unsupported mode: $Mode"
+    }
 }
 
-if (-not $Incremental) {
-    $argList += @("--reimport-noise-source", "--force-noise-artifact", "--force-precompute")
-}
-
-if ($Incremental -and $Accurate) {
-    Write-Host "[watchdog] starting precompute (incremental, accurate) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
-} elseif ($Incremental) {
-    Write-Host "[watchdog] starting precompute (incremental, dev-fast) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
-} elseif ($Accurate) {
-    Write-Host "[watchdog] starting precompute (full-reimport, accurate) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+if ($env:NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC) {
+    $timeoutSeconds = [int]$env:NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC
 } else {
-    Write-Host "[watchdog] starting precompute (full-reimport, dev-fast) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+    $timeoutSeconds = $defaultTimeoutSeconds
 }
+
+$argList = @($baseArgs + $modeArgs)
+Write-Host "[watchdog] starting noise mode=$Mode timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -PassThru -NoNewWindow
 
 if ($proc.WaitForExit($timeoutSeconds * 1000)) {
