@@ -35,7 +35,8 @@ from .resolve import materialize_resolved_display
 log = logging.getLogger(__name__)
 
 _MIN_FREE_DISK_GB_ENV = "NOISE_MIN_FREE_DISK_GB"
-_MIN_FREE_DISK_GB_DEV_ENV = "NOISE_MIN_FREE_DISK_GB_DEV_FAST"
+_MIN_FREE_DISK_GB_DEV_ENV = "NOISE_DEV_FAST_MIN_FREE_DISK_GB"
+_MIN_FREE_DISK_GB_DEV_ENV_LEGACY = "NOISE_MIN_FREE_DISK_GB_DEV_FAST"
 _MIN_FREE_DISK_GB_ACCURATE_ENV = "NOISE_MIN_FREE_DISK_GB_ACCURATE"
 _DEFAULT_MIN_FREE_DISK_GB_DEV = 10.0
 _DEFAULT_MIN_FREE_DISK_GB_ACCURATE = 30.0
@@ -64,6 +65,9 @@ def _min_free_disk_gb_for_mode(mode: str) -> float:
     raw_mode = (os.getenv(_MIN_FREE_DISK_GB_DEV_ENV) or "").strip()
     if raw_mode:
         return float(raw_mode)
+    raw_mode_legacy = (os.getenv(_MIN_FREE_DISK_GB_DEV_ENV_LEGACY) or "").strip()
+    if raw_mode_legacy:
+        return float(raw_mode_legacy)
     return _DEFAULT_MIN_FREE_DISK_GB_DEV
 
 
@@ -105,6 +109,50 @@ def _source_row_count(engine: Engine, source_hash: str) -> int:
     if value is None:
         return 0
     return max(int(value), 0)
+
+
+def _delete_source_types(engine: Engine, source_hash: str, source_types: tuple[str, ...]) -> int:
+    source_types_norm = tuple(str(item).strip().lower() for item in source_types)
+    if source_types_norm == ("road", "rail") or source_types_norm == ("rail", "road"):
+        delete_sql = """
+            DELETE FROM noise_normalized
+            WHERE noise_source_hash = :h
+              AND source_type IN ('road', 'rail')
+        """
+        params = {"h": source_hash}
+    else:
+        delete_sql = """
+            DELETE FROM noise_normalized
+            WHERE noise_source_hash = :h
+              AND source_type = ANY(:source_types)
+        """
+        params = {"h": source_hash, "source_types": list(source_types)}
+    with engine.begin() as conn:
+        deleted = conn.execute(
+            text(delete_sql),
+            params,
+        )
+    return int(deleted.rowcount or 0)
+
+
+def _assert_no_dev_fast_road_rail_normalized(engine: Engine, source_hash: str) -> None:
+    with engine.connect() as conn:
+        n = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM noise_normalized
+                WHERE noise_source_hash = :h
+                  AND source_type IN ('road', 'rail')
+                """
+            ),
+            {"h": source_hash},
+        ).scalar_one()
+    if int(n or 0) > 0:
+        raise RuntimeError(
+            "BUG: dev_fast must not leave road/rail rows in noise_normalized. "
+            f"Found {n} rows for noise_source_hash={source_hash}."
+        )
 
 
 def build_noise_artifact(
@@ -181,6 +229,18 @@ def build_noise_artifact(
                 latest_round_only = True
                 if mode_norm == "dev_fast":
                     exact_source_types = {"airport", "industry"}
+                    _progress(
+                        progress_cb,
+                        "dev-fast source split: exact=airport,industry grid=road,rail "
+                        "(road/rail raw staging disabled)",
+                    )
+                    deleted_road_rail = _delete_source_types(engine, source_hash, ("road", "rail"))
+                    if deleted_road_rail > 0:
+                        _progress(
+                            progress_cb,
+                            f"dev-fast cleanup: removed stale road/rail noise_normalized rows={deleted_road_rail:,} "
+                            f"for noise_source_hash={source_hash}",
+                        )
                     n_ingested = ingest_noise_normalized(
                         engine,
                         source_hash,
@@ -192,6 +252,10 @@ def build_noise_artifact(
                         progress_cb=progress_cb,
                     )
                 else:
+                    _progress(
+                        progress_cb,
+                        "accurate source split: exact=airport,industry and road/rail simplified polygons",
+                    )
                     n_ingested = ingest_noise_normalized(
                         engine,
                         source_hash,
@@ -232,6 +296,7 @@ def build_noise_artifact(
                         grid_size_m=int(grid_size_m),
                         progress_cb=progress_cb,
                     )
+                    _assert_no_dev_fast_road_rail_normalized(engine, source_hash)
                     _timing(progress_cb, "resolve.total", time.perf_counter() - resolve_started)
                     _progress(progress_cb, f"resolve done: {resolved_rows:,} rows")
                 else:

@@ -20,6 +20,10 @@ class NoiseAccuracyModeTests(TestCase):
         with patch.dict(os.environ, {"NOISE_ACCURACY_MODE": "accurate"}, clear=True):
             self.assertEqual(resolve_noise_accuracy_mode(cli_noise_accurate=False), "accurate")
 
+    def test_env_override_dev_fast(self) -> None:
+        with patch.dict(os.environ, {"NOISE_ACCURACY_MODE": "dev_fast"}, clear=True):
+            self.assertEqual(resolve_noise_accuracy_mode(cli_noise_accurate=False), "dev_fast")
+
     def test_cli_flag_has_precedence_over_env(self) -> None:
         with patch.dict(os.environ, {"NOISE_ACCURACY_MODE": "dev_fast"}, clear=True):
             self.assertEqual(resolve_noise_accuracy_mode(cli_noise_accurate=True), "accurate")

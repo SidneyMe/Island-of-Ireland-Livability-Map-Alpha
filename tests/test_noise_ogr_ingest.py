@@ -735,6 +735,58 @@ class NoiseOgrIngestTests(TestCase):
         self.assertIn("timeout=", heartbeat)
         self.assertIn("last_output_age=", heartbeat)
 
+    def test_no_progress_timeout_uses_real_output_not_heartbeat(self) -> None:
+        from noise_artifacts.exceptions import NoiseIngestError
+        from noise_artifacts.ogr_ingest import _run_ogr2ogr_import
+
+        class _Proc:
+            def __init__(self):
+                self.stdout = _FakeStream([])
+                self.pid = 4321
+                self._killed = False
+
+            def poll(self):
+                return None if not self._killed else -9
+
+            def wait(self, timeout=None):
+                del timeout
+                return -9 if self._killed else 0
+
+            def terminate(self):
+                self._killed = True
+
+            def kill(self):
+                self._killed = True
+
+        proc = _Proc()
+        progress_events: list[str] = []
+        monotonic_values = iter([0.0, 31.0, 31.1, 61.0, 61.1, 61.2, 61.3])
+        with patch("noise_artifacts.ogr_ingest.subprocess.Popen", return_value=proc):
+            with patch("noise_artifacts.ogr_ingest.time.monotonic", side_effect=lambda: next(monotonic_values)):
+                with patch("noise_artifacts.ogr_ingest.queue.Queue.get", side_effect=queue.Empty):
+                    with patch("noise_artifacts.ogr_ingest._ogr2ogr_idle_timeout_seconds", return_value=60.0):
+                        with patch("noise_artifacts.ogr_ingest._kill_process_tree_windows") as mock_tree_kill:
+                            with patch("noise_artifacts.ogr_ingest._terminate_active_ogr2ogr_processes", return_value=1):
+                                with self.assertRaises(NoiseIngestError) as ctx:
+                                    _run_ogr2ogr_import(
+                                        engine=self._fake_engine(),
+                                        source_path=Path("C:/tmp/noise.shp"),
+                                        stage_table="_noise_raw_stage",
+                                        layer_name="Noise_R4_Road",
+                                        selected_fields=["DB_LOW"],
+                                        where_clause="fid >= 0 AND fid <= 24",
+                                        progress_cb=lambda _kind, detail, force_log: progress_events.append(str(detail)),
+                                        timeout_seconds=300.0,
+                                    )
+        self.assertTrue(any("ogr2ogr still running:" in msg for msg in progress_events))
+        mock_tree_kill.assert_called()
+        msg = str(ctx.exception)
+        self.assertIn("no-progress timeout", msg)
+        self.assertIn("source=noise.shp", msg)
+        self.assertIn("target=_noise_raw_stage", msg)
+        self.assertIn("stage=_noise_raw_stage layer=Noise_R4_Road where=fid >= 0 AND fid <= 24", msg)
+        self.assertIn("last_line=(none)", msg)
+
     def test_default_ogr2ogr_timeout_is_non_none(self) -> None:
         from noise_artifacts.ogr_ingest import _ogr2ogr_timeout_seconds
 
@@ -880,16 +932,19 @@ class NoiseOgrIngestTests(TestCase):
 
     def test_windows_runner_scripts_use_venv_python(self) -> None:
         precompute_script = Path("scripts/win/precompute_noise_dev.cmd").read_text(encoding="utf-8")
+        accurate_script = Path("scripts/win/precompute_noise_accurate.cmd").read_text(encoding="utf-8")
         test_script = Path("scripts/win/test_noise.cmd").read_text(encoding="utf-8")
         watchdog_script = Path("scripts/win/run_noise_precompute_watchdog.ps1").read_text(encoding="utf-8")
         self.assertIn("run_noise_precompute_watchdog.ps1", precompute_script)
-        self.assertIn("-Incremental", precompute_script)
-        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=1200", precompute_script)
+        self.assertNotIn("-Incremental", precompute_script)
+        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=1800", precompute_script)
+        self.assertIn("-Accurate", accurate_script)
+        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=7200", accurate_script)
         self.assertIn(".\\.venv\\Scripts\\python.exe", test_script)
         self.assertIn(".\\.venv\\Scripts\\python.exe", watchdog_script)
-        self.assertNotIn("--reimport-noise-source", precompute_script)
-        self.assertNotIn("--force-noise-artifact", precompute_script)
-        self.assertNotIn("--force-precompute", precompute_script)
+        self.assertIn("--reimport-noise-source", watchdog_script)
+        self.assertIn("--force-noise-artifact", watchdog_script)
+        self.assertIn("--force-precompute", watchdog_script)
 
     def test_stage_lock_diagnostic_failure_rolls_back_and_does_not_block_drop(self) -> None:
         from noise_artifacts.ogr_ingest import _prepare_stage_table_for_external_import

@@ -57,6 +57,7 @@ class _ManagedIndexSpec:
     index_name: str
     table_name: str
     schema: str = "public"
+    columns: tuple[str, ...] | None = None
 
 
 _MANAGED_TABLES = (
@@ -109,7 +110,19 @@ _MANAGED_INDEX_SPECS = (
     _ManagedIndexSpec("noise_artifact_manifest_type_status_idx", "noise_artifact_manifest"),
     _ManagedIndexSpec("noise_normalized_geom_gist", "noise_normalized"),
     _ManagedIndexSpec("noise_normalized_group_idx", "noise_normalized"),
-    _ManagedIndexSpec("noise_grid_artifact_key_idx", "noise_grid_artifact"),
+    _ManagedIndexSpec(
+        "noise_grid_artifact_key_idx",
+        "noise_grid_artifact",
+        columns=(
+            "artifact_hash",
+            "jurisdiction",
+            "source_type",
+            "metric",
+            "grid_size_m",
+            "cell_x",
+            "cell_y",
+        ),
+    ),
     _ManagedIndexSpec("noise_grid_artifact_geom_gist", "noise_grid_artifact"),
     _ManagedIndexSpec("noise_resolved_display_geom_gist", "noise_resolved_display"),
     _ManagedIndexSpec("noise_resolved_display_filter_idx", "noise_resolved_display"),
@@ -254,12 +267,19 @@ def _table_names_by_schema(inspector) -> dict[str, set[str]]:
     return tables_by_schema
 
 
-def _present_index_names(inspector, table_name: str, *, schema: str) -> set[str]:
-    return {
-        str(index.get("name"))
-        for index in inspector.get_indexes(table_name, schema=None if schema == "public" else schema)
-        if index.get("name")
-    }
+def _present_indexes(inspector, table_name: str, *, schema: str) -> dict[str, tuple[str, ...] | None]:
+    indexes = inspector.get_indexes(table_name, schema=None if schema == "public" else schema)
+    present: dict[str, tuple[str, ...] | None] = {}
+    for index in indexes:
+        name = index.get("name")
+        if not name:
+            continue
+        cols = index.get("column_names")
+        if isinstance(cols, list):
+            present[str(name)] = tuple(str(col) for col in cols)
+        else:
+            present[str(name)] = None
+    return present
 
 
 def _managed_schema_mismatches(inspector) -> list[str]:
@@ -293,14 +313,22 @@ def _managed_schema_mismatches(inspector) -> list[str]:
     for index_spec in _MANAGED_INDEX_SPECS:
         if index_spec.table_name not in tables_by_schema.get(index_spec.schema, set()):
             continue
-        present_indexes = _present_index_names(
+        present_indexes = _present_indexes(
             inspector,
             index_spec.table_name,
             schema=index_spec.schema,
         )
-        if index_spec.index_name not in present_indexes:
+        present_cols = present_indexes.get(index_spec.index_name)
+        if present_cols is None and index_spec.index_name not in present_indexes:
             mismatches.append(
                 f"missing index {index_spec.schema}.{index_spec.index_name}"
+            )
+            continue
+        if index_spec.columns is not None and present_cols is not None and tuple(index_spec.columns) != tuple(present_cols):
+            mismatches.append(
+                "mismatched index columns "
+                f"{index_spec.schema}.{index_spec.index_name}: "
+                f"expected {index_spec.columns}, found {present_cols}"
             )
 
     return mismatches
@@ -337,7 +365,7 @@ def _legacy_managed_schema_mismatches(inspector) -> list[str]:
     for index_spec in _LEGACY_MANAGED_INDEX_SPECS:
         if index_spec.table_name not in tables_by_schema.get(index_spec.schema, set()):
             continue
-        present_indexes = _present_index_names(
+        present_indexes = _present_indexes(
             inspector,
             index_spec.table_name,
             schema=index_spec.schema,

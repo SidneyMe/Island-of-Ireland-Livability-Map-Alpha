@@ -34,7 +34,9 @@ Do not open these unless directly required by the task:
 - For Windows GDAL/noise work, run through:
   - `scripts\win\check_geo_env.cmd`
   - `scripts\win\selftest_geo_env.cmd`
+  - `scripts\win\geo_env.cmd .\.venv\Scripts\python.exe ...`
   - `scripts\win\precompute_noise_dev.cmd`
+  - `scripts\win\precompute_noise_accurate.cmd`
   - `scripts\win\test_noise.cmd`
 - To reuse an existing conda base env:
   - `set GEO_CONDA_ENV=base`

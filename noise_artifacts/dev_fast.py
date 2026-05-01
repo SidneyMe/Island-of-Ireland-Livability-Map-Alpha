@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from .exceptions import NoiseIngestError
 from .ogr_ingest import _selected_ni_member_specs, _selected_roi_specs
 
 
@@ -37,9 +39,21 @@ def _metric_from_time(value: Any) -> str | None:
 
 def _lookup_ci(row: Any, *names: str) -> Any:
     wanted = {name.strip().lower() for name in names}
-    for key in row.index:
+    if hasattr(row, "_asdict"):
+        data = row._asdict()
+        for key, value in data.items():
+            if str(key).strip().lower() in wanted:
+                return value
+        return None
+    if hasattr(row, "index") and hasattr(row, "get"):
+        for key in row.index:
+            if str(key).strip().lower() in wanted:
+                return row.get(key)
+        return None
+    row_dict = dict(row) if isinstance(row, dict) else {}
+    for key, value in row_dict.items():
         if str(key).strip().lower() in wanted:
-            return row.get(key)
+            return value
     return None
 
 
@@ -100,6 +114,182 @@ def _band_rank(db_low: float | None, db_high: float | None, db_value: str | None
     return -1.0
 
 
+def _dev_fast_read_chunk_size() -> int:
+    raw = os.getenv("NOISE_DEV_FAST_READ_CHUNK_SIZE", "25")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_READ_CHUNK_SIZE must be a positive integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_READ_CHUNK_SIZE must be a positive integer, got {raw!r}"
+        )
+    return value
+
+
+def _dev_fast_min_grid_size_m() -> int:
+    raw = os.getenv("NOISE_DEV_FAST_MIN_GRID_SIZE_M", "500")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_MIN_GRID_SIZE_M must be a positive integer, got {raw!r}"
+        ) from exc
+    return max(1, value)
+
+
+def _dev_fast_allow_tiny_grid() -> bool:
+    return (os.getenv("NOISE_ALLOW_TINY_NOISE_GRID") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _validate_dev_fast_grid_size(grid_size_m: int) -> None:
+    minimum = _dev_fast_min_grid_size_m()
+    if int(grid_size_m) < minimum and not _dev_fast_allow_tiny_grid():
+        raise NoiseIngestError(
+            f"NOISE_GRID_SIZE_M={grid_size_m} is too small for dev_fast. "
+            f"Minimum is {minimum}m unless NOISE_ALLOW_TINY_NOISE_GRID=1. "
+            "Use --noise-accurate for high-fidelity road/rail instead."
+        )
+
+
+def _max_cells_per_feature() -> int:
+    raw = os.getenv("NOISE_DEV_FAST_MAX_CELLS_PER_FEATURE", "250000")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_MAX_CELLS_PER_FEATURE must be a positive integer, got {raw!r}"
+        ) from exc
+    return max(1, value)
+
+
+def _read_feature_count(source_path: Path, layer_name: str | None) -> int | None:
+    import pyogrio
+
+    try:
+        info = pyogrio.read_info(
+            str(source_path),
+            layer=layer_name,
+            force_feature_count=True,
+        )
+    except TypeError:
+        info = pyogrio.read_info(str(source_path), layer=layer_name)
+    raw = info.get("features")
+    if raw is None:
+        raw = info.get("feature_count")
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def _available_columns(source_path: Path, layer_name: str | None) -> list[str]:
+    import pyogrio
+
+    info = pyogrio.read_info(str(source_path), layer=layer_name)
+    fields = info.get("fields") if isinstance(info, dict) else None
+    if not isinstance(fields, list):
+        return []
+    return [str(field) for field in fields]
+
+
+def _existing_requested_columns(
+    source_path: Path,
+    layer_name: str | None,
+    requested: list[str],
+) -> list[str] | None:
+    available = _available_columns(source_path, layer_name)
+    if not available:
+        return None
+    by_lower: dict[str, str] = {}
+    for col in available:
+        key = col.strip().lower()
+        if key and key not in by_lower:
+            by_lower[key] = col
+    selected: list[str] = []
+    seen: set[str] = set()
+    for col in requested:
+        key = str(col).strip().lower()
+        resolved = by_lower.get(key)
+        if resolved is None:
+            continue
+        if resolved in seen:
+            continue
+        selected.append(resolved)
+        seen.add(resolved)
+    return selected or None
+
+
+def _iter_noise_gdf_chunks(
+    *,
+    source_path: Path,
+    layer_name: str | None,
+    columns: list[str] | None,
+    target_crs: int = 2157,
+    chunk_size: int,
+    source_label: str,
+    progress_cb=None,
+):
+    import pyogrio
+
+    feature_count = _read_feature_count(source_path, layer_name)
+    if feature_count is None:
+        chunk_count = None
+        offset = 0
+        chunk_index = 1
+        while True:
+            started = time.perf_counter()
+            frame = pyogrio.read_dataframe(
+                str(source_path),
+                layer=layer_name,
+                columns=columns,
+                skip_features=offset,
+                max_features=chunk_size,
+            )
+            if frame.empty:
+                break
+            if frame.crs is not None and str(frame.crs).upper() != "EPSG:2157":
+                frame = frame.to_crs(target_crs)
+            _progress(
+                progress_cb,
+                f"[noise:progress] phase=dev_fast_read_chunk source={source_label} "
+                f"chunk={chunk_index} offset={offset} rows={len(frame)} elapsed={time.perf_counter() - started:.1f}s",
+            )
+            yield frame, chunk_index, chunk_count
+            offset += chunk_size
+            chunk_index += 1
+        return
+
+    chunk_count = max(1, math.ceil(feature_count / chunk_size))
+    for chunk_index, offset in enumerate(range(0, feature_count, chunk_size), start=1):
+        started = time.perf_counter()
+        frame = pyogrio.read_dataframe(
+            str(source_path),
+            layer=layer_name,
+            columns=columns,
+            skip_features=offset,
+            max_features=chunk_size,
+        )
+        if frame.empty:
+            continue
+        if frame.crs is not None and str(frame.crs).upper() != "EPSG:2157":
+            frame = frame.to_crs(target_crs)
+        _progress(
+            progress_cb,
+            f"[noise:progress] phase=dev_fast_read_chunk source={source_label} "
+            f"chunk={chunk_index}/{chunk_count} offset={offset} rows={len(frame)} "
+            f"elapsed={time.perf_counter() - started:.1f}s",
+        )
+        yield frame, chunk_index, chunk_count
+
+
 @dataclass
 class _GridRow:
     jurisdiction: str
@@ -150,6 +340,14 @@ def _add_geom_cells(
     max_cell_y = int(math.floor((maxy - 1e-9) / float(grid_size_m)))
     if max_cell_x < min_cell_x or max_cell_y < min_cell_y:
         return 0
+    estimated_cells = (max_cell_x - min_cell_x + 1) * (max_cell_y - min_cell_y + 1)
+    limit = _max_cells_per_feature()
+    if estimated_cells > limit:
+        raise NoiseIngestError(
+            f"dev_fast grid explosion guard: one geometry would scan {estimated_cells:,} cells "
+            f"at grid_size_m={grid_size_m}, limit={limit:,}. "
+            "Increase NOISE_GRID_SIZE_M or use --noise-accurate."
+        )
     rank = _band_rank(db_low, db_high, db_value)
     touched = 0
     for cell_x in range(min_cell_x, max_cell_x + 1):
@@ -188,10 +386,11 @@ def build_dev_fast_road_rail_grid(
     grid_size_m: int,
     progress_cb=None,
 ) -> dict[str, int]:
-    import pyogrio
     from noise.loader import ROI_SOURCE_SPECS
 
     started = time.perf_counter()
+    _validate_dev_fast_grid_size(int(grid_size_m))
+    chunk_size = _dev_fast_read_chunk_size()
     road_rail = {"road", "rail"}
     selected_roi_specs, _, _ = _selected_roi_specs(
         list(ROI_SOURCE_SPECS),
@@ -215,78 +414,133 @@ def build_dev_fast_road_rail_grid(
         if not source_path.exists():
             continue
         layer_name = source_path.stem if str(spec.file_format).lower() == "gdb" else None
-        frame = pyogrio.read_dataframe(str(source_path), layer=layer_name)
-        if frame.empty:
-            continue
-        if frame.crs is not None and str(frame.crs).upper() != "EPSG:2157":
-            frame = frame.to_crs(2157)
+        columns = _existing_requested_columns(
+            source_path,
+            layer_name,
+            ["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod", "ReportPeri"],
+        )
+        source_label = f"{spec.zip_name}:{spec.member}"
         row_touched = 0
-        for _, row in frame.iterrows():
-            metric = _metric_from_time(_lookup_ci(row, "Time", "TIME"))
-            if metric is None:
-                continue
-            db_low, db_high, db_value = _normalize_roi_band(row)
-            if db_value is None:
-                continue
-            geom = row.geometry
-            row_touched += _add_geom_cells(
-                acc,
-                jurisdiction="roi",
-                source_type=str(spec.source_type),
-                metric=metric,
-                round_number=int(spec.round_number),
-                report_period=f"Round {int(spec.round_number)}",
-                db_low=db_low,
-                db_high=db_high,
-                db_value=str(db_value),
-                geom=geom,
-                grid_size_m=int(grid_size_m),
+        for frame, chunk_index, chunk_count in _iter_noise_gdf_chunks(
+            source_path=source_path,
+            layer_name=layer_name,
+            columns=columns,
+            chunk_size=chunk_size,
+            source_label=source_label,
+            progress_cb=progress_cb,
+        ):
+            chunk_touched = 0
+            for row in frame.itertuples(index=False):
+                metric = _metric_from_time(_lookup_ci(row, "Time", "TIME"))
+                if metric is None:
+                    continue
+                db_low, db_high, db_value = _normalize_roi_band(row)
+                if db_value is None:
+                    continue
+                geom = getattr(row, "geometry", None)
+                chunk_touched += _add_geom_cells(
+                    acc,
+                    jurisdiction="roi",
+                    source_type=str(spec.source_type),
+                    metric=metric,
+                    round_number=int(spec.round_number),
+                    report_period=f"Round {int(spec.round_number)}",
+                    db_low=db_low,
+                    db_high=db_high,
+                    db_value=str(db_value),
+                    geom=geom,
+                    grid_size_m=int(grid_size_m),
+                )
+                source_rows += 1
+            row_touched += chunk_touched
+            chunk_pos = (
+                f"{chunk_index}/{chunk_count}"
+                if chunk_count is not None
+                else str(chunk_index)
             )
-            source_rows += 1
+            _progress(
+                progress_cb,
+                f"[noise:progress] phase=dev_fast_grid_roi_chunk source={source_label} "
+                f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
+            )
+            del frame
         _progress_event(
             progress_cb,
             phase="dev_fast_grid_roi",
-            source=f"{spec.zip_name}:{spec.member}",
+            source=source_label,
             rows=row_touched,
             elapsed=max(time.perf_counter() - started, 0.0),
         )
 
     for spec in selected_ni_specs:
         source_path = Path(spec["source_path"])
-        frame = pyogrio.read_dataframe(str(source_path))
-        if frame.empty:
-            continue
-        if frame.crs is not None and str(frame.crs).upper() != "EPSG:2157":
-            frame = frame.to_crs(2157)
+        columns = _existing_requested_columns(
+            source_path,
+            None,
+            [
+                "GRIDCODE",
+                "GridCode",
+                "gridcode",
+                "NoiseBand",
+                "noiseband",
+                "Noise_Cl",
+                "NOISE_CL",
+                "noise_cl",
+                "NoiseCl",
+                "NOISECL",
+            ],
+        )
+        source_label = f"{spec['zip_name']}:{spec['member']}"
         row_touched = 0
-        for _, row in frame.iterrows():
-            db_low, db_high, db_value = _normalize_ni_band(
-                round_number=int(spec["round_number"]),
-                source_type=str(spec["source_type"]),
-                metric=str(spec["metric"]),
-                row=row,
+        for frame, chunk_index, chunk_count in _iter_noise_gdf_chunks(
+            source_path=source_path,
+            layer_name=None,
+            columns=columns,
+            chunk_size=chunk_size,
+            source_label=source_label,
+            progress_cb=progress_cb,
+        ):
+            chunk_touched = 0
+            for row in frame.itertuples(index=False):
+                db_low, db_high, db_value = _normalize_ni_band(
+                    round_number=int(spec["round_number"]),
+                    source_type=str(spec["source_type"]),
+                    metric=str(spec["metric"]),
+                    row=row,
+                )
+                if db_value is None:
+                    continue
+                geom = getattr(row, "geometry", None)
+                chunk_touched += _add_geom_cells(
+                    acc,
+                    jurisdiction="ni",
+                    source_type=str(spec["source_type"]),
+                    metric=str(spec["metric"]),
+                    round_number=int(spec["round_number"]),
+                    report_period=f"Round {int(spec['round_number'])}",
+                    db_low=db_low,
+                    db_high=db_high,
+                    db_value=str(db_value),
+                    geom=geom,
+                    grid_size_m=int(grid_size_m),
+                )
+                source_rows += 1
+            row_touched += chunk_touched
+            chunk_pos = (
+                f"{chunk_index}/{chunk_count}"
+                if chunk_count is not None
+                else str(chunk_index)
             )
-            if db_value is None:
-                continue
-            geom = row.geometry
-            row_touched += _add_geom_cells(
-                acc,
-                jurisdiction="ni",
-                source_type=str(spec["source_type"]),
-                metric=str(spec["metric"]),
-                round_number=int(spec["round_number"]),
-                report_period=f"Round {int(spec['round_number'])}",
-                db_low=db_low,
-                db_high=db_high,
-                db_value=str(db_value),
-                geom=geom,
-                grid_size_m=int(grid_size_m),
+            _progress(
+                progress_cb,
+                f"[noise:progress] phase=dev_fast_grid_ni_chunk source={source_label} "
+                f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
             )
-            source_rows += 1
+            del frame
         _progress_event(
             progress_cb,
             phase="dev_fast_grid_ni",
-            source=f"{spec['zip_name']}:{spec['member']}",
+            source=source_label,
             rows=row_touched,
             elapsed=max(time.perf_counter() - started, 0.0),
         )
@@ -559,6 +813,12 @@ def apply_accurate_simplification(
     simplify_tolerance_m: float,
     progress_cb=None,
 ) -> int:
+    tol = float(simplify_tolerance_m)
+    if tol <= 0.0:
+        raise NoiseIngestError(
+            f"NOISE_ACCURATE_SIMPLIFY_M must be > 0 for accurate mode, got {simplify_tolerance_m!r}"
+        )
+    _progress(progress_cb, f"accurate simplify tolerance: {tol:.2f}m")
     with engine.begin() as conn:
         updated = conn.execute(
             text(
@@ -576,7 +836,7 @@ def apply_accurate_simplification(
                   AND source_type IN ('road', 'rail')
                 """
             ),
-            {"h": noise_source_hash, "tol": float(simplify_tolerance_m)},
+            {"h": noise_source_hash, "tol": tol},
         )
         conn.execute(
             text(
@@ -592,6 +852,6 @@ def apply_accurate_simplification(
     updated_rows = int(updated.rowcount or 0)
     _progress(
         progress_cb,
-        f"accurate simplify applied: tolerance={simplify_tolerance_m:.2f}m updated_rows={updated_rows:,}",
+        f"accurate simplify applied: tolerance={tol:.2f}m updated_rows={updated_rows:,}",
     )
     return updated_rows

@@ -1,5 +1,6 @@
 param(
-    [switch]$Incremental
+    [switch]$Incremental,
+    [switch]$Accurate
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,15 +21,31 @@ if ($env:NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC) {
 }
 
 $geoCmd = Join-Path $scriptDir "geo_env.cmd"
-$argList = @("/c", "`"$geoCmd`"", ".\.venv\Scripts\python.exe", "main.py", "--precompute-dev", "--refresh-noise-artifact")
+$argList = @(
+    "/c",
+    "`"$geoCmd`"",
+    ".\.venv\Scripts\python.exe",
+    "main.py",
+    "--precompute-dev",
+    "--refresh-noise-artifact"
+)
+
+if ($Accurate) {
+    $argList += "--noise-accurate"
+}
+
 if (-not $Incremental) {
     $argList += @("--reimport-noise-source", "--force-noise-artifact", "--force-precompute")
 }
 
-if ($Incremental) {
-    Write-Host "[watchdog] starting precompute (incremental) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+if ($Incremental -and $Accurate) {
+    Write-Host "[watchdog] starting precompute (incremental, accurate) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+} elseif ($Incremental) {
+    Write-Host "[watchdog] starting precompute (incremental, dev-fast) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+} elseif ($Accurate) {
+    Write-Host "[watchdog] starting precompute (full-reimport, accurate) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
 } else {
-    Write-Host "[watchdog] starting precompute (full-reimport) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+    Write-Host "[watchdog] starting precompute (full-reimport, dev-fast) timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
 }
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -PassThru -NoNewWindow
 

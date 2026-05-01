@@ -459,6 +459,186 @@ class ResolveSqlTests(TestCase):
         self.assertIn("DO NOTHING", src)
 
 
+class DevFastModeTests(TestCase):
+
+    def test_dev_fast_source_code_uses_chunked_reads(self) -> None:
+        import inspect
+        import noise_artifacts.dev_fast as _df
+
+        src = inspect.getsource(_df.build_dev_fast_road_rail_grid)
+        self.assertIn("_iter_noise_gdf_chunks(", src)
+        self.assertNotIn("pyogrio.read_dataframe(str(source_path), layer=layer_name)", src)
+        self.assertNotIn("pyogrio.read_dataframe(str(source_path))", src)
+
+        chunk_src = inspect.getsource(_df._iter_noise_gdf_chunks)
+        self.assertIn("skip_features=", chunk_src)
+        self.assertIn("max_features=", chunk_src)
+
+    def test_dev_fast_never_uses_ogr2ogr_import_paths(self) -> None:
+        import inspect
+        from noise_artifacts.dev_fast import build_dev_fast_road_rail_grid
+
+        src = inspect.getsource(build_dev_fast_road_rail_grid)
+        self.assertNotIn("ingest_noise_normalized_ogr2ogr", src)
+        self.assertNotIn("_run_ogr2ogr_import", src)
+
+    def test_dev_fast_grid_uses_max_band_per_cell_key(self) -> None:
+        from shapely.geometry import box
+
+        from noise_artifacts.dev_fast import _add_geom_cells
+
+        acc = {}
+        touched_a = _add_geom_cells(
+            acc,
+            jurisdiction="roi",
+            source_type="road",
+            metric="Lden",
+            round_number=4,
+            report_period="Round 4",
+            db_low=45.0,
+            db_high=49.0,
+            db_value="45-49",
+            geom=box(0, 0, 10, 10),
+            grid_size_m=100,
+        )
+        touched_b = _add_geom_cells(
+            acc,
+            jurisdiction="roi",
+            source_type="road",
+            metric="Lden",
+            round_number=4,
+            report_period="Round 4",
+            db_low=70.0,
+            db_high=74.0,
+            db_value="70-74",
+            geom=box(0, 0, 10, 10),
+            grid_size_m=100,
+        )
+        self.assertEqual(touched_a, 1)
+        self.assertEqual(touched_b, 1)
+        self.assertEqual(len(acc), 1)
+        record = next(iter(acc.values()))
+        self.assertEqual(record.db_value, "70-74")
+        self.assertEqual(record.db_high, 74.0)
+
+    def test_dev_fast_rejects_tiny_grid_without_override(self) -> None:
+        from noise_artifacts.dev_fast import _validate_dev_fast_grid_size
+        from noise_artifacts.exceptions import NoiseIngestError
+
+        with patch.dict(
+            os.environ,
+            {
+                "NOISE_DEV_FAST_MIN_GRID_SIZE_M": "500",
+                "NOISE_ALLOW_TINY_NOISE_GRID": "0",
+            },
+            clear=False,
+        ):
+            with self.assertRaises(NoiseIngestError):
+                _validate_dev_fast_grid_size(250)
+
+    def test_dev_fast_allows_tiny_grid_when_override_enabled(self) -> None:
+        from noise_artifacts.dev_fast import _validate_dev_fast_grid_size
+
+        with patch.dict(
+            os.environ,
+            {
+                "NOISE_DEV_FAST_MIN_GRID_SIZE_M": "500",
+                "NOISE_ALLOW_TINY_NOISE_GRID": "1",
+            },
+            clear=False,
+        ):
+            _validate_dev_fast_grid_size(250)
+
+    def test_dev_fast_rejects_feature_bbox_grid_explosion(self) -> None:
+        from shapely.geometry import box
+
+        from noise_artifacts.dev_fast import _add_geom_cells
+        from noise_artifacts.exceptions import NoiseIngestError
+
+        with patch.dict(os.environ, {"NOISE_DEV_FAST_MAX_CELLS_PER_FEATURE": "10"}, clear=False):
+            with self.assertRaises(NoiseIngestError):
+                _add_geom_cells(
+                    {},
+                    jurisdiction="roi",
+                    source_type="road",
+                    metric="Lden",
+                    round_number=4,
+                    report_period="Round 4",
+                    db_low=55.0,
+                    db_high=59.0,
+                    db_value="55-59",
+                    geom=box(0, 0, 1000, 1000),
+                    grid_size_m=100,
+                )
+
+    def test_dev_fast_writes_only_occupied_cells(self) -> None:
+        from shapely.geometry import box
+
+        from noise_artifacts.dev_fast import _add_geom_cells
+
+        acc = {}
+        touched = _add_geom_cells(
+            acc,
+            jurisdiction="roi",
+            source_type="road",
+            metric="Lden",
+            round_number=4,
+            report_period="Round 4",
+            db_low=60.0,
+            db_high=64.0,
+            db_value="60-64",
+            geom=box(10, 10, 15, 15),
+            grid_size_m=100,
+        )
+        self.assertEqual(touched, 1)
+        self.assertEqual(len(acc), 1)
+
+    def test_dev_fast_materialization_enforces_exact_vs_grid_split(self) -> None:
+        import inspect
+        from noise_artifacts.dev_fast import materialize_dev_fast_resolved
+
+        src = inspect.getsource(materialize_dev_fast_resolved)
+        self.assertIn("source_type IN ('airport', 'industry')", src)
+        self.assertIn("source_type IN ('road', 'rail')", src)
+        self.assertIn("artifact_hash = :resolved_hash", src)
+        self.assertIn("FROM noise_grid_artifact", src)
+        self.assertIn("GROUP BY jurisdiction, source_type, metric, round_number", src)
+
+
+class NoiseGridArtifactIndexTests(TestCase):
+
+    def test_migration_000020_sets_unique_key_with_jurisdiction(self) -> None:
+        import importlib
+        import inspect
+
+        mod = importlib.import_module(
+            "db_postgis.migrations.versions.20260501_000020_fix_noise_grid_artifact_key"
+        )
+        src = inspect.getsource(mod)
+        self.assertIn("noise_grid_artifact_key_idx", src)
+        self.assertIn("jurisdiction", src)
+
+    def test_managed_schema_expects_jurisdiction_in_grid_index(self) -> None:
+        import db_postgis.schema as _schema
+
+        spec = next(
+            s for s in _schema._MANAGED_INDEX_SPECS
+            if s.index_name == "noise_grid_artifact_key_idx"
+        )
+        self.assertEqual(
+            spec.columns,
+            (
+                "artifact_hash",
+                "jurisdiction",
+                "source_type",
+                "metric",
+                "grid_size_m",
+                "cell_x",
+                "cell_y",
+            ),
+        )
+
+
 class BuilderTests(TestCase):
 
     def _make_engine_with_status(self, status=None):
@@ -493,17 +673,18 @@ class BuilderTests(TestCase):
             with patch("noise_artifacts.builder.mark_artifact_failed") as mock_fail:
                 with patch("noise_artifacts.builder.upsert_artifact"):
                     with patch("noise_artifacts.builder.record_lineage"):
-                        with self.assertRaises(RuntimeError):
-                            from noise_artifacts.builder import build_noise_artifact
-                            build_noise_artifact(
-                                engine,
-                                data_dir="/fake",
-                                domain_wgs84=MagicMock(),
-                                domain_wkb=b"\x00",
-                                source_hash="src",
-                                domain_hash="dom",
-                                resolved_hash="res",
-                            )
+                        with patch("noise_artifacts.builder._assert_disk_preflight", return_value=None):
+                            with self.assertRaises(RuntimeError):
+                                from noise_artifacts.builder import build_noise_artifact
+                                build_noise_artifact(
+                                    engine,
+                                    data_dir="/fake",
+                                    domain_wgs84=MagicMock(),
+                                    domain_wkb=b"\x00",
+                                    source_hash="src",
+                                    domain_hash="dom",
+                                    resolved_hash="res",
+                                )
                 # FIX 6: all three artifacts (resolved, source, domain) must be marked failed
                 self.assertEqual(mock_fail.call_count, 3)
                 for single_call in mock_fail.call_args_list:
@@ -554,6 +735,13 @@ class BuilderTests(TestCase):
         src = inspect.getsource(build_noise_artifact)
         self.assertIn("pg_advisory_lock", src)
         self.assertIn("pg_advisory_unlock", src)
+
+    def test_builder_dev_fast_asserts_no_road_rail_normalized_rows(self) -> None:
+        import inspect
+        from noise_artifacts.builder import build_noise_artifact
+
+        src = inspect.getsource(build_noise_artifact)
+        self.assertIn("_assert_no_dev_fast_road_rail_normalized", src)
 
 
 class IngestSqlTests(TestCase):
@@ -1056,17 +1244,19 @@ class BuilderProgressTests(TestCase):
                             with patch("noise_artifacts.builder.record_lineage"):
                                 with patch("noise_artifacts.builder.upsert_artifact"):
                                     with patch("noise_artifacts.builder.drop_staging_tables"):
-                                        from noise_artifacts.builder import build_noise_artifact
-                                        build_noise_artifact(
-                                            engine,
-                                            data_dir="/fake",
-                                            domain_wgs84=MagicMock(),
-                                            domain_wkb=b"\x00",
-                                            source_hash="src",
-                                            domain_hash="dom",
-                                            resolved_hash="res",
-                                            progress_cb=fake_progress,
-                                        )
+                                        with patch("noise_artifacts.builder._assert_disk_preflight", return_value=None):
+                                            from noise_artifacts.builder import build_noise_artifact
+                                            build_noise_artifact(
+                                                engine,
+                                                data_dir="/fake",
+                                                domain_wgs84=MagicMock(),
+                                                domain_wkb=b"\x00",
+                                                source_hash="src",
+                                                domain_hash="dom",
+                                                resolved_hash="res",
+                                                noise_accuracy_mode="accurate",
+                                                progress_cb=fake_progress,
+                                            )
 
         joined = " | ".join(messages)
         self.assertTrue(any("ingest start" in m for m in messages), f"missing 'ingest start' in: {joined}")

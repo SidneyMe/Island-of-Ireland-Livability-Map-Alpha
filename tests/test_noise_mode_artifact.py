@@ -351,6 +351,88 @@ class WorkflowArtifactHashTests(TestCase):
         self.assertNotEqual(res_a, res_b)
 
 
+class NoiseArtifactIdentityPayloadTests(TestCase):
+
+    def _resolved_hash(self, *, mode: str, grid_size: int, simplify_m: float, rounds: dict[str, int]) -> str:
+        from noise_artifacts.manifest import noise_resolved_hash
+
+        return noise_resolved_hash(
+            "src123",
+            "dom123",
+            1,
+            1,
+            1,
+            0.1,
+            identity_payload={
+                "accuracy_mode_version": 1,
+                "noise_accuracy_mode": mode,
+                "noise_grid_size_m": int(grid_size),
+                "noise_accurate_simplify_m": float(simplify_m),
+                "latest_rounds_by_group": dict(rounds),
+            },
+        )
+
+    def test_identity_differs_for_dev_fast_vs_accurate(self) -> None:
+        h1 = self._resolved_hash(
+            mode="dev_fast",
+            grid_size=1000,
+            simplify_m=25.0,
+            rounds={"roi:road": 4, "ni:road": 3},
+        )
+        h2 = self._resolved_hash(
+            mode="accurate",
+            grid_size=1000,
+            simplify_m=25.0,
+            rounds={"roi:road": 4, "ni:road": 3},
+        )
+        self.assertNotEqual(h1, h2)
+
+    def test_identity_differs_for_grid_size_changes(self) -> None:
+        h1 = self._resolved_hash(
+            mode="dev_fast",
+            grid_size=1000,
+            simplify_m=25.0,
+            rounds={"roi:road": 4, "ni:road": 3},
+        )
+        h2 = self._resolved_hash(
+            mode="dev_fast",
+            grid_size=500,
+            simplify_m=25.0,
+            rounds={"roi:road": 4, "ni:road": 3},
+        )
+        self.assertNotEqual(h1, h2)
+
+    def test_identity_differs_for_simplify_tolerance_changes(self) -> None:
+        h1 = self._resolved_hash(
+            mode="accurate",
+            grid_size=1000,
+            simplify_m=25.0,
+            rounds={"roi:road": 4, "ni:road": 3},
+        )
+        h2 = self._resolved_hash(
+            mode="accurate",
+            grid_size=1000,
+            simplify_m=10.0,
+            rounds={"roi:road": 4, "ni:road": 3},
+        )
+        self.assertNotEqual(h1, h2)
+
+    def test_identity_differs_for_latest_round_metadata_changes(self) -> None:
+        h1 = self._resolved_hash(
+            mode="dev_fast",
+            grid_size=1000,
+            simplify_m=25.0,
+            rounds={"roi:road": 4, "ni:road": 3},
+        )
+        h2 = self._resolved_hash(
+            mode="dev_fast",
+            grid_size=1000,
+            simplify_m=25.0,
+            rounds={"roi:road": 3, "ni:road": 3},
+        )
+        self.assertNotEqual(h1, h2)
+
+
 class MigrationArtifactRefTests(TestCase):
 
     def test_migration_000016_correct_down_revision(self) -> None:
