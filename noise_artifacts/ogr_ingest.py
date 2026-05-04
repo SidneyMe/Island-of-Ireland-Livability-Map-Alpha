@@ -502,6 +502,11 @@ def _build_ogr2ogr_gdb_to_gpkg_command(
     cache_gpkg_path: Path,
     selected_fields: list[str],
 ) -> list[str]:
+    if not selected_fields:
+        raise NoiseIngestError(
+            "Road GDB canonical extract requires explicit selected_fields; "
+            "refusing full-field FileGDB extraction."
+        )
     cmd = [
         "ogr2ogr",
         # Skip GDAL's slow polygon containment analysis for source features
@@ -524,11 +529,9 @@ def _build_ogr2ogr_gdb_to_gpkg_command(
         "EPSG:2157",
         "-nlt",
         "PROMOTE_TO_MULTI",
-        "-makevalid",
         "-progress",
     ]
-    if selected_fields:
-        cmd.extend(["-select", ",".join(selected_fields)])
+    cmd.extend(["-select", ",".join(selected_fields)])
     return cmd
 
 
@@ -969,6 +972,7 @@ def _run_ogr2ogr_command(
     target_label: str,
     progress_cb=None,
     timeout_seconds: float | None = None,
+    no_progress_timeout_seconds: float | None = None,
     operation_context: str | None = None,
 ) -> None:
     safe_cmd = _redact_pg_password(cmd)
@@ -1017,14 +1021,18 @@ def _run_ogr2ogr_command(
         if timeout_seconds is not None and float(timeout_seconds) > 0.0
         else _ogr2ogr_timeout_seconds()
     )
-    idle_timeout = _ogr2ogr_idle_timeout_seconds()
+    idle_timeout = (
+        float(no_progress_timeout_seconds)
+        if no_progress_timeout_seconds is not None
+        else _ogr2ogr_idle_timeout_seconds()
+    )
     _progress_event(
         progress_cb,
         phase="ogr2ogr_start",
         source=source_name,
         target=target_label,
         timeout_s=int(effective_timeout),
-        no_progress_timeout_s=int(idle_timeout),
+        no_progress_timeout_s=("disabled" if idle_timeout <= 0.0 else int(idle_timeout)),
         context=context_label,
     )
 
@@ -1051,12 +1059,13 @@ def _run_ogr2ogr_command(
             if (now - last_heartbeat) >= 30.0 and proc.poll() is None:
                 last_output_age = max(now - last_output_at, 0.0)
                 pid = getattr(proc, "pid", "unknown")
+                idle_label = "disabled" if idle_timeout <= 0.0 else _format_elapsed(idle_timeout)
                 _progress(
                     progress_cb,
                     "ogr2ogr still running: "
                     f"pid={pid} source={source_name} target={target_label} "
                     f"elapsed={_format_elapsed(elapsed)} timeout={_format_elapsed(effective_timeout)} "
-                    f"idle_timeout={_format_elapsed(idle_timeout)} last_output_age={int(last_output_age)}s "
+                    f"idle_timeout={idle_label} last_output_age={int(last_output_age)}s "
                     f"last_line={last_output_line or '(none)'} context={context_label}",
                 )
                 _progress_event(
@@ -1071,7 +1080,7 @@ def _run_ogr2ogr_command(
                 )
                 last_heartbeat = now
 
-            if (now - last_output_at) > idle_timeout and proc.poll() is None:
+            if idle_timeout > 0.0 and (now - last_output_at) > idle_timeout and proc.poll() is None:
                 _kill_process_tree_windows(proc, context_label=context_label, progress_cb=progress_cb)
                 _terminate_ogr_process(proc, context_label=context_label, progress_cb=progress_cb)
                 _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
@@ -1254,6 +1263,7 @@ def _run_road_gdb_canonical_extraction(
             target_label=str(cache_gpkg_path),
             progress_cb=progress_cb,
             timeout_seconds=_ogr2ogr_timeout_seconds(road_gdb_chunk=True),
+            no_progress_timeout_seconds=0.0,
             operation_context=f"road-gdb-canonical-extract layer={layer_name}",
         )
     except Exception:

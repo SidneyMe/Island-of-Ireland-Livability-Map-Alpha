@@ -58,6 +58,7 @@ def dissolve_noise_into_staging(
     resolved_hash: str,
     tile_size_metres: float = 10_000.0,
     topology_grid_metres: float = 0.1,
+    simplify_tolerance_m: float | None = None,
     progress_cb=None,
 ) -> tuple[str, str]:
     """
@@ -81,6 +82,7 @@ def dissolve_noise_into_staging(
             source_hash=source_hash,
             tile_size_metres=tile_size_metres,
             topology_grid_metres=topology_grid_metres,
+            simplify_tolerance_m=float(simplify_tolerance_m or 0.0),
             use_square_grid=use_square_grid,
         )
         _timing(progress_cb, "dissolve.pass1", time.perf_counter() - pass1_started)
@@ -153,6 +155,7 @@ def _pass1_dissolve(
     source_hash: str,
     tile_size_metres: float,
     topology_grid_metres: float,
+    simplify_tolerance_m: float,
     use_square_grid: bool,
 ) -> int:
     """Dissolve within processing tiles (EPSG:2157 grid)."""
@@ -180,10 +183,38 @@ def _pass1_dissolve(
     result = conn.execute(
         text(
             f"""
-            WITH domain_bounds AS (
-                SELECT ST_Extent(geom)::geometry AS ext
+            WITH source_rows AS (
+                SELECT
+                    jurisdiction,
+                    source_type,
+                    metric,
+                    round_number,
+                    report_period,
+                    db_low,
+                    db_high,
+                    db_value,
+                    source_dataset,
+                    source_layer,
+                    source_ref,
+                    CASE
+                        WHEN :simplify_m > 0
+                             AND source_type IN ('road', 'rail')
+                        THEN ST_Multi(ST_CollectionExtract(
+                            ST_MakeValid(
+                                ST_SimplifyPreserveTopology(geom, :simplify_m)
+                            ),
+                            3
+                        ))
+                        ELSE geom
+                    END AS geom
                 FROM noise_normalized
                 WHERE noise_source_hash = :source_hash
+            ),
+            domain_bounds AS (
+                SELECT ST_Extent(geom)::geometry AS ext
+                FROM source_rows
+                WHERE geom IS NOT NULL
+                  AND NOT ST_IsEmpty(geom)
             ),
             {grid_cte},
             tiled AS (
@@ -198,13 +229,12 @@ def _pass1_dissolve(
                         )),
                         :topology_grid_m
                     ) AS tiled_geom
-                FROM noise_normalized n
+                FROM source_rows n
                 JOIN processing_grid g ON n.geom && g.tile_geom
                 JOIN LATERAL (
                     SELECT ST_Intersection(n.geom, g.tile_geom) AS ix
                 ) i ON true
-                WHERE n.noise_source_hash = :source_hash
-                  AND i.ix IS NOT NULL
+                WHERE i.ix IS NOT NULL
                   AND NOT ST_IsEmpty(i.ix)
                   AND ST_Area(i.ix) > 0
             ),
@@ -247,6 +277,7 @@ def _pass1_dissolve(
             "source_hash": source_hash,
             "tile_size_m": tile_size_metres,
             "topology_grid_m": topology_grid_metres,
+            "simplify_m": float(simplify_tolerance_m),
         },
     )
     return max(int(result.rowcount or 0), 0)

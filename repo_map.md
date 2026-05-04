@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-05-01. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-05-04. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -10,7 +10,7 @@
 - Shops, healthcare, and parks now use tiered score units instead of flat presence counts. Examples: corner shop vs supermarket, clinic vs emergency hospital, pocket park vs regional park. (Confirmed)
 - Ingests local OSM PBF via `osm2pgsql`, GTFS feeds (NTA, Translink), and optionally an Overture Places geoparquet dataset. (Confirmed)
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
-- Publishes results to PostGIS plus a PMTiles archive so the frontend can run without live tile SQL queries. (Confirmed)
+- Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
 - Adds a display-only official environmental-noise overlay from ROI EPA and NI OpenDataNI rounds using Lden / Lnight contours, with newest-round polygons masking older fallback geometry. This does not feed livability scoring yet. (Confirmed)
 - Uses layered content hashes so changes to geometry, scoring params, GTFS feeds, Overture data, or importer config only invalidate the affected cache tiers. (Confirmed)
@@ -34,7 +34,7 @@
 - **Lightweight GTFS refresh CLI path**: `transit_refresh_runner.py`
 - **Pipeline ETA and timing history**: `progress_tracker.py`
 - **Rust walkgraph binary**: `walkgraph/`
-- **PMTiles bake**: `precompute/bake_pmtiles.py`, `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py`
+- **PMTiles bake**: `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py`, `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py`
 - **Runtime HTTP server**: `serve_from_db.py`
 - **Frontend source**: `frontend/src/`
 - **Frontend grid diagnostics helper**: `frontend/src/grid_debug.js`
@@ -90,7 +90,7 @@
 ### `scripts/win/run_noise_precompute_watchdog.ps1`
 
 - Windows wrapper for noise-focused dev precompute with enforced wall-clock timeout. (Confirmed)
-- Runs `scripts/win/geo_env.cmd` with project `.venv` Python and explicit mode selection: `DevReuse` (reuse-only fast path, never rebuilds), `DevPrepare` (slow dev-fast artifact build/reimport), and `AccuratePrepare` (slow accurate artifact build/reimport). (Confirmed)
+- Runs `scripts/win/geo_env.cmd` with project `.venv` Python and explicit mode selection: `DevReuse` / `AccurateReuse` (reuse-only fast paths, never rebuild), `DevPrepare` / `AccuratePrepare` (cache-aware refresh paths), and `DevForce` / `AccurateForce` (source reimport + resolved rebuild paths). (Confirmed)
 - On timeout, kills the spawned process tree (and attempts cleanup of lingering `ogr2ogr` processes) and returns exit code `124`. (Confirmed)
 
 ---
@@ -138,10 +138,12 @@
    -> precompute/bake_pmtiles.py
    -> pmtiles_bake_worker.py + fine_vector_pmtiles_worker.py subprocesses
    -> coarse SQL MVT through z11, sparse fine vector grid at z12-z15
-   -> noise MVT layer from noise_polygons, with noise-derived high-zoom tile coords included even when no point layer is present
-   -> PMTiles archive source max zoom capped at 15
+   -> main PMTiles excludes noise by default
+   -> noise_artifacts/bake.py writes a separate noise-only archive from noise_polygons with source-layer `noise`
+   -> PMTiles archive source max zoom capped at 15; profile noise caps default to z10 for dev and z13 for full/test
    -> bounded in-flight worker queue, fine-grid worker cap of 4, retry-smaller-on-pool-failure, temp output staging that preserves the previous archive on failure
    -> .livability_cache/livability[(-dev|-test)].pmtiles
+   -> .livability_cache/noise[(-dev|-test)].pmtiles
 
 7. Runtime serve
    python main.py --serve
@@ -152,6 +154,8 @@
      GET /api/inspect
      GET /tiles/livability.pmtiles
      GET /tiles/livability-test.pmtiles
+     GET /tiles/noise.pmtiles
+     GET /tiles/noise-test.pmtiles
      GET /tiles/surface/{resolution}/{z}/{x}/{y}.png
      GET /exports/transport-reality.zip
 
@@ -160,7 +164,7 @@
   -> reads PMTiles through pmtiles://
   -> reads runtime JSON from /api/runtime
   -> renders one active vector grid fill+outline pair, recreates those layers when the zoom band changes, and overzooms z15 source tiles to z19
-  -> exposes a default-off Noise panel with Lden / Lnight, source-type, and dB-band filters backed by the `noise` PMTiles source-layer
+  -> exposes a default-off Noise panel with Lden / Lnight, source-type, and dB-band filters backed by the separate `noise` vector source and its `noise` source-layer
   -> the fixed control panel now scrolls internally when its contents exceed the viewport height, so stacked debug + amenity controls stay reachable
   -> the transport panel now presents public transport tiers: base `calendar.txt` weekly bus-pattern filters (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`), bus frequency tier filters (`Frequent`, `Moderate`, `Low frequency`, `Very low frequency`, `Token / skeletal`), GTFS mode filters (`Tram`, `Rail`), and a strict `calendar_dates`-only intersection filter; tram/rail-only popups show their mode tier instead of a missing bus tier; popups also expose bus headway, commute, Friday-evening, and score-unit frequency fields
   -> `/?debug-grid=1` now opt-in reveals a persistent control-panel `Grid debug` card with live source-vs-rendered counts, layer/source state, a diagnosis line, and a copyable plain-text snapshot; the status pill is reserved for actual runtime errors
@@ -186,10 +190,10 @@ Notes:
 | Amenity tiering | `config.py` tier constants, `precompute/amenity_tiers.py` | `precompute/phases.py`, `precompute/publish.py` | None |
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
-| Noise overlay source handling | `noise/loader.py` | `noise_polygons`, `noise` PMTiles layer, `/api/runtime` noise counts | `noise_datasets/*.zip` local inputs |
+| Noise overlay source handling | `noise/loader.py`, `noise_artifacts/*` | `noise_polygons`, separate `noise` PMTiles archive, `/api/runtime` noise counts + `noise_pmtiles_url` | `noise_datasets/*.zip` local inputs |
 | Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB canonical pipeline (FileGDB -> local GPKG cache -> one PG stage import -> batch normalize), SQL timeouts, disk preflight (cache + PostgreSQL `data_directory`) | `NOISE_ROAD_GDB_CANONICAL_CACHE`, `NOISE_REBUILD_ROAD_GDB_CACHE`, `NOISE_ROAD_NORMALIZE_BATCH_SIZE`, `NOISE_SQL_*`, `NOISE_MIN_FREE_DISK_GB` |
 | Precompute orchestration | `precompute/workflow.py` | `precompute/__init__.py` | None |
-| PMTiles layer metadata | `precompute/bake_pmtiles.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
+| PMTiles layer metadata | `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` |
 | Progress / ETA behavior | `progress_tracker.py` | `precompute/workflow.py`, `precompute/__init__.py` | `.livability_cache/precompute_timing_stats.json` |
@@ -252,7 +256,7 @@ Notes:
 ### `precompute/workflow.py`
 
 - Purpose: injected orchestration for import refresh and full precompute. (Confirmed)
-- Why it matters: contains the short-circuit logic for reusing completed builds, rebaking PMTiles only, or rebuilding fine surface only. Also owns tracker injection and timing persistence. (Confirmed)
+- Why it matters: contains the short-circuit logic for reusing completed builds, refreshing noise-only rows when the selected artifact hash changes or noise refresh flags are used, rebaking PMTiles only, or rebuilding fine surface only. Also owns tracker injection and timing persistence. (Confirmed)
 - Main functions: `run_import_refresh_impl()`, `run_precompute_impl()`
 - LOC: 454
 
@@ -294,12 +298,18 @@ Notes:
 ### `precompute/bake_pmtiles.py`
 
 - Purpose: PMTiles bake orchestrator and layer metadata owner. (Confirmed)
-- Why it matters: owns `GRID_AMENITY_CATEGORIES`, `_pmtiles_metadata()`, the z15 source-zoom cap, and the sparse fine-grid / noise tile-spec planner that stitches coarse SQL tiles together with fine vector grid tiles and noise-only high-zoom tiles. It now also bounds parallel in-flight work, clamps fine-grid bakes to 4 workers, retries once at half workers after `BrokenProcessPool`, and only replaces the final PMTiles archive after a successful temp-file finalize. Tests import these directly. (Confirmed)
+- Why it matters: owns `GRID_AMENITY_CATEGORIES`, `_pmtiles_metadata()`, the z15 source-zoom cap, and the sparse fine-grid tile-spec planner that stitches coarse SQL tiles together with fine vector grid tiles. Noise is no longer declared or baked into the main livability archive. It also bounds parallel in-flight work, clamps fine-grid bakes to 4 workers, retries once at half workers after `BrokenProcessPool`, and only replaces the final PMTiles archive after a successful temp-file finalize. Tests import these directly. (Confirmed)
 - The amenities layer metadata declares `category`, `tier`, `name`, and `conflict_class`. (Confirmed from tests and code)
 - The transport layer metadata now declares weekly bus subtier / mask fields, bus daytime frequency fields, comma-separated `route_modes`, numeric `0/1` transport flags, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`; the frontend uses `route_modes` for exact rail/tram filtering and `bus_frequency_tier` for bus-frequency filtering, and the worker SQL emits one feature per published `transport_reality` row instead of grouping same-name same-coordinate stops. (Confirmed from code and tests)
 - The `grid` source-layer now carries both coarse and fine features, with fine rows padded with zero-valued popup numerics so metadata and popup consumers stay schema-stable. (Confirmed from code and tests)
+- LOC: 818
+
+### `noise_artifacts/bake.py`
+
+- Purpose: standalone noise PMTiles bake from published `noise_polygons`. (Confirmed)
+- Why it matters: writes `noise[(-dev|-test)].pmtiles` with only the `noise` vector layer, removes stale noise archives when no rows exist, and reuses the lightweight `pmtiles_bake_worker.py` noise tile SQL so main PMTiles bakes stay noise-free. (Confirmed from code and tests)
 - The `noise` source-layer declares jurisdiction, source type, metric, round/report period, dB band/value, source dataset/layer/ref fields, and starts at z8. (Confirmed from code and tests)
-- LOC: 856
+- LOC: 344
 
 ### `fine_vector_pmtiles_worker.py`
 
@@ -314,8 +324,8 @@ Notes:
 - Why it matters: import isolation is a hard constraint on Windows spawn. Heavy imports here can blow memory for parallel bake workers. It now remains the coarse SQL worker while fine-grid geometry encoding lives in `fine_vector_pmtiles_worker.py`. (Confirmed from module docstring and code)
 - Main functions: `_bake_chunk_worker()`, `_tile_mvt_bytes_by_flags()`, `_resolution_for_zoom()`
 - `_resolution_for_zoom()` only handles coarse vector tiers: `5000`, `10000`, `20000`. It is not the same as `config.resolution_for_zoom()`. (Confirmed)
-- Also emits the SQL-backed `noise` MVT source-layer; keep GIS readers out of this file so subprocess imports stay light. (Confirmed)
-- LOC: 400
+- Also exposes the SQL-backed `noise` MVT helper used by the standalone noise PMTiles bake; keep GIS readers out of this file so subprocess imports stay light. (Confirmed)
+- LOC: 425
 
 ### `serve_from_db.py`
 
@@ -326,7 +336,7 @@ Notes:
   - `coarse_vector_resolutions`, `fine_resolutions`, `surface_zoom_breaks`
   - `amenity_counts`, `amenity_tier_counts`
   - `transport_subtier_counts`, `transport_bus_frequency_counts`, `transport_flag_counts`, `transport_mode_counts`
-  - `noise_enabled`, `noise_counts`, `noise_source_counts`, `noise_metric_counts`, `noise_band_counts`
+  - `noise_enabled`, `noise_counts`, `noise_source_counts`, `noise_metric_counts`, `noise_band_counts`, `noise_pmtiles_url`
   - `fine_surface_enabled`
   - `surface_shell_dir`, `surface_score_dir`, `surface_tile_dir`
   - `transport_reality_enabled`, `service_deserts_enabled`
@@ -334,8 +344,8 @@ Notes:
   - `transit_analysis_date`, `transit_analysis_window_days`, `transit_service_desert_window_days`
   - `overture_dataset`
 - `/api/runtime` still reports `surface_zoom_breaks`, `fine_resolutions_m`, `fine_surface_enabled`, `inspect_url`, and `max_zoom=19`, but it no longer advertises `surface_tile_url_template`; the main render path is now vector-only. Expected client aborts on `/api/inspect` are suppressed from server logs the same way PMTiles range disconnects are, while `/` and `/static/*` now ship with `Cache-Control: no-store` so rebuilt local frontend assets are not silently cached between reloads. (Confirmed from code and tests)
-- `/api/runtime` includes noise overlay availability and filter counts for jurisdiction, source type, metric, and dB band. (Confirmed from code and tests)
-- LOC: 758
+- `/api/runtime` includes noise overlay availability, `noise_pmtiles_url` for the separate overlay archive, and filter counts for jurisdiction, source type, metric, and dB band; when no noise rows/archive are available it reports `noise_enabled=false` and `noise_pmtiles_url=null`. (Confirmed from code and tests)
+- LOC: 791
 
 ### `db_postgis/tables.py`
 
@@ -518,6 +528,10 @@ tests/test_server_behavior.py
 | `OSM2PGSQL_BIN` | osm2pgsql binary path | `"osm2pgsql"` |
 | `NOISE_ROAD_GDB_CANONICAL_CACHE` | Enable ROI Round 4 Road canonical FileGDB -> local GPKG extraction cache path | `"1"` |
 | `NOISE_REBUILD_ROAD_GDB_CACHE` | Force rebuild of canonical Road GDB GPKG cache before PG import | `"0"` |
+| `NOISE_REBUILD_DEV_FAST_GRID` | Force rebuild of the deterministic dev-fast road/rail grid cache | `"0"` |
+| `NOISE_DEV_FAST_ARROW_BATCH_SIZE` | Batch size for Arrow streaming in dev-fast road/rail reads; lowering reduces peak memory | `16384` |
+| `NOISE_DEV_FAST_PARALLEL_SPECS` | Enable parallel dev-fast road/rail source processing | `"1"` |
+| `NOISE_DEV_FAST_MAX_WORKERS` | Cap worker threads when `NOISE_DEV_FAST_PARALLEL_SPECS=1` | `2` |
 | `NOISE_ROAD_NORMALIZE_BATCH_SIZE` | Batch size for Road raw-stage normalization by `source_fid` | `5000` |
 | `NOISE_OGR2OGR_TIMEOUT_SECONDS` | Hard timeout for every `ogr2ogr` subprocess import (non-road defaults to 300s, small SHP can fail fast) | `300` |
 | `NOISE_SQL_STATEMENT_TIMEOUT_SECONDS` | Per-normalize statement timeout for heavy SQL | `900` |
@@ -538,10 +552,12 @@ tests/test_server_behavior.py
 | `scripts/win/bootstrap_geo_env.cmd` | Windows first-time setup wrapper: activates conda base, creates `%GEO_CONDA_ENV%` from `environment.yml` via mamba when missing, then runs env checks |
 | `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
 | `scripts/win/selftest_geo_env.cmd` | Windows post-check smoke script for `ogr2ogr` path, GDAL/PROJ env vars, PostgreSQL GDAL driver, and core Python imports |
-| `scripts/win/precompute_noise_dev.cmd` | Windows fast DevReuse wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevReuse`; requires an existing mode-matched resolved artifact and never rebuilds noise artifacts |
-| `scripts/win/prepare_noise_artifact_dev.cmd` | Windows slow dev-fast artifact build/reimport wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevPrepare` |
-| `scripts/win/prepare_noise_artifact_accurate.cmd` | Windows slow accurate artifact build/reimport wrapper via `run_noise_precompute_watchdog.ps1 -Mode AccuratePrepare` |
-| `scripts/win/precompute_noise_accurate.cmd` | Compatibility wrapper that maps to `run_noise_precompute_watchdog.ps1 -Mode AccuratePrepare` |
+| `scripts/win/precompute_noise_dev.cmd` | Windows fast DevReuse wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevReuse`; requires an existing mode-matched resolved artifact and never passes `--force-precompute` |
+| `scripts/win/prepare_noise_artifact_dev.cmd` | Windows dev-fast cache-aware artifact refresh wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevPrepare`; builds when missing/stale without forcing source reimport or amenities/grids |
+| `scripts/win/prepare_noise_artifact_accurate.cmd` | Windows accurate cache-aware artifact refresh wrapper via `run_noise_precompute_watchdog.ps1 -Mode AccuratePrepare`; builds when missing/stale without forcing source reimport or amenities/grids |
+| `scripts/win/force_noise_artifact_dev.cmd` | Windows dev-fast full artifact rebuild wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevForce`; forces source reimport + resolved rebuild without forcing amenities/grids |
+| `scripts/win/force_noise_artifact_accurate.cmd` | Windows accurate full artifact rebuild wrapper via `run_noise_precompute_watchdog.ps1 -Mode AccurateForce`; forces source reimport + resolved rebuild without forcing amenities/grids |
+| `scripts/win/precompute_noise_accurate.cmd` | Windows fast AccurateReuse wrapper via `run_noise_precompute_watchdog.ps1 -Mode AccurateReuse`; requires an existing accurate resolved artifact |
 | `scripts/win/test_noise.cmd` | Windows targeted noise test wrapper via `geo_env.cmd` |
 | `pytest.ini` | Pytest collection scope and generated-directory exclusions |
 | `frontend/package.json` | Frontend dependency and build scripts |
@@ -554,7 +570,7 @@ tests/test_server_behavior.py
 | `--refresh-import` | local OSM PBF + `osm2pgsql` available |
 | `--refresh-transit` | GTFS zips or URLs + compiled `walkgraph` with `gtfs-refresh` support |
 | `--precompute` | managed schema ready, raw import ready or `--auto-refresh-import`, boundaries present, compiled `walkgraph` |
-| `--serve` | completed precompute build and PMTiles archive for the chosen profile |
+| `--serve` | completed precompute build and main PMTiles archive for the chosen profile; noise PMTiles is optional and advertised only when available |
 | Overture merge | `overture/ireland_places.geoparquet` present; otherwise it degrades gracefully |
 | Noise overlay | `noise_datasets/*.zip` present for published contours; ROI Round 4 road requires `pyogrio`/GDAL FileGDB support |
 
@@ -582,7 +598,9 @@ tests/test_server_behavior.py
 - NI Round 1 shapefiles are class-coded (`GRIDCODE` 1..7 with `Noise_Cl` labels), not threshold-coded. Reusing threshold arithmetic on Round 1 creates invalid synthetic labels like `2-6`.
 - Noise artifact ingest now stages rows in a temp table (`noise_ingest_stage_*`) and then runs SQL geometry normalization (`ST_GeomFromWKB` -> `ST_Transform` -> `ST_MakeValid`) instead of building giant 500-row inline `VALUES` statements with huge WKB hex params.
 - Noise force semantics are split: resolved rebuild (`--force-noise-artifact`) is separate from source re-import (`--reimport-noise-source`), and `--force-noise-all` does both.
-- `scripts/win/precompute_noise_dev.cmd` is now strict DevReuse: it requires a prebuilt mode-matched artifact and fails fast when missing. Use `scripts/win/prepare_noise_artifact_dev.cmd` or `scripts/win/prepare_noise_artifact_accurate.cmd` for slow build/reimport workflows.
+- Accurate noise mode reads all available rounds and applies road/rail simplification only inside the dissolve CTE; canonical `noise_normalized` rows must not be updated in place.
+- Dev-fast road/rail grid rows are cached under a deterministic grid artifact hash derived from source hash, grid size, latest-round metadata, and grid algorithm version; `NOISE_REBUILD_DEV_FAST_GRID=1` is the escape hatch.
+- `scripts/win/precompute_noise_dev.cmd` and `scripts/win/precompute_noise_accurate.cmd` are strict reuse wrappers: they require a prebuilt mode-matched artifact and fail fast when missing. `scripts/win/prepare_noise_artifact_dev.cmd` and `scripts/win/prepare_noise_artifact_accurate.cmd` are cache-aware refresh wrappers; use `scripts/win/force_noise_artifact_dev.cmd` or `scripts/win/force_noise_artifact_accurate.cmd` for full source reimport + resolved rebuild workflows.
 - `progress_tracker.py` is intentionally defensive. If tracking breaks, the build keeps going, so ETA regressions can hide without breaking tests.
 - Reachability large-cache recovery is mixed-format now: `{key}.pkl(.gz)` is the base snapshot and `{key}.chunks.pkl(.gz)` is an overlay journal. If you touch cache loaders, preserve that merge order and fallback behavior.
 - Reachability origin-node helpers now assume a split contract: `normalize_origin_node_ids(...)` produces sorted unique lists, and `merge_normalized_origin_node_ids(...)` unions already-normalized lists. Do not fall back to `sorted(set(...))` on multi-million origin sequences.
@@ -605,14 +623,14 @@ Representative tests confirmed present:
 | `tests/test_precompute_cache.py` | tier cache read / write / invalidation helpers |
 | `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier` exposure, bounded parallel scheduling, retry behavior, temp-output cleanup, and old-archive preservation on failure |
 | `tests/test_noise_loader.py` | ROI dB field normalization plus round-aware NI mapping (Round 1 class-code handling, Round 2/3 threshold mapping, unknown-code errors), and newest-round fallback geometry |
-| `tests/test_noise_artifacts.py` | manifest SQL safety checks (`CAST(:error_detail AS text)`), ingest pre-validation diagnostics, and streaming ingest behavior (no full candidate-list materialization) |
+| `tests/test_noise_artifacts.py` | manifest SQL safety checks (`CAST(:error_detail AS text)`), ingest pre-validation diagnostics, streaming ingest behavior, deterministic dev-fast grid cache identity, and non-mutating accurate simplification |
 | `tests/test_fine_vector_pmtiles_worker.py` | fine-grid shard aggregation, degenerate buffered-ring rejection, encoded per-zoom resolutions, mixed z15 resolutions, invalid-land skipping, buffered border-cell continuity, worker cache bounds/reset behavior |
 | `tests/test_progress_tracker.py` | timing-history sanitization and persistence |
-| `tests/test_server_behavior.py` | runtime API shape, transport subtier/mode count exposure, noise count exposure, and range serving |
+| `tests/test_server_behavior.py` | runtime API shape, transport subtier/mode count exposure, noise count/PMTiles URL exposure, and range serving for main + noise PMTiles |
 | `tests/test_transit_phase1.py` | GTFS-first transit reality rows, weekly bus subtiers, bus daytime headway buckets, frequency departure windows, transport score units, exact local GTFS snapshot stop regressions for each bus-tier bucket plus strict exception-only / unscheduled examples, exports, school-only classification, `gtfs-refresh` artifact loading |
 | `tests/test_surface_runtime.py` | fine-surface runtime behavior |
 | `tests/test_sanity_check.py` | sanity fixture structure and runtime lookup mode selection |
-| `frontend/src/runtime_contract.test.js` | frontend runtime contract parsing, active fill/outline grid layer definitions, lifecycle rebuild decisions, explicit visibility plans, the transport rail/tram styling priority, and the single active debug-grid filter path |
+| `frontend/src/runtime_contract.test.js` | frontend runtime contract parsing, separate noise vector source wiring, active fill/outline grid layer definitions, lifecycle rebuild decisions, explicit visibility plans, the transport rail/tram styling priority, and the single active debug-grid filter path |
 | `frontend/src/grid_debug.test.js` | persistent grid debug card rendering, diagnosis states, resolution display updates, and copyable snapshot formatting |
 | `frontend/src/transport_filters.test.js` | public transport filter logic including weekly bus tiers, exact rail/tram mode matching, and exception-only intersection logic |
 | `frontend/src/noise_filters.test.js` | noise metric/source/band options and MapLibre filter expression construction |
@@ -649,7 +667,7 @@ Areas still relatively fragile:
 | Grid cell | Scored polygon unit at a given resolution |
 | Coarse vector resolution | `20000`, `10000`, or `5000` meter grid published to PMTiles |
 | Fine vector resolution | `2500`, `1000`, `500`, `250`, `100`, `50` meter grid features baked into PMTiles and overzoomed at runtime |
-| PMTiles | Single-file vector tile archive served over HTTP range requests |
+| PMTiles | Single-file vector tile archive served over HTTP range requests; this app now writes separate main livability and optional noise archives |
 | MVT | Mapbox Vector Tile bytes emitted from PostGIS `ST_AsMVT` |
 | CAPS | Per-category score ceilings: `{"shops": 6, "transport": 5, "healthcare": 5, "parks": 5}` |
 | Amenity tier | Stored subtype such as `corner`, `supermarket`, `clinic`, `regional` |
@@ -703,10 +721,11 @@ Areas still relatively fragile:
 ### `noise_artifacts/ogr_ingest.py`
 
 - Purpose: high-throughput raw source import path using GDAL `ogr2ogr` direct to PostGIS staging tables.
-- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `--config PG_USE_COPY YES`, `-preserve_fid`, `-lco PRECISION=NO`, `-makevalid` pre-validation in ogr2ogr import/extract paths, and SQL normalization into `noise_normalized`.
+- Includes `ogr2ogr_available()`, command builder, source ZIP extraction cache (`.livability_cache/noise_gdal`), per-layer import timing, field discovery (`pyogrio` with `fiona` fallback), case-insensitive ROI/NI allowlist field selection, geometry-metadata denylisting (`shape_*` variants), `--config PG_USE_COPY YES`, `-preserve_fid`, `-lco PRECISION=NO`, selective `-makevalid` use (kept on normal import/fallback paths, removed from ROI Road FileGDB -> canonical GPKG extract), and SQL normalization into `noise_normalized`.
+- Road FileGDB canonical extraction now requires explicit non-empty `selected_fields`; full-field canonical extracts are rejected to avoid runaway FileGDB reads.
 - ROI Round 4 Road FileGDB now uses a canonical three-phase path: extract once to local GPKG cache (`road_raw`), import GPKG to one PostgreSQL stage table with `PG_USE_COPY`, then normalize from that stage (optional `source_fid` batches) without direct FileGDB `fid` chunk imports.
 - Road chunk failure cleanup now rolls back the current transaction before best-effort chunk-table drops, preventing `InFailedSqlTransaction` cascades during cleanup.
-- All `ogr2ogr` subprocesses now run with enforced non-`None` timeouts, enhanced heartbeat diagnostics (`pid`, elapsed, timeout, last output age, context), and stronger interrupt/timeout cleanup paths that terminate active processes and process trees on Windows.
+- All `ogr2ogr` subprocesses now run with enforced non-`None` hard timeouts, enhanced heartbeat diagnostics (`pid`, elapsed, timeout, last output age, context), and stronger interrupt/timeout cleanup paths that terminate active processes and process trees on Windows; ROI Road canonical FileGDB extraction disables the no-progress watchdog and relies on hard-timeout only.
 - Stage imports now preflight stale backend and lock diagnostics, commit stage `DROP TABLE` before external `ogr2ogr` runs, and can optionally terminate stale blocking sessions via env toggles.
 - Command building now blocks `-append` + `-select` combinations with an internal ingest error guard.
 - NI normalization in this path still calls verified round-aware NI gridcode mapping logic; unknown class/threshold codes raise explicit errors with source context.

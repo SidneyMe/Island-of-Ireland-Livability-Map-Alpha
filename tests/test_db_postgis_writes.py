@@ -321,6 +321,16 @@ class ArtifactCopyTests(TestCase):
             summary_json=summary,
         )
 
+    def test_noise_only_refresh_does_not_delete_non_noise_tables(self) -> None:
+        import inspect
+
+        src = inspect.getsource(db_writes.refresh_noise_overlay_for_build)
+        self.assertIn("delete(noise_polygons)", src)
+        self.assertNotIn("delete(grid_walk)", src)
+        self.assertNotIn("delete(amenities)", src)
+        self.assertNotIn("delete(transport_reality)", src)
+        self.assertNotIn("delete(service_deserts)", src)
+
 
 class EnsureDatabaseReadyTests(TestCase):
     """FIX 4: ensure_database_ready must create pgcrypto."""

@@ -13,6 +13,7 @@ from config import (
     WALKGRAPH_BIN,
     current_normalization_scope_hash,
     normalize_build_profile,
+    noise_pmtiles_output_path,
     package_snapshot,
     pmtiles_output_path,
     profile_fine_surface_enabled,
@@ -26,6 +27,7 @@ from db_postgis import (
     import_payload_ready,
     load_transport_reality_points,
     publish_precomputed_artifacts,
+    refresh_noise_overlay_for_build,
     replace_service_desert_rows,
 )
 from local_osm_import import ensure_local_osm_import, resolve_source_state
@@ -44,6 +46,7 @@ from . import surface as _surface
 from . import tiers as _tiers
 from . import workflow as _workflow
 from .bake_pmtiles import bake_pmtiles as _bake_pmtiles
+from noise_artifacts.bake import bake_noise_pmtiles as _bake_noise_pmtiles
 from ._state import _STATE, _active_fine_surface_enabled, _elapsed
 from ._cache_wrappers import (
     cache_exists,
@@ -385,7 +388,10 @@ def run_precompute(
         fine_surface_ready=_surface_analysis_ready if profile_fine_surface_enabled(normalized_profile) else None,
         bake_pmtiles=_bake_pmtiles,
         pmtiles_output_path=pmtiles_output_path(normalized_profile),
+        bake_noise_pmtiles=_bake_noise_pmtiles,
+        noise_pmtiles_output_path=noise_pmtiles_output_path(normalized_profile),
         noise_max_zoom=resolve_noise_max_zoom(normalized_profile),
+        refresh_noise_overlay_for_build=refresh_noise_overlay_for_build,
     )
 
 

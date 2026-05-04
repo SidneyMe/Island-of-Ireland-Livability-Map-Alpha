@@ -49,6 +49,7 @@ const fullRuntime = {
   transport_reality_enabled: true,
   service_deserts_enabled: true,
   noise_enabled: true,
+  noise_pmtiles_url: "/tiles/noise.pmtiles",
   max_zoom: 19
 };
 
@@ -73,6 +74,7 @@ const devRuntime = {
   transport_reality_enabled: true,
   service_deserts_enabled: true,
   noise_enabled: true,
+  noise_pmtiles_url: "/tiles/noise-dev.pmtiles",
   max_zoom: 19
 };
 
@@ -98,6 +100,21 @@ const devRuntime = {
     style.sources.livability.url,
     "pmtiles://http://127.0.0.1:8000/tiles/livability-dev.pmtiles",
   );
+  assert.equal(
+    style.sources.noise.url,
+    "pmtiles://http://127.0.0.1:8000/tiles/noise-dev.pmtiles",
+  );
+}
+
+{
+  const runtimeWithoutNoiseArchive = {
+    ...devRuntime,
+    noise_enabled: false,
+    noise_pmtiles_url: null
+  };
+  const style = buildStyle(runtimeWithoutNoiseArchive, { windowOrigin: "http://127.0.0.1:8000" });
+  assert.equal(style.sources.noise, undefined);
+  assert.equal(style.layers.some(function (layer) { return layer.id === "noise-fill"; }), false);
 }
 
 {
@@ -248,7 +265,7 @@ const devRuntime = {
     19, 0.75
   ]);
   assert.equal(transportRealityLayer.source, "livability");
-  assert.equal(noiseLayer.source, "livability");
+  assert.equal(noiseLayer.source, "noise");
   assert.equal(noiseLayer["source-layer"], "noise");
   assert.equal(noiseLayer.minzoom, 8);
   assert.deepEqual(noiseLayer.filter, ["all", ["==", ["get", "metric"], "Lden"]]);

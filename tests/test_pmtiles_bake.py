@@ -7,6 +7,8 @@ from unittest import TestCase, mock
 
 
 bake_pmtiles = importlib.import_module("precompute.bake_pmtiles")
+noise_bake = importlib.import_module("noise_artifacts.bake")
+pmtiles_worker = importlib.import_module("pmtiles_bake_worker")
 
 
 class PmtilesBakeContractTests(TestCase):
@@ -93,7 +95,7 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(desert_layer["fields"]["baseline_reachable_stop_count"], "Number")
         self.assertEqual(desert_layer["fields"]["reachable_public_departures_7d"], "Number")
 
-    def test_pmtiles_metadata_declares_noise_layer(self) -> None:
+    def test_main_pmtiles_metadata_omits_noise_layer(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
             min_zoom=5,
             max_zoom=14,
@@ -101,13 +103,18 @@ class PmtilesBakeContractTests(TestCase):
             service_desert_max_zoom=11,
             amenity_min_zoom=9,
             transport_reality_min_zoom=9,
-            noise_max_zoom=12,
         )
 
-        noise_layer = next(
-            layer for layer in metadata["vector_layers"] if layer["id"] == "noise"
-        )
+        layer_ids = [layer["id"] for layer in metadata["vector_layers"]]
+        self.assertNotIn("noise", layer_ids)
 
+    def test_noise_pmtiles_metadata_declares_only_noise_layer(self) -> None:
+        metadata = noise_bake._metadata(
+            min_zoom=noise_bake.NOISE_MIN_ZOOM,
+            max_zoom=12,
+        )
+        self.assertEqual([layer["id"] for layer in metadata["vector_layers"]], ["noise"])
+        noise_layer = metadata["vector_layers"][0]
         self.assertEqual(noise_layer["minzoom"], bake_pmtiles.NOISE_MIN_ZOOM)
         self.assertEqual(noise_layer["maxzoom"], 12)
         self.assertEqual(noise_layer["fields"]["source_type"], "String")
@@ -156,7 +163,7 @@ class PmtilesBakeContractTests(TestCase):
         self.assertNotIn("SUM(t.school_only_departures_30d)", sql)
 
     def test_noise_tile_sql_exports_display_fields(self) -> None:
-        sql = str(bake_pmtiles._NOISE_TILE_SQL)
+        sql = str(pmtiles_worker._NOISE_TILE_SQL)
 
         self.assertIn("n.source_type", sql)
         self.assertIn("n.metric", sql)
@@ -167,20 +174,12 @@ class PmtilesBakeContractTests(TestCase):
 
     def test_noise_tile_sql_reads_from_noise_polygons(self) -> None:
         """FIX 13: noise PMTiles layer must read from noise_polygons (compatibility table)."""
-        sql = str(bake_pmtiles._NOISE_TILE_SQL)
+        sql = str(pmtiles_worker._NOISE_TILE_SQL)
         self.assertIn("noise_polygons", sql)
 
     def test_noise_source_layer_id_is_noise(self) -> None:
         """FIX 13: frontend source-layer name must remain 'noise'."""
-        metadata = bake_pmtiles._pmtiles_metadata(
-            min_zoom=5,
-            max_zoom=14,
-            grid_max_zoom=11,
-            service_desert_max_zoom=11,
-            amenity_min_zoom=9,
-            transport_reality_min_zoom=9,
-            noise_max_zoom=12,
-        )
+        metadata = noise_bake._metadata(min_zoom=noise_bake.NOISE_MIN_ZOOM, max_zoom=12)
         layer_ids = [layer["id"] for layer in metadata["vector_layers"]]
         self.assertIn("noise", layer_ids, "noise layer must be declared in PMTiles metadata")
 
@@ -326,7 +325,6 @@ class PmtilesTileSpecIteratorTests(TestCase):
             self.assertTrue(layers & bake_pmtiles._LAYER_AMENITIES)
             self.assertTrue(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY)
             self.assertTrue(layers & bake_pmtiles._LAYER_SERVICE_DESERTS)
-            self.assertFalse(layers & bake_pmtiles._LAYER_NOISE)
 
         # z12 > coarse_grid_max_zoom → only amenities + transport_reality.
         z12_specs = [spec for spec in specs if spec[0] == 12]
@@ -335,14 +333,13 @@ class PmtilesTileSpecIteratorTests(TestCase):
             self.assertEqual(z, 12)
             self.assertFalse(layers & bake_pmtiles._LAYER_GRID)
             self.assertFalse(layers & bake_pmtiles._LAYER_SERVICE_DESERTS)
-            self.assertFalse(layers & bake_pmtiles._LAYER_NOISE)
         self.assertTrue(any(layers & bake_pmtiles._LAYER_FINE_GRID for _, _, _, layers in z12_specs))
         self.assertTrue(any(layers & bake_pmtiles._LAYER_AMENITIES for _, _, _, layers in z12_specs))
         self.assertTrue(
             any(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY for _, _, _, layers in z12_specs)
         )
 
-    def test_noise_tile_specs_are_included_above_coarse_zoom(self) -> None:
+    def test_main_tile_specs_do_not_include_noise_only_tiles(self) -> None:
         specs = list(
             bake_pmtiles._iter_tile_specs(
                 min_zoom=12,
@@ -351,13 +348,13 @@ class PmtilesTileSpecIteratorTests(TestCase):
                 amenity_points=[],
                 transport_reality_points=[],
                 coarse_grid_max_zoom=11,
-                amenity_min_zoom=9,
-                transport_reality_min_zoom=9,
-                noise_tile_coords_by_zoom={12: [(10, 11)]},
+                amenity_min_zoom=13,
+                transport_reality_min_zoom=13,
+                fine_grid_tile_coords_by_zoom={},
             )
         )
 
-        self.assertEqual(specs, [(12, 10, 11, bake_pmtiles._LAYER_NOISE)])
+        self.assertEqual(specs, [])
 
     def test_below_amenity_min_zoom_skips_amenity_layers(self) -> None:
         # At z5 with amenity_min_zoom=9, only grid + service_deserts should be included.

@@ -521,3 +521,52 @@ def publish_precomputed_artifacts(
                 python_version=python_version,
             )
         )
+
+
+def refresh_noise_overlay_for_build(
+    engine: Engine,
+    *,
+    hashes: BuildHashes,
+    summary_json: dict[str, Any],
+    noise_rows,
+    study_area_wgs84=None,
+    noise_study_area_wgs84=_UNSET,
+    noise_processing_hash: str | None = None,
+    noise_artifact_hash: str | None = None,
+    progress_cb: ProgressCallback | None = None,
+) -> None:
+    """Refresh only the noise overlay rows and manifest noise metadata."""
+    effective_noise_area = (
+        study_area_wgs84 if noise_study_area_wgs84 is _UNSET else noise_study_area_wgs84
+    )
+    created_at = datetime.now(timezone.utc)
+
+    with engine.begin() as connection:
+        if progress_cb is not None:
+            progress_cb("detail", detail="deleting existing noise rows")
+        connection.execute(delete(noise_polygons).where(noise_polygons.c.build_key == hashes.build_key))
+        _publish_noise_polygons(
+            connection,
+            noise_rows=noise_rows,
+            build_key=hashes.build_key,
+            config_hash=hashes.config_hash,
+            import_fingerprint=hashes.import_fingerprint,
+            render_hash=hashes.render_hash,
+            noise_processing_hash=noise_processing_hash,
+            noise_artifact_hash=noise_artifact_hash,
+            created_at=created_at,
+            study_area_wgs84=effective_noise_area,
+            summary_json=summary_json,
+            progress_cb=progress_cb,
+        )
+        connection.execute(
+            update(build_manifest)
+            .where(build_manifest.c.build_key == hashes.build_key)
+            .values(
+                status="complete",
+                completed_at=datetime.now(timezone.utc),
+                summary_json=summary_json,
+                noise_processing_hash=noise_processing_hash,
+                noise_artifact_hash=noise_artifact_hash,
+            )
+        )

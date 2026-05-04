@@ -25,7 +25,7 @@ from .exceptions import NoiseIngestError
 log = logging.getLogger(__name__)
 
 # Schema version bump here forces re-ingest for all existing source hashes.
-INGEST_SCHEMA_VERSION = 1
+INGEST_SCHEMA_VERSION = 2
 
 _BAND_RE = re.compile(r"^\d{2}-\d{2}$|^\d{2}\+$")
 

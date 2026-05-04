@@ -363,6 +363,47 @@ def _bake_chunk_worker(
     return out
 
 
+def _noise_tile_mvt_bytes(
+    connection,
+    *,
+    build_key: str,
+    z: int,
+    x: int,
+    y: int,
+) -> bytes:
+    noise_bytes = (
+        connection.execute(
+            _NOISE_TILE_SQL,
+            {"z": z, "x": x, "y": y, "build_key": build_key},
+        ).scalar()
+        or b""
+    )
+    return bytes(noise_bytes)
+
+
+def _bake_noise_chunk_worker(
+    chunk: list[tuple[int, int, int]],
+    build_key: str,
+    db_url: str,
+) -> list[tuple[int, bytes]]:
+    """Run inside a worker process. Bake one chunk of noise tile specs."""
+    engine = _worker_get_engine(db_url)
+    out: list[tuple[int, bytes]] = []
+    with engine.connect() as connection:
+        for z, x, y in chunk:
+            payload = _noise_tile_mvt_bytes(
+                connection,
+                build_key=build_key,
+                z=z,
+                x=x,
+                y=y,
+            )
+            if not payload:
+                continue
+            out.append((zxy_to_tileid(z, x, y), gzip.compress(payload)))
+    return out
+
+
 __all__ = [
     "_LAYER_GRID",
     "_LAYER_AMENITIES",
@@ -377,6 +418,8 @@ __all__ = [
     "_NOISE_TILE_SQL",
     "_resolution_for_zoom",
     "_tile_mvt_bytes_by_flags",
+    "_noise_tile_mvt_bytes",
     "_worker_get_engine",
     "_bake_chunk_worker",
+    "_bake_noise_chunk_worker",
 ]

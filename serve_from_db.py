@@ -22,6 +22,8 @@ from config import (
     build_config_hashes,
     build_profile_settings,
     normalize_build_profile,
+    noise_pmtiles_output_path,
+    noise_pmtiles_url_path,
     pmtiles_output_path,
     pmtiles_url_path,
     precompute_flag_for_profile,
@@ -83,6 +85,7 @@ class RuntimeState:
     noise_source_counts: dict[str, int]
     noise_metric_counts: dict[str, int]
     noise_band_counts: dict[str, int]
+    noise_pmtiles_url: str | None
     fine_surface_enabled: bool
     surface_shell_dir: Path | None
     surface_score_dir: Path | None
@@ -103,6 +106,8 @@ class RuntimeService:
         self._profile_settings = build_profile_settings(self._profile)
         self._hashes = build_config_hashes(self._profile)
         self._pmtiles_url = pmtiles_url_path(self._profile)
+        self._noise_pmtiles_url = noise_pmtiles_url_path(self._profile)
+        self._noise_pmtiles_path = noise_pmtiles_output_path(self._profile)
         self._state: RuntimeState | None = None
         self._surface_runtime: _surface.FineSurfaceRuntime | None = None
 
@@ -256,6 +261,8 @@ class RuntimeService:
             )
             if str(key)
         }
+        noise_rows_available = bool(summary_json.get("noise_enabled")) or bool(noise_source_counts)
+        noise_pmtiles_available = noise_rows_available and self._noise_pmtiles_path.exists()
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -309,11 +316,12 @@ class RuntimeService:
             transport_bus_frequency_counts=transport_bus_frequency_counts,
             transport_flag_counts=transport_flag_counts,
             transport_mode_counts=transport_mode_counts,
-            noise_enabled=bool(summary_json.get("noise_enabled")) or bool(noise_source_counts),
+            noise_enabled=noise_pmtiles_available,
             noise_counts=noise_counts,
             noise_source_counts=noise_source_counts,
             noise_metric_counts=noise_metric_counts,
             noise_band_counts=noise_band_counts,
+            noise_pmtiles_url=self._noise_pmtiles_url if noise_pmtiles_available else None,
             fine_surface_enabled=fine_surface_enabled,
             surface_shell_dir=surface_shell_dir,
             surface_score_dir=surface_score_dir,
@@ -383,6 +391,7 @@ class RuntimeService:
             "noise_source_counts": state.noise_source_counts,
             "noise_metric_counts": state.noise_metric_counts,
             "noise_band_counts": state.noise_band_counts,
+            "noise_pmtiles_url": state.noise_pmtiles_url,
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,
             "max_zoom": SURFACE_MAX_ZOOM,
@@ -440,6 +449,8 @@ class LivabilityHTTPServer(ThreadingHTTPServer):
         index_html: bytes,
         pmtiles_path: Path,
         pmtiles_url_path: str,
+        noise_pmtiles_path: Path | None = None,
+        noise_pmtiles_url_path: str | None = None,
     ) -> None:
         super().__init__(server_address, handler_class)
         self.service = service
@@ -447,6 +458,10 @@ class LivabilityHTTPServer(ThreadingHTTPServer):
         self.index_html = index_html
         self.pmtiles_path = pmtiles_path
         self.pmtiles_url_path = str(pmtiles_url_path)
+        self.noise_pmtiles_path = noise_pmtiles_path
+        self.noise_pmtiles_url_path = (
+            str(noise_pmtiles_url_path) if noise_pmtiles_url_path else None
+        )
 
 
 class LivabilityRequestHandler(BaseHTTPRequestHandler):
@@ -477,7 +492,16 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         if parsed.path == self.livability_server.pmtiles_url_path:
             try:
-                self._serve_pmtiles(head_only=True)
+                self._serve_pmtiles(self.livability_server.pmtiles_path, head_only=True)
+            except CLIENT_DISCONNECT_ERRORS as exc:
+                self._log_client_disconnect(parsed.path, exc)
+            return
+        if parsed.path == self.livability_server.noise_pmtiles_url_path:
+            try:
+                self._serve_pmtiles(
+                    self.livability_server.noise_pmtiles_path,
+                    head_only=True,
+                )
             except CLIENT_DISCONNECT_ERRORS as exc:
                 self._log_client_disconnect(parsed.path, exc)
             return
@@ -500,7 +524,10 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             self._serve_export(EXPORTS_DIR / ZIP_FILENAME)
             return
         if parsed.path == self.livability_server.pmtiles_url_path:
-            self._serve_pmtiles()
+            self._serve_pmtiles(self.livability_server.pmtiles_path)
+            return
+        if parsed.path == self.livability_server.noise_pmtiles_url_path:
+            self._serve_pmtiles(self.livability_server.noise_pmtiles_path)
             return
         surface_match = SURFACE_TILE_RE.match(parsed.path)
         if surface_match:
@@ -523,9 +550,8 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
-    def _serve_pmtiles(self, *, head_only: bool = False) -> None:
-        pmtiles_path = self.livability_server.pmtiles_path
-        if not pmtiles_path.exists():
+    def _serve_pmtiles(self, pmtiles_path: Path | None, *, head_only: bool = False) -> None:
+        if pmtiles_path is None or not pmtiles_path.exists():
             raise FileNotFoundError(str(pmtiles_path))
         file_size = pmtiles_path.stat().st_size
         range_header = self.headers.get("Range")
@@ -710,10 +736,15 @@ def create_http_server(
     port: int = DEFAULT_SERVER_PORT,
     static_dir: Path = STATIC_DIR,
     pmtiles_path: Path | None = None,
+    noise_pmtiles_path: Path | None = None,
 ) -> LivabilityHTTPServer:
     normalized_profile = normalize_build_profile(profile)
     resolved_pmtiles_path = pmtiles_path or pmtiles_output_path(normalized_profile)
     resolved_pmtiles_url_path = pmtiles_url_path(normalized_profile)
+    resolved_noise_pmtiles_path = (
+        noise_pmtiles_path or noise_pmtiles_output_path(normalized_profile)
+    )
+    resolved_noise_pmtiles_url_path = noise_pmtiles_url_path(normalized_profile)
     runtime_service = service or build_runtime_service(profile=normalized_profile)
     index_html_path = static_dir / "index.html"
     if not index_html_path.exists():
@@ -733,6 +764,8 @@ def create_http_server(
         index_html=index_html,
         pmtiles_path=resolved_pmtiles_path,
         pmtiles_url_path=resolved_pmtiles_url_path,
+        noise_pmtiles_path=resolved_noise_pmtiles_path,
+        noise_pmtiles_url_path=resolved_noise_pmtiles_url_path,
     )
 
 

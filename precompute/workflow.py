@@ -55,6 +55,10 @@ def _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path) -> bool:
     return bake_pmtiles is not None and pmtiles_output_path is not None
 
 
+def _noise_pmtiles_bake_configured(bake_noise_pmtiles, noise_pmtiles_output_path) -> bool:
+    return bake_noise_pmtiles is not None and noise_pmtiles_output_path is not None
+
+
 def _resolve_noise_processing_hash(noise_processing_hash, engine):
     """Call noise_processing_hash with engine if supported, else without."""
     if not callable(noise_processing_hash):
@@ -84,6 +88,62 @@ def _run_pmtiles_bake(
         **bake_kwargs,
     )
     return time.perf_counter() - bake_started_at
+
+
+def _run_noise_pmtiles_bake(
+    *,
+    bake_noise_pmtiles,
+    engine,
+    build_key: str,
+    noise_pmtiles_output_path: Path,
+    noise_max_zoom: int | None = None,
+) -> float:
+    bake_started_at = time.perf_counter()
+    bake_kwargs: dict = {}
+    if noise_max_zoom is not None:
+        bake_kwargs["noise_max_zoom"] = int(noise_max_zoom)
+    bake_noise_pmtiles(
+        engine,
+        build_key,
+        noise_pmtiles_output_path,
+        **bake_kwargs,
+    )
+    return time.perf_counter() - bake_started_at
+
+
+def _noise_study_area_for_profile(build_profile: str, study_area_wgs84):
+    return None if build_profile == "full" else study_area_wgs84
+
+
+def _load_stored_noise_state(engine, build_key: str) -> tuple[str | None, dict]:
+    from sqlalchemy import text as _text
+
+    with engine.connect() as _conn:
+        row = _conn.execute(
+            _text(
+                "SELECT noise_processing_hash, summary_json FROM build_manifest "
+                "WHERE build_key = :bk AND status = 'complete'"
+            ),
+            {"bk": build_key},
+        ).mappings().one_or_none()
+    if row is None:
+        return None, {}
+    return row["noise_processing_hash"], dict(row["summary_json"] or {})
+
+
+def _noise_refresh_flags_used(
+    *,
+    refresh_noise_artifact: bool,
+    force_noise_artifact: bool,
+    reimport_noise_source: bool,
+    force_noise_all: bool,
+) -> bool:
+    return bool(
+        refresh_noise_artifact
+        or force_noise_artifact
+        or reimport_noise_source
+        or force_noise_all
+    )
 
 
 def run_import_refresh_impl(
@@ -201,7 +261,10 @@ def run_precompute_impl(
     fine_surface_ready=None,
     bake_pmtiles=None,
     pmtiles_output_path: Path | None = None,
+    bake_noise_pmtiles=None,
+    noise_pmtiles_output_path: Path | None = None,
     noise_max_zoom: int | None = None,
+    refresh_noise_overlay_for_build=None,
 ) -> str:
     total_started_at = time.perf_counter()
     print(f"=== Livability Score Map Precompute ({build_profile}) ===\n")
@@ -236,6 +299,11 @@ def run_precompute_impl(
     # before the expensive geometry and transit phases.
     # build_default_noise_artifact loads its own full-island domain; it does not
     # need the study area computed by phase_geometry below.
+    try:
+        from precompute._rows import set_selected_noise_artifact as _reset_selected_noise_artifact
+        _reset_selected_noise_artifact(None)
+    except Exception:
+        pass
     if _config.NOISE_MODE == "artifact":
         if not hasattr(engine, "connect"):
             if require_active_noise_artifact:
@@ -251,9 +319,10 @@ def run_precompute_impl(
             _active_artifact = None
         else:
             from noise_artifacts.manifest import (
-                get_active_artifact as _get_active_artifact,
                 get_resolved_artifact_for_mode as _get_resolved_artifact_for_mode,
             )
+            from precompute._rows import set_selected_noise_artifact as _set_selected_noise_artifact
+
             if require_active_noise_artifact:
                 _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
                 if _active_artifact is None:
@@ -273,8 +342,9 @@ def run_precompute_impl(
                     f"{_active_artifact.artifact_hash} (mode={noise_accuracy_mode})",
                     flush=True,
                 )
+                _set_selected_noise_artifact(_active_artifact)
             else:
-                _active_artifact = _get_active_artifact(engine, "resolved")
+                _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
 
                 _force_resolved = bool(force_noise_artifact or force_noise_all)
                 _reimport_source = bool(reimport_noise_source or force_noise_all)
@@ -323,14 +393,19 @@ def run_precompute_impl(
                             f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
                             flush=True,
                         )
-                    _active_artifact = _get_active_artifact(engine, "resolved")
+                    _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
 
                 if _active_artifact is None:
                     raise RuntimeError(
                         "BUG: noise artifact build completed but no active resolved artifact exists. "
                         "Check noise_artifact_manifest for errors."
                     )
-                print(f"[noise] active resolved artifact: {_active_artifact.artifact_hash}", flush=True)
+                _set_selected_noise_artifact(_active_artifact)
+                print(
+                    f"[noise] active resolved artifact: {_active_artifact.artifact_hash} "
+                    f"(mode={noise_accuracy_mode})",
+                    flush=True,
+                )
     elif _config.NOISE_MODE == "legacy":
         print(
             "[noise] WARNING: NOISE_MODE=legacy is the slow debug path. "
@@ -387,47 +462,82 @@ def run_precompute_impl(
     print()
 
     if has_complete_build(engine, hashes.build_key) and not force_precompute:
-        # Before skipping, verify the stored noise_processing_hash matches the current one.
-        # If the active artifact changed since the last build, we must rebuild.
-        # Use engine-aware helper so artifact hash can be read from DB before _noise_rows() runs.
+        # Before skipping, verify the stored noise hash matches the selected
+        # artifact. If only noise changed, refresh just the overlay rows.
         _current_noise_hash = _resolve_noise_processing_hash(noise_processing_hash, engine)
-        _noise_hash_matches = True
-        if _current_noise_hash is not None:
-            try:
-                from sqlalchemy import text as _text
-                with engine.connect() as _conn:
-                    _stored_noise_hash = _conn.execute(
-                        _text(
-                            "SELECT noise_processing_hash FROM build_manifest "
-                            "WHERE build_key = :bk AND status = 'complete'"
-                        ),
-                        {"bk": hashes.build_key},
-                    ).scalar_one_or_none()
-                _noise_hash_matches = (_stored_noise_hash == _current_noise_hash)
-            except Exception:
-                _noise_hash_matches = True  # on query error, allow skip
-
-        if not _noise_hash_matches:
-            print(
-                f"Complete build exists for build_key={hashes.build_key} "
-                "but active noise artifact changed; rebuilding."
+        try:
+            _stored_noise_hash, _stored_summary_json = _load_stored_noise_state(
+                engine,
+                hashes.build_key,
             )
-        else:
-            bake_configured = _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path)
-            pmtiles_missing = bake_configured and not pmtiles_output_path.exists()
-            surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
-            if not pmtiles_missing and not surface_missing:
-                print(
-                    f"Complete PostGIS precompute already exists for build_key={hashes.build_key}. "
-                    "Skipping. Use --force-precompute to rebuild."
-                )
-                return hashes.build_key
-            if not surface_missing:
-                print(
-                    f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
-                    f"but PMTiles archive is missing at {pmtiles_output_path}. "
-                    "Re-baking PMTiles only."
-                )
+            _noise_hash_matches = (
+                True if _current_noise_hash is None else _stored_noise_hash == _current_noise_hash
+            )
+        except Exception:
+            _stored_summary_json = {}
+            _noise_hash_matches = True
+
+        bake_configured = _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path)
+        noise_bake_configured = _noise_pmtiles_bake_configured(
+            bake_noise_pmtiles,
+            noise_pmtiles_output_path,
+        )
+        pmtiles_missing = bake_configured and not pmtiles_output_path.exists()
+        noise_pmtiles_missing = (
+            noise_bake_configured and not noise_pmtiles_output_path.exists()
+        )
+        surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
+        noise_refresh_requested = _noise_refresh_flags_used(
+            refresh_noise_artifact=refresh_noise_artifact,
+            force_noise_artifact=force_noise_artifact,
+            reimport_noise_source=reimport_noise_source,
+            force_noise_all=force_noise_all,
+        )
+        can_refresh_noise_only = (
+            refresh_noise_overlay_for_build is not None
+            and (not surface_missing)
+            and ((not _noise_hash_matches) or noise_refresh_requested)
+        )
+
+        if can_refresh_noise_only:
+            reason = (
+                "refresh flags were used"
+                if noise_refresh_requested
+                else "selected noise artifact changed"
+            )
+            print(
+                f"Complete build exists for build_key={hashes.build_key}; "
+                f"{reason}. Refreshing noise overlay only."
+            )
+            publish_started_at = datetime.now(timezone.utc)
+            publish_progress_cb = tracker.phase_callback("publish")
+            tracker.start_phase("publish", detail="refreshing noise overlay only")
+            noise_row_payload = noise_rows(
+                engine,
+                publish_started_at,
+                progress_cb=publish_progress_cb,
+            )
+            resolved_noise_hash = _resolve_noise_processing_hash(noise_processing_hash, engine)
+            from precompute._rows import _ArtifactNoiseReference
+            resolved_artifact_hash = (
+                noise_row_payload.noise_resolved_hash
+                if isinstance(noise_row_payload, _ArtifactNoiseReference)
+                else None
+            )
+            noise_study_area = _noise_study_area_for_profile(build_profile, study_area_wgs84)
+            refresh_noise_overlay_for_build(
+                engine,
+                hashes=hashes,
+                summary_json=_stored_summary_json,
+                noise_rows=noise_row_payload,
+                study_area_wgs84=study_area_wgs84,
+                noise_study_area_wgs84=noise_study_area,
+                noise_processing_hash=resolved_noise_hash,
+                noise_artifact_hash=resolved_artifact_hash,
+                progress_cb=publish_progress_cb,
+            )
+            tracker.finish_phase("publish", "completed", detail="noise overlay refreshed")
+            if bake_configured and pmtiles_missing:
                 bake_seconds = _run_pmtiles_bake(
                     bake_pmtiles=bake_pmtiles,
                     engine=engine,
@@ -438,6 +548,71 @@ def run_precompute_impl(
                 print(
                     f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
                 )
+            if noise_bake_configured:
+                noise_bake_seconds = _run_noise_pmtiles_bake(
+                    bake_noise_pmtiles=bake_noise_pmtiles,
+                    engine=engine,
+                    build_key=hashes.build_key,
+                    noise_pmtiles_output_path=noise_pmtiles_output_path,
+                    noise_max_zoom=noise_max_zoom,
+                )
+                print(
+                    "Noise PMTiles bake completed in "
+                    f"{noise_bake_seconds:.1f}s -> {noise_pmtiles_output_path}"
+                )
+            tracker.save_successful_timings()
+            hashes = get_hashes()
+            print(f"Import fingerprint: {hashes.import_fingerprint}")
+            print(f"Build key: {hashes.build_key}")
+            print(f"Total wall time: {time.perf_counter() - total_started_at:.1f}s")
+            return hashes.build_key
+
+        if not _noise_hash_matches or noise_refresh_requested:
+            print(
+                f"Complete build exists for build_key={hashes.build_key}, "
+                "but noise refresh cannot be isolated; rebuilding full pipeline."
+            )
+        else:
+            if not pmtiles_missing and not noise_pmtiles_missing and not surface_missing:
+                print(
+                    f"Complete PostGIS precompute already exists for build_key={hashes.build_key}. "
+                    "Skipping. Use --force-precompute to rebuild."
+                )
+                return hashes.build_key
+            if not surface_missing:
+                if pmtiles_missing:
+                    print(
+                        f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
+                        f"but PMTiles archive is missing at {pmtiles_output_path}. "
+                        "Re-baking PMTiles only."
+                    )
+                    bake_seconds = _run_pmtiles_bake(
+                        bake_pmtiles=bake_pmtiles,
+                        engine=engine,
+                        build_key=hashes.build_key,
+                        pmtiles_output_path=pmtiles_output_path,
+                        noise_max_zoom=noise_max_zoom,
+                    )
+                    print(
+                        f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
+                    )
+                if noise_pmtiles_missing:
+                    print(
+                        f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
+                        f"but noise PMTiles archive is missing at {noise_pmtiles_output_path}. "
+                        "Re-baking noise PMTiles only."
+                    )
+                    noise_bake_seconds = _run_noise_pmtiles_bake(
+                        bake_noise_pmtiles=bake_noise_pmtiles,
+                        engine=engine,
+                        build_key=hashes.build_key,
+                        noise_pmtiles_output_path=noise_pmtiles_output_path,
+                        noise_max_zoom=noise_max_zoom,
+                    )
+                    print(
+                        "Noise PMTiles bake completed in "
+                        f"{noise_bake_seconds:.1f}s -> {noise_pmtiles_output_path}"
+                    )
                 return hashes.build_key
             print(
                 f"Complete coarse PostGIS build exists for build_key={hashes.build_key}, "
@@ -533,7 +708,7 @@ def run_precompute_impl(
     # Full-island profile: artifact already covers the whole island so clipping
     # noise polygons to study_area_wgs84 with ST_Intersection is wasted work.
     # Pass None to skip clipping; for county/bbox profiles keep the clip.
-    noise_study_area = None if build_profile == "full" else study_area_wgs84
+    noise_study_area = _noise_study_area_for_profile(build_profile, study_area_wgs84)
     publish_precomputed_artifacts(
         engine,
         hashes=hashes,
@@ -629,6 +804,20 @@ def run_precompute_impl(
             "publish",
             "bake_pmtiles",
             bake_seconds,
+            force_log=True,
+        )
+    if _noise_pmtiles_bake_configured(bake_noise_pmtiles, noise_pmtiles_output_path):
+        noise_bake_seconds = _run_noise_pmtiles_bake(
+            bake_noise_pmtiles=bake_noise_pmtiles,
+            engine=engine,
+            build_key=hashes.build_key,
+            noise_pmtiles_output_path=noise_pmtiles_output_path,
+            noise_max_zoom=noise_max_zoom,
+        )
+        tracker.record_substep(
+            "publish",
+            "bake_noise_pmtiles",
+            noise_bake_seconds,
             force_log=True,
         )
 

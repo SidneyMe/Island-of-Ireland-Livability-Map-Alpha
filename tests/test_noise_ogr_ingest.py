@@ -931,12 +931,25 @@ class NoiseOgrIngestTests(TestCase):
             self.assertTrue(any("JOIN pg_locks" in sql for sql in conn.sql))
 
     def test_windows_runner_scripts_use_venv_python(self) -> None:
+        def _mode_block(script: str, mode: str) -> str:
+            marker = f'    "{mode}" {{'
+            start = script.index(marker)
+            next_case = script.find('\n    "', start + len(marker))
+            end = next_case if next_case != -1 else script.index("\n    default", start)
+            return script[start:end]
+
         precompute_script = Path("scripts/win/precompute_noise_dev.cmd").read_text(encoding="utf-8")
         accurate_script = Path("scripts/win/precompute_noise_accurate.cmd").read_text(encoding="utf-8")
         prepare_dev_script = Path("scripts/win/prepare_noise_artifact_dev.cmd").read_text(encoding="utf-8")
         prepare_accurate_script = Path("scripts/win/prepare_noise_artifact_accurate.cmd").read_text(encoding="utf-8")
+        force_dev_script = Path("scripts/win/force_noise_artifact_dev.cmd").read_text(encoding="utf-8")
+        force_accurate_script = Path("scripts/win/force_noise_artifact_accurate.cmd").read_text(encoding="utf-8")
         test_script = Path("scripts/win/test_noise.cmd").read_text(encoding="utf-8")
         watchdog_script = Path("scripts/win/run_noise_precompute_watchdog.ps1").read_text(encoding="utf-8")
+        dev_prepare_block = _mode_block(watchdog_script, "DevPrepare")
+        accurate_prepare_block = _mode_block(watchdog_script, "AccuratePrepare")
+        dev_force_block = _mode_block(watchdog_script, "DevForce")
+        accurate_force_block = _mode_block(watchdog_script, "AccurateForce")
         self.assertIn("run_noise_precompute_watchdog.ps1", precompute_script)
         self.assertIn("-Mode DevReuse", precompute_script)
         self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=1200", precompute_script)
@@ -944,19 +957,38 @@ class NoiseOgrIngestTests(TestCase):
         self.assertNotIn("--reimport-noise-source", precompute_script)
         self.assertNotIn("--force-noise-artifact", precompute_script)
         self.assertNotIn("--force-noise-all", precompute_script)
-        self.assertIn("-Mode AccuratePrepare", accurate_script)
-        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=7200", accurate_script)
+        self.assertIn("-Mode AccurateReuse", accurate_script)
+        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=1200", accurate_script)
         self.assertIn("-Mode DevPrepare", prepare_dev_script)
         self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=3600", prepare_dev_script)
         self.assertIn("-Mode AccuratePrepare", prepare_accurate_script)
+        self.assertIn("-Mode DevForce", force_dev_script)
+        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=3600", force_dev_script)
+        self.assertIn("-Mode AccurateForce", force_accurate_script)
+        self.assertIn("NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC=7200", force_accurate_script)
         self.assertIn(".\\.venv\\Scripts\\python.exe", test_script)
         self.assertIn(".\\.venv\\Scripts\\python.exe", watchdog_script)
-        self.assertIn("ValidateSet(\"DevReuse\", \"DevPrepare\", \"AccuratePrepare\")", watchdog_script)
+        self.assertIn(
+            "ValidateSet(\"DevReuse\", \"DevPrepare\", \"DevForce\", \"AccurateReuse\", \"AccuratePrepare\", \"AccurateForce\")",
+            watchdog_script,
+        )
         self.assertIn("--require-active-noise-artifact", watchdog_script)
         self.assertIn("geo_env.cmd", watchdog_script)
-        self.assertIn("--reimport-noise-source", watchdog_script)
-        self.assertIn("--force-noise-artifact", watchdog_script)
-        self.assertIn("--force-precompute", watchdog_script)
+        self.assertIn("--refresh-noise-artifact", dev_prepare_block)
+        self.assertNotIn("--reimport-noise-source", dev_prepare_block)
+        self.assertNotIn("--force-noise-artifact", dev_prepare_block)
+        self.assertIn("--noise-accurate", accurate_prepare_block)
+        self.assertIn("--refresh-noise-artifact", accurate_prepare_block)
+        self.assertNotIn("--reimport-noise-source", accurate_prepare_block)
+        self.assertNotIn("--force-noise-artifact", accurate_prepare_block)
+        self.assertIn("--refresh-noise-artifact", dev_force_block)
+        self.assertIn("--reimport-noise-source", dev_force_block)
+        self.assertIn("--force-noise-artifact", dev_force_block)
+        self.assertIn("--noise-accurate", accurate_force_block)
+        self.assertIn("--refresh-noise-artifact", accurate_force_block)
+        self.assertIn("--reimport-noise-source", accurate_force_block)
+        self.assertIn("--force-noise-artifact", accurate_force_block)
+        self.assertNotIn("--force-precompute", watchdog_script)
 
     def test_stage_lock_diagnostic_failure_rolls_back_and_does_not_block_drop(self) -> None:
         from noise_artifacts.ogr_ingest import _prepare_stage_table_for_external_import
@@ -1483,9 +1515,37 @@ class NoiseOgrIngestTests(TestCase):
         )
         cmd_text = " ".join(cmd)
         self.assertIn("-select Time,Db_Low,Db_High,DbValue,ReportPeriod", cmd_text)
-        self.assertIn("-makevalid", cmd_text)
+        self.assertNotIn("-makevalid", cmd_text)
         self.assertNotIn("Shape_Length", cmd_text)
         self.assertNotIn("Shape_Area", cmd_text)
+
+    def test_road_gdb_extraction_requires_selected_fields(self) -> None:
+        from noise_artifacts.exceptions import NoiseIngestError
+        from noise_artifacts.ogr_ingest import _build_ogr2ogr_gdb_to_gpkg_command
+
+        with self.assertRaises(NoiseIngestError):
+            _build_ogr2ogr_gdb_to_gpkg_command(
+                source_path=Path("C:/tmp/Noise_R4_Road.gdb"),
+                layer_name="Noise_R4_Road",
+                cache_gpkg_path=Path("C:/tmp/cache.gpkg"),
+                selected_fields=[],
+            )
+
+    def test_road_gdb_canonical_extract_disables_no_progress_timeout(self) -> None:
+        from noise_artifacts.ogr_ingest import _run_road_gdb_canonical_extraction
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            cache_gpkg_path = tmp / "road_cache.gpkg"
+            with patch("noise_artifacts.ogr_ingest._run_ogr2ogr_command") as mock_run:
+                _run_road_gdb_canonical_extraction(
+                    source_path=Path("C:/tmp/Noise_R4_Road.gdb"),
+                    layer_name="Noise_R4_Road",
+                    selected_fields=["Time", "Db_Low"],
+                    cache_gpkg_path=cache_gpkg_path,
+                )
+        kwargs = mock_run.call_args.kwargs
+        self.assertEqual(kwargs.get("no_progress_timeout_seconds"), 0.0)
 
     def test_no_direct_filegdb_fid_where_chunk_command(self) -> None:
         import inspect

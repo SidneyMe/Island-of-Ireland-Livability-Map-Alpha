@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import os
+import hashlib
+import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -13,10 +15,16 @@ from sqlalchemy.engine import Engine
 
 from .exceptions import NoiseIngestError
 from .ogr_ingest import (
+    _available_ogr_fields,
     _ensure_road_gdb_canonical_cache,
+    _noise_ogr_candidate_fields,
     _selected_ni_member_specs,
     _selected_roi_specs,
+    _select_existing_noise_fields,
 )
+
+
+DEV_FAST_GRID_ALGO_VERSION = 1
 
 
 def _progress(progress_cb, message: str) -> None:
@@ -189,8 +197,47 @@ def _dev_fast_parallel_specs() -> bool:
     return _env_flag("NOISE_DEV_FAST_PARALLEL_SPECS", default=True)
 
 
+def _dev_fast_parallel_max_workers() -> int:
+    raw = os.getenv("NOISE_DEV_FAST_MAX_WORKERS", "2")
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_MAX_WORKERS must be a positive integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_MAX_WORKERS must be a positive integer, got {raw!r}"
+        )
+    return value
+
+
+def _rebuild_dev_fast_grid() -> bool:
+    return _env_flag("NOISE_REBUILD_DEV_FAST_GRID", default=False)
+
+
+def dev_fast_grid_artifact_hash(
+    *,
+    noise_source_hash: str,
+    grid_size_m: int,
+    latest_rounds_by_group: dict[str, int],
+) -> str:
+    payload = {
+        "algorithm": "dev_fast_road_rail_grid",
+        "algorithm_version": DEV_FAST_GRID_ALGO_VERSION,
+        "grid_size_m": int(grid_size_m),
+        "latest_rounds_by_group": {
+            str(key): int(value)
+            for key, value in sorted((latest_rounds_by_group or {}).items())
+        },
+        "noise_source_hash": str(noise_source_hash),
+    }
+    blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "noise-grid-" + hashlib.sha256(blob).hexdigest()
+
+
 def _dev_fast_arrow_batch_size() -> int:
-    raw = os.getenv("NOISE_DEV_FAST_ARROW_BATCH_SIZE", "65536")
+    raw = os.getenv("NOISE_DEV_FAST_ARROW_BATCH_SIZE", "16384")
     try:
         value = int(raw)
     except ValueError as exc:
@@ -397,6 +444,13 @@ def _iter_noise_frames(
     progress_cb=None,
 ):
     """Dispatch between the new Arrow-streaming path and the legacy offset-chunked path."""
+    source_text = str(source_path_or_uri).lower()
+    arrow_required = source_text.endswith(".gpkg") or ".gdb" in source_text
+    if arrow_required and not _dev_fast_use_arrow():
+        raise NoiseIngestError(
+            "NOISE_DEV_FAST_USE_ARROW=0 is not allowed for FileGDB/GPKG dev-fast "
+            f"road/rail sources because the fallback reader is O(N^2). source={source_label}"
+        )
     if _dev_fast_use_arrow():
         try:
             yield from _iter_noise_arrow_batches(
@@ -409,6 +463,12 @@ def _iter_noise_frames(
             )
             return
         except Exception as exc:
+            if arrow_required:
+                raise NoiseIngestError(
+                    "Arrow streaming failed for a FileGDB/GPKG dev-fast noise source; "
+                    "legacy skip_features fallback is intentionally disabled because it is O(N^2). "
+                    f"source={source_label} error={exc!r}"
+                ) from exc
             _progress(
                 progress_cb,
                 f"[noise] arrow streaming failed for source={source_label}: {exc!r}; "
@@ -568,8 +628,21 @@ def _process_roi_spec_grid(
         if not gdb_path.exists():
             return local_acc, local_rows
         gdb_layer = gdb_path.stem
-        selected_fields = (
-            _existing_requested_columns(gdb_path, gdb_layer, _ROI_REQUESTED_FIELDS) or []
+        available_fields = _available_ogr_fields(gdb_path, gdb_layer)
+        candidate_fields = _noise_ogr_candidate_fields(
+            jurisdiction="roi",
+            source_type=str(spec.source_type),
+            round_number=int(spec.round_number),
+        )
+        selected_fields = _select_existing_noise_fields(
+            available_fields,
+            candidate_fields,
+            source_path=gdb_path,
+            layer_name=gdb_layer,
+        )
+        _progress(
+            progress_cb,
+            f"dev-fast Road GDB selected fields for {gdb_layer}: {','.join(selected_fields)}",
         )
         canonical_path = _ensure_road_gdb_canonical_cache(
             source_path=gdb_path,
@@ -715,6 +788,28 @@ def _process_ni_spec_grid(
     return local_acc, local_rows
 
 
+def _existing_dev_fast_grid_rows(
+    engine: Engine,
+    *,
+    artifact_hash: str,
+    grid_size_m: int,
+) -> int:
+    with engine.connect() as conn:
+        value = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM noise_grid_artifact
+                WHERE artifact_hash = :artifact_hash
+                  AND grid_size_m = :grid_size_m
+                  AND source_type IN ('road', 'rail')
+                """
+            ),
+            {"artifact_hash": artifact_hash, "grid_size_m": int(grid_size_m)},
+        ).scalar_one_or_none()
+    return int(value or 0)
+
+
 def build_dev_fast_road_rail_grid(
     engine: Engine,
     *,
@@ -729,6 +824,25 @@ def build_dev_fast_road_rail_grid(
     started = time.perf_counter()
     _validate_dev_fast_grid_size(int(grid_size_m))
     chunk_size = _dev_fast_read_chunk_size()
+    if not _rebuild_dev_fast_grid():
+        existing_rows = _existing_dev_fast_grid_rows(
+            engine,
+            artifact_hash=artifact_hash,
+            grid_size_m=int(grid_size_m),
+        )
+        if existing_rows > 0:
+            _progress(
+                progress_cb,
+                "road/rail grid cache hit: "
+                f"artifact_hash={artifact_hash} grid_size={int(grid_size_m)}m "
+                f"cells={existing_rows:,}",
+            )
+            return {"source_rows": 0, "cell_rows": existing_rows, "reused": 1}
+    else:
+        _progress(
+            progress_cb,
+            f"NOISE_REBUILD_DEV_FAST_GRID=1; rebuilding grid artifact_hash={artifact_hash}",
+        )
     road_rail = {"road", "rail"}
     selected_roi_specs, _, _ = _selected_roi_specs(
         list(ROI_SOURCE_SPECS),
@@ -745,8 +859,10 @@ def build_dev_fast_road_rail_grid(
     use_vsizip = _dev_fast_use_vsizip()
     parallel = _dev_fast_parallel_specs()
 
-    if parallel and (len(selected_roi_specs) + len(selected_ni_specs)) > 1:
-        max_workers = min(4, len(selected_roi_specs) + len(selected_ni_specs))
+    total_specs = len(selected_roi_specs) + len(selected_ni_specs)
+    max_workers_cap = _dev_fast_parallel_max_workers()
+    if parallel and max_workers_cap > 1 and total_specs > 1:
+        max_workers = min(max_workers_cap, total_specs)
         roi_results: list[tuple[dict, int]] = [({}, 0)] * len(selected_roi_specs)
         ni_results: list[tuple[dict, int]] = [({}, 0)] * len(selected_ni_specs)
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
@@ -808,14 +924,6 @@ def build_dev_fast_road_rail_grid(
             )
             _merge_grid_acc(acc, local_acc)
             source_rows += local_rows
-        _progress_event(
-            progress_cb,
-            phase="dev_fast_grid_ni",
-            source=source_label,
-            rows=row_touched,
-            elapsed=max(time.perf_counter() - started, 0.0),
-        )
-
     rows = []
     for (jurisdiction, source_type, metric, cell_x, cell_y), rec in acc.items():
         minx = int(cell_x) * int(grid_size_m)
@@ -982,6 +1090,7 @@ def materialize_dev_fast_resolved(
     *,
     noise_source_hash: str,
     noise_resolved_hash: str,
+    grid_artifact_hash: str,
     grid_size_m: int,
     progress_cb=None,
 ) -> int:
@@ -1045,7 +1154,7 @@ def materialize_dev_fast_resolved(
                     geom
                 )
                 SELECT
-                    g.artifact_hash,
+                    :resolved_hash,
                     g.jurisdiction,
                     g.source_type,
                     g.metric,
@@ -1056,12 +1165,16 @@ def materialize_dev_fast_resolved(
                     g.db_value,
                     g.geom
                 FROM noise_grid_artifact g
-                WHERE g.artifact_hash = :resolved_hash
+                WHERE g.artifact_hash = :grid_artifact_hash
                   AND g.grid_size_m = :grid_size_m
                   AND g.source_type IN ('road', 'rail')
                 """
             ),
-            {"resolved_hash": noise_resolved_hash, "grid_size_m": int(grid_size_m)},
+            {
+                "resolved_hash": noise_resolved_hash,
+                "grid_artifact_hash": grid_artifact_hash,
+                "grid_size_m": int(grid_size_m),
+            },
         )
         exact_prov = conn.execute(
             text(
@@ -1128,7 +1241,7 @@ def materialize_dev_fast_resolved(
                         'hex'
                     ) AS source_refs_hash
                 FROM noise_grid_artifact
-                WHERE artifact_hash = :resolved_hash
+                WHERE artifact_hash = :grid_artifact_hash
                   AND grid_size_m = :grid_size_m
                   AND source_type IN ('road', 'rail')
                 GROUP BY jurisdiction, source_type, metric, round_number
@@ -1136,6 +1249,7 @@ def materialize_dev_fast_resolved(
             ),
             {
                 "resolved_hash": noise_resolved_hash,
+                "grid_artifact_hash": grid_artifact_hash,
                 "grid_size_m": int(grid_size_m),
                 "layer_name": f"grid_{int(grid_size_m)}m",
             },
@@ -1160,45 +1274,9 @@ def apply_accurate_simplification(
     simplify_tolerance_m: float,
     progress_cb=None,
 ) -> int:
-    tol = float(simplify_tolerance_m)
-    if tol <= 0.0:
-        raise NoiseIngestError(
-            f"NOISE_ACCURATE_SIMPLIFY_M must be > 0 for accurate mode, got {simplify_tolerance_m!r}"
-        )
-    _progress(progress_cb, f"accurate simplify tolerance: {tol:.2f}m")
-    with engine.begin() as conn:
-        updated = conn.execute(
-            text(
-                """
-                UPDATE noise_normalized
-                SET geom = ST_Multi(
-                    ST_CollectionExtract(
-                        ST_MakeValid(
-                            ST_SimplifyPreserveTopology(geom, :tol)
-                        ),
-                        3
-                    )
-                )
-                WHERE noise_source_hash = :h
-                  AND source_type IN ('road', 'rail')
-                """
-            ),
-            {"h": noise_source_hash, "tol": tol},
-        )
-        conn.execute(
-            text(
-                """
-                DELETE FROM noise_normalized
-                WHERE noise_source_hash = :h
-                  AND source_type IN ('road', 'rail')
-                  AND (geom IS NULL OR ST_IsEmpty(geom) OR ST_Area(geom) <= 0)
-                """
-            ),
-            {"h": noise_source_hash},
-        )
-    updated_rows = int(updated.rowcount or 0)
-    _progress(
-        progress_cb,
-        f"accurate simplify applied: tolerance={tol:.2f}m updated_rows={updated_rows:,}",
+    del engine, noise_source_hash, simplify_tolerance_m, progress_cb
+    raise NoiseIngestError(
+        "apply_accurate_simplification is disabled because accurate mode must not "
+        "mutate canonical noise_normalized rows. Pass simplify_tolerance_m to "
+        "dissolve_noise_into_staging instead."
     )
-    return updated_rows

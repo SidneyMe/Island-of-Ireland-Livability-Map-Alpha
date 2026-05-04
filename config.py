@@ -609,12 +609,27 @@ def pmtiles_filename(profile: str | None = None) -> str:
     return f"livability-{normalized_profile}.pmtiles"
 
 
+def noise_pmtiles_filename(profile: str | None = None) -> str:
+    normalized_profile = normalize_build_profile(profile)
+    if normalized_profile == "full":
+        return "noise.pmtiles"
+    return f"noise-{normalized_profile}.pmtiles"
+
+
 def pmtiles_output_path(profile: str | None = None) -> Path:
     return CACHE_DIR / pmtiles_filename(profile)
 
 
+def noise_pmtiles_output_path(profile: str | None = None) -> Path:
+    return CACHE_DIR / noise_pmtiles_filename(profile)
+
+
 def pmtiles_url_path(profile: str | None = None) -> str:
     return f"/tiles/{pmtiles_filename(profile)}"
+
+
+def noise_pmtiles_url_path(profile: str | None = None) -> str:
+    return f"/tiles/{noise_pmtiles_filename(profile)}"
 
 
 PMTILES_OUTPUT_PATH = pmtiles_output_path(DEFAULT_BUILD_PROFILE)

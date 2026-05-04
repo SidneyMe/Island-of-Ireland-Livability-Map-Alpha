@@ -30,9 +30,27 @@ from ._state import _STATE
 # Artifact mode sentinel and state
 # ---------------------------------------------------------------------------
 
+# Set by workflow preflight so artifact mode uses the mode-selected resolved
+# artifact instead of whatever generic active pointer was last written.
+_SELECTED_ARTIFACT_HASH: str | None = None
+_SELECTED_ARTIFACT_MANIFEST: Any | None = None
+
 # Set by _noise_rows_from_artifact so _noise_processing_hash() can read it
 # without needing an engine argument (workflow calls it with no args).
 _CURRENT_ARTIFACT_HASH: str | None = None
+
+
+def set_selected_noise_artifact(artifact) -> None:
+    """Pin artifact-mode publish to the resolved artifact chosen in preflight."""
+    global _SELECTED_ARTIFACT_HASH, _SELECTED_ARTIFACT_MANIFEST, _CURRENT_ARTIFACT_HASH
+    if artifact is None:
+        _SELECTED_ARTIFACT_HASH = None
+        _SELECTED_ARTIFACT_MANIFEST = None
+        _CURRENT_ARTIFACT_HASH = None
+        return
+    _SELECTED_ARTIFACT_HASH = str(artifact.artifact_hash)
+    _SELECTED_ARTIFACT_MANIFEST = artifact
+    _CURRENT_ARTIFACT_HASH = str(artifact.artifact_hash)
 
 
 class _ArtifactNoiseReference:
@@ -299,7 +317,7 @@ def _noise_rows_from_artifact(engine, *, progress_cb=None) -> "_ArtifactNoiseRef
     global _CURRENT_ARTIFACT_HASH
     from noise_artifacts.manifest import get_active_artifact
 
-    artifact = get_active_artifact(engine, "resolved")
+    artifact = _SELECTED_ARTIFACT_MANIFEST or get_active_artifact(engine, "resolved")
     if artifact is None:
         raise RuntimeError(
             "NOISE_MODE=artifact but no active complete resolved artifact found. "
@@ -334,6 +352,8 @@ def _noise_processing_hash(engine=None) -> str | None:
     Used as a DB-level clone key so unchanged noise inputs skip re-processing.
     """
     if NOISE_MODE == "artifact":
+        if _SELECTED_ARTIFACT_HASH:
+            return _SELECTED_ARTIFACT_HASH
         if _CURRENT_ARTIFACT_HASH:
             return _CURRENT_ARTIFACT_HASH
         if engine is not None:

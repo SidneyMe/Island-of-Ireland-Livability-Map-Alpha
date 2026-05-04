@@ -481,6 +481,7 @@ function updateNoiseNote() {
 
 function applyNoiseFilter() {
   if (!state.map) return;
+  if (!state.map.getLayer("noise-fill")) return;
   state.map.setFilter(
     "noise-fill",
     buildNoiseLayerFilter({
@@ -493,6 +494,7 @@ function applyNoiseFilter() {
 
 function applyNoiseVisibility() {
   if (!state.map) return;
+  if (!state.map.getLayer("noise-fill")) return;
   state.map.setLayoutProperty(
     "noise-fill",
     "visibility",
@@ -1363,12 +1365,14 @@ function initializeMap() {
   state.map.on("mouseleave", "service-deserts-fill", function () {
     state.map.getCanvas().style.cursor = "";
   });
-  state.map.on("mouseenter", "noise-fill", function () {
-    state.map.getCanvas().style.cursor = "pointer";
-  });
-  state.map.on("mouseleave", "noise-fill", function () {
-    state.map.getCanvas().style.cursor = "";
-  });
+  if (state.map.getLayer("noise-fill")) {
+    state.map.on("mouseenter", "noise-fill", function () {
+      state.map.getCanvas().style.cursor = "pointer";
+    });
+    state.map.on("mouseleave", "noise-fill", function () {
+      state.map.getCanvas().style.cursor = "";
+    });
+  }
 
   state.map.on("error", function (event) {
     const message = (event && event.error && event.error.message) || "Map error";

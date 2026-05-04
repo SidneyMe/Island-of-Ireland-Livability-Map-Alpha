@@ -389,6 +389,9 @@ function buildStyle(runtime, options = {}) {
   const colors = runtime.category_colors || {};
   const origin = options.windowOrigin || "http://127.0.0.1:8000";
   const pmtilesUrl = "pmtiles://" + origin + (runtime.pmtiles_url || "/tiles/livability.pmtiles");
+  const noisePmtilesUrl = runtime.noise_pmtiles_url
+    ? "pmtiles://" + origin + runtime.noise_pmtiles_url
+    : null;
   const layers = [{ id: "basemap", type: "raster", source: "basemap" }];
   buildActiveGridLayers(
     runtime,
@@ -397,28 +400,30 @@ function buildStyle(runtime, options = {}) {
     layers.push(layer);
   });
 
-  layers.push({
-    id: "noise-fill",
-    type: "fill",
-    source: "livability",
-    "source-layer": "noise",
-    minzoom: 8,
-    layout: {
-      visibility: "none",
-      "fill-sort-key": ["coalesce", ["get", "db_low"], 0]
-    },
-    filter: ["all", ["==", ["get", "metric"], "Lden"]],
-    paint: {
-      "fill-color": noiseFillColorExpression(),
-      "fill-opacity": [
-        "interpolate", ["linear"], ["zoom"],
-        8, 0.22,
-        13, 0.30,
-        19, 0.36
-      ],
-      "fill-outline-color": "rgba(102, 37, 6, 0.26)"
-    }
-  });
+  if (noisePmtilesUrl) {
+    layers.push({
+      id: "noise-fill",
+      type: "fill",
+      source: "noise",
+      "source-layer": "noise",
+      minzoom: 8,
+      layout: {
+        visibility: "none",
+        "fill-sort-key": ["coalesce", ["get", "db_low"], 0]
+      },
+      filter: ["all", ["==", ["get", "metric"], "Lden"]],
+      paint: {
+        "fill-color": noiseFillColorExpression(),
+        "fill-opacity": [
+          "interpolate", ["linear"], ["zoom"],
+          8, 0.22,
+          13, 0.30,
+          19, 0.36
+        ],
+        "fill-outline-color": "rgba(102, 37, 6, 0.26)"
+      }
+    });
+  }
 
   layers.push({
     id: "amenities-circle",
@@ -472,21 +477,29 @@ function buildStyle(runtime, options = {}) {
     }
   });
 
+  const sources = {
+    basemap: {
+      type: "raster",
+      tiles: [BASEMAP_RASTER],
+      tileSize: 256,
+      attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
+    },
+    livability: {
+      type: "vector",
+      url: pmtilesUrl
+    },
+  };
+  if (noisePmtilesUrl) {
+    sources.noise = {
+      type: "vector",
+      url: noisePmtilesUrl
+    };
+  }
+
   return {
     version: 8,
     glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-    sources: {
-      basemap: {
-        type: "raster",
-        tiles: [BASEMAP_RASTER],
-        tileSize: 256,
-        attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
-      },
-      livability: {
-        type: "vector",
-        url: pmtilesUrl
-      },
-    },
+    sources: sources,
     layers: layers
   };
 }

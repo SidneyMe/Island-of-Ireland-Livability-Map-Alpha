@@ -112,6 +112,7 @@ class _ServerHarness:
         *,
         pmtiles_path: Path,
         static_dir: Path,
+        noise_pmtiles_path: Path | None = None,
         profile: str = "full",
     ) -> None:
         self.httpd = serve_from_db.create_http_server(
@@ -121,6 +122,7 @@ class _ServerHarness:
             port=0,
             static_dir=static_dir,
             pmtiles_path=pmtiles_path,
+            noise_pmtiles_path=noise_pmtiles_path,
         )
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
 
@@ -281,6 +283,30 @@ class LocalServerEndpointTests(TestCase):
         self.assertEqual(payload, body[10:20])
         self.assertEqual(content_range, f"bytes 10-19/{len(body)}")
 
+    def test_noise_pmtiles_range_request(self) -> None:
+        main_body = b"MAIN" * 64
+        noise_body = b"NOISE_ARCHIVE" * 32
+        with TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            static_dir, pmtiles_path = _make_fixture(tmp, pmtiles_bytes=main_body)
+            noise_pmtiles_path = tmp / "noise.pmtiles"
+            noise_pmtiles_path.write_bytes(noise_body)
+            with _ServerHarness(
+                _FakeService(),
+                pmtiles_path=pmtiles_path,
+                noise_pmtiles_path=noise_pmtiles_path,
+                static_dir=static_dir,
+            ) as base_url:
+                request = Request(base_url + "/tiles/noise.pmtiles", headers={"Range": "bytes=3-8"})
+                with urlopen(request) as response:
+                    payload = response.read()
+                    status = response.status
+                    content_range = response.headers.get("Content-Range")
+
+        self.assertEqual(status, 206)
+        self.assertEqual(payload, noise_body[3:9])
+        self.assertEqual(content_range, f"bytes 3-8/{len(noise_body)}")
+
     def test_pmtiles_open_ended_range(self) -> None:
         body = b"x" * 200
         with TemporaryDirectory() as tmp_name:
@@ -433,18 +459,22 @@ class RenderAndCliTests(TestCase):
                 ],
             },
         }
-        with (
-            mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=manifest),
-            mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
-            mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=True),
-            mock.patch.object(serve_from_db._surface, "build_surface_shell_hash", return_value="shell-hash-123"),
-            mock.patch.object(serve_from_db._surface, "surface_shell_dir", return_value=Path("surface-shell")),
-            mock.patch.object(serve_from_db._surface, "surface_score_dir", return_value=Path("surface-scores")),
-            mock.patch.object(serve_from_db._surface, "surface_tile_dir", return_value=Path("surface-tiles")),
-            mock.patch.object(serve_from_db._surface, "ensure_surface_tile_cache_manifest", return_value={}),
-            mock.patch.object(serve_from_db._surface, "surface_analysis_ready", return_value=True),
-        ):
-            payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
+        with TemporaryDirectory() as tmp_name:
+            noise_pmtiles_path = Path(tmp_name) / "noise.pmtiles"
+            noise_pmtiles_path.write_bytes(b"noise")
+            with (
+                mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=manifest),
+                mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
+                mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=True),
+                mock.patch.object(serve_from_db, "noise_pmtiles_output_path", return_value=noise_pmtiles_path),
+                mock.patch.object(serve_from_db._surface, "build_surface_shell_hash", return_value="shell-hash-123"),
+                mock.patch.object(serve_from_db._surface, "surface_shell_dir", return_value=Path("surface-shell")),
+                mock.patch.object(serve_from_db._surface, "surface_score_dir", return_value=Path("surface-scores")),
+                mock.patch.object(serve_from_db._surface, "surface_tile_dir", return_value=Path("surface-tiles")),
+                mock.patch.object(serve_from_db._surface, "ensure_surface_tile_cache_manifest", return_value={}),
+                mock.patch.object(serve_from_db._surface, "surface_analysis_ready", return_value=True),
+            ):
+                payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
 
         self.assertEqual(payload["grid_sizes_m"], [20000, 10000, 5000])
         self.assertEqual(payload["build_profile"], "full")
@@ -466,6 +496,7 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["transport_flag_counts"]["is_unscheduled_stop"], 1)
         self.assertEqual(payload["transport_mode_counts"], {"tram": 4, "rail": 6})
         self.assertTrue(payload["noise_enabled"])
+        self.assertEqual(payload["noise_pmtiles_url"], "/tiles/noise.pmtiles")
         self.assertEqual(payload["noise_counts"], {"roi": 5, "ni": 3})
         self.assertEqual(payload["noise_source_counts"]["road"], 4)
         self.assertEqual(payload["noise_metric_counts"], {"Lden": 5, "Lnight": 3})
@@ -513,6 +544,7 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["transport_mode_counts"], {})
         self.assertEqual(payload["transport_bus_frequency_counts"], {})
         self.assertFalse(payload["noise_enabled"])
+        self.assertIsNone(payload["noise_pmtiles_url"])
         self.assertEqual(payload["noise_counts"], {})
 
     def test_runtime_service_uses_dev_config_hash_and_coarse_only_payload(self) -> None:

@@ -273,7 +273,7 @@ python main.py --precompute --force-precompute
 python3 main.py --precompute --force-precompute
 ```
 
-### Windows Noise Workflow (Fast Reuse vs Slow Prepare)
+### Windows Noise Workflow (Fast Reuse, Smart Prepare, Explicit Force)
 
 Normal fast dev loop:
 
@@ -285,16 +285,30 @@ This command requires an existing resolved noise artifact for the selected mode.
 It never imports raw noise ZIP/SHP/GDB files, never runs `ogr2ogr`, and never builds noise artifacts.
 If the required artifact is missing, it fails fast by design.
 
-Build or refresh the dev-fast noise artifact (slow path):
+Build or refresh the dev-fast noise artifact. This is cache-aware: it builds when
+the artifact is missing or stale, but it does not force source reimport by default.
 
 ```text
 scripts\win\prepare_noise_artifact_dev.cmd
 ```
 
-Build or refresh the accurate noise artifact (slow path):
+Build or refresh the accurate noise artifact. This is cache-aware: it builds when
+the artifact is missing or stale, but it does not force source reimport by default.
 
 ```text
 scripts\win\prepare_noise_artifact_accurate.cmd
+```
+
+Force a full dev-fast noise artifact rebuild, including raw source reimport:
+
+```text
+scripts\win\force_noise_artifact_dev.cmd
+```
+
+Force a full accurate noise artifact rebuild, including raw source reimport:
+
+```text
+scripts\win\force_noise_artifact_accurate.cmd
 ```
 
 Performance contract for `precompute_noise_dev.cmd`:
@@ -302,7 +316,10 @@ Performance contract for `precompute_noise_dev.cmd`:
 - Hard watchdog cap: 20 minutes.
 - If DevReuse approaches the watchdog timeout, treat it as a performance regression bug.
 
-Do not use artifact refresh/reimport/force flags in the normal dev loop.
+Do not use artifact refresh/reimport/force flags in the normal dev loop. Use
+`precompute_noise_*.cmd` for strict reuse, `prepare_noise_artifact_*.cmd` for
+cache-aware artifact refresh, and `force_noise_artifact_*.cmd` only when source
+rows must be reimported.
 
 Serve the local web app:
 

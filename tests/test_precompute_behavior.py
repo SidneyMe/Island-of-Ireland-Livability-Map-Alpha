@@ -2415,6 +2415,20 @@ class WorkflowTests(TestCase):
         engine.connect.return_value = connect_ctx
         return engine
 
+    def _workflow_db_engine_with_manifest_noise(
+        self,
+        *,
+        stored_noise_hash: str | None,
+        summary_json: dict | None = None,
+    ):
+        engine = self._workflow_db_engine()
+        conn = engine.connect.return_value.__enter__.return_value
+        conn.execute.return_value.mappings.return_value.one_or_none.return_value = {
+            "noise_processing_hash": stored_noise_hash,
+            "summary_json": dict(summary_json or {}),
+        }
+        return engine
+
     def test_require_active_artifact_uses_mode_scoped_lookup_without_build(self) -> None:
         engine = self._workflow_db_engine()
         artifact = SimpleNamespace(artifact_hash="res-dev-123")
@@ -2464,6 +2478,52 @@ class WorkflowTests(TestCase):
         log_lower = log_text.lower()
         for marker in forbidden_markers:
             self.assertNotIn(marker.lower(), log_lower)
+
+    def test_complete_build_with_changed_noise_hash_refreshes_noise_only(self) -> None:
+        from precompute._rows import _ArtifactNoiseReference
+
+        engine = self._workflow_db_engine_with_manifest_noise(
+            stored_noise_hash="res-old",
+            summary_json={"summary": True},
+        )
+        artifact = SimpleNamespace(artifact_hash="res-new")
+        noise_payload = _ArtifactNoiseReference("res-new", artifact)
+        refresh_mock = mock.Mock()
+        kwargs = _workflow_kwargs(
+            build_engine=mock.Mock(return_value=engine),
+            has_complete_build=mock.Mock(return_value=True),
+            noise_processing_hash=mock.Mock(return_value="res-new"),
+            noise_rows=mock.Mock(return_value=noise_payload),
+            refresh_noise_overlay_for_build=refresh_mock,
+        )
+
+        with (
+            mock.patch("config.NOISE_MODE", "artifact"),
+            mock.patch(
+                "noise_artifacts.manifest.get_resolved_artifact_for_mode",
+                return_value=artifact,
+            ),
+            mock.patch(
+                "noise_artifacts.runner.build_default_noise_artifact",
+                side_effect=AssertionError("reuse mode must not rebuild artifacts"),
+            ),
+        ):
+            build_key = precompute._workflow.run_precompute_impl(
+                require_active_noise_artifact=True,
+                **kwargs,
+            )
+
+        self.assertEqual(build_key, "build-key-123")
+        kwargs["phase_amenities"].assert_not_called()
+        kwargs["phase_grids"].assert_not_called()
+        kwargs["summary_json"].assert_not_called()
+        kwargs["publish_precomputed_artifacts"].assert_not_called()
+        refresh_mock.assert_called_once()
+        refresh_kwargs = refresh_mock.call_args.kwargs
+        self.assertEqual(refresh_kwargs["summary_json"], {"summary": True})
+        self.assertIs(refresh_kwargs["noise_rows"], noise_payload)
+        self.assertEqual(refresh_kwargs["noise_processing_hash"], "res-new")
+        self.assertEqual(refresh_kwargs["noise_artifact_hash"], "res-new")
 
     def test_require_active_artifact_missing_raises_fast_for_dev_fast(self) -> None:
         engine = self._workflow_db_engine()
@@ -2524,7 +2584,7 @@ class WorkflowTests(TestCase):
         with (
             mock.patch("config.NOISE_MODE", "artifact"),
             mock.patch(
-                "noise_artifacts.manifest.get_active_artifact",
+                "noise_artifacts.manifest.get_resolved_artifact_for_mode",
                 side_effect=[None, built_artifact],
             ),
             mock.patch(

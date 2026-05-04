@@ -16,8 +16,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from .dev_fast import (
-    apply_accurate_simplification,
     build_dev_fast_road_rail_grid,
+    dev_fast_grid_artifact_hash,
     materialize_dev_fast_resolved,
 )
 from .dissolve import dissolve_noise_into_staging, drop_staging_tables
@@ -226,7 +226,7 @@ def build_noise_artifact(
                 _progress(progress_cb, "ingest start")
                 log.info("ingesting raw source -> noise_normalized (source_hash=%s)", source_hash)
                 ingest_started = time.perf_counter()
-                latest_round_only = True
+                latest_round_only = mode_norm == "dev_fast"
                 if mode_norm == "dev_fast":
                     exact_source_types = {"airport", "industry"}
                     _progress(
@@ -270,14 +270,20 @@ def build_noise_artifact(
                 source_rows_total = _source_row_count(engine, source_hash)
                 _progress(progress_cb, f"source ingest complete rows={source_rows_total:,}")
                 _progress(progress_cb, f"ingest done: {n_ingested} rows")
+                grid_artifact_hash = None
                 if mode_norm == "dev_fast":
+                    grid_artifact_hash = dev_fast_grid_artifact_hash(
+                        noise_source_hash=source_hash,
+                        grid_size_m=int(grid_size_m),
+                        latest_rounds_by_group=latest_rounds_by_group or {},
+                    )
                     _progress(progress_cb, "dev-fast: building road/rail coarse grid artifact")
                     grid_started = time.perf_counter()
                     grid_result = build_dev_fast_road_rail_grid(
                         engine,
                         data_dir=data_dir,
                         noise_source_hash=source_hash,
-                        artifact_hash=resolved_hash,
+                        artifact_hash=grid_artifact_hash,
                         grid_size_m=int(grid_size_m),
                         progress_cb=progress_cb,
                     )
@@ -293,6 +299,7 @@ def build_noise_artifact(
                         engine,
                         noise_source_hash=source_hash,
                         noise_resolved_hash=resolved_hash,
+                        grid_artifact_hash=grid_artifact_hash,
                         grid_size_m=int(grid_size_m),
                         progress_cb=progress_cb,
                     )
@@ -303,12 +310,6 @@ def build_noise_artifact(
                     _progress(
                         progress_cb,
                         f"accurate: simplifying road/rail polygons tolerance={float(accurate_simplify_m):.2f}m",
-                    )
-                    apply_accurate_simplification(
-                        engine,
-                        noise_source_hash=source_hash,
-                        simplify_tolerance_m=float(accurate_simplify_m),
-                        progress_cb=progress_cb,
                     )
                     _progress(progress_cb, f"dissolve start source_hash={source_hash}")
                     _progress(
@@ -323,6 +324,7 @@ def build_noise_artifact(
                         resolved_hash=resolved_hash,
                         tile_size_metres=tile_size_metres,
                         topology_grid_metres=topology_grid_metres,
+                        simplify_tolerance_m=float(accurate_simplify_m),
                         progress_cb=progress_cb,
                     )
                     _timing(progress_cb, "dissolve.total", time.perf_counter() - dissolve_started)
@@ -356,6 +358,7 @@ def build_noise_artifact(
                         "noise_accuracy_mode": mode_norm,
                         "grid_size_m": int(grid_size_m),
                         "accurate_simplify_m": float(accurate_simplify_m),
+                        "grid_artifact_hash": grid_artifact_hash,
                         "latest_rounds_by_group": dict(latest_rounds_by_group or {}),
                     },
                 )

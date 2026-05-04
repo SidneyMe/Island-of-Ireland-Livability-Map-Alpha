@@ -578,6 +578,15 @@ class DevFastModeTests(TestCase):
             self.assertNotIn("ingest_noise_normalized_ogr2ogr", src)
             self.assertNotIn("_run_ogr2ogr_import", src)
 
+    def test_dev_fast_road_gdb_uses_robust_field_selection_for_canonical_cache(self) -> None:
+        import inspect
+        import noise_artifacts.dev_fast as _df
+
+        src = inspect.getsource(_df._process_roi_spec_grid)
+        self.assertIn("_available_ogr_fields", src)
+        self.assertIn("_noise_ogr_candidate_fields", src)
+        self.assertIn("_select_existing_noise_fields", src)
+
     def test_dev_fast_grid_uses_max_band_per_cell_key(self) -> None:
         from shapely.geometry import box
 
@@ -696,9 +705,59 @@ class DevFastModeTests(TestCase):
         src = inspect.getsource(materialize_dev_fast_resolved)
         self.assertIn("source_type IN ('airport', 'industry')", src)
         self.assertIn("source_type IN ('road', 'rail')", src)
-        self.assertIn("artifact_hash = :resolved_hash", src)
+        self.assertIn("artifact_hash = :grid_artifact_hash", src)
+        self.assertIn("SELECT\n                    :resolved_hash", src)
         self.assertIn("FROM noise_grid_artifact", src)
         self.assertIn("GROUP BY jurisdiction, source_type, metric, round_number", src)
+
+    def test_dev_fast_grid_hash_is_deterministic_and_grid_scoped(self) -> None:
+        from noise_artifacts.dev_fast import dev_fast_grid_artifact_hash
+
+        h1 = dev_fast_grid_artifact_hash(
+            noise_source_hash="src",
+            grid_size_m=1000,
+            latest_rounds_by_group={"road": 4, "rail": 4},
+        )
+        h2 = dev_fast_grid_artifact_hash(
+            noise_source_hash="src",
+            grid_size_m=1000,
+            latest_rounds_by_group={"rail": 4, "road": 4},
+        )
+        h3 = dev_fast_grid_artifact_hash(
+            noise_source_hash="src",
+            grid_size_m=500,
+            latest_rounds_by_group={"road": 4, "rail": 4},
+        )
+        self.assertEqual(h1, h2)
+        self.assertNotEqual(h1, h3)
+        self.assertTrue(h1.startswith("noise-grid-"))
+
+    def test_dev_fast_grid_reuse_has_explicit_escape_hatch(self) -> None:
+        import inspect
+        from noise_artifacts.dev_fast import build_dev_fast_road_rail_grid
+
+        src = inspect.getsource(build_dev_fast_road_rail_grid)
+        self.assertIn("_existing_dev_fast_grid_rows", src)
+        self.assertIn("NOISE_REBUILD_DEV_FAST_GRID=1", src)
+        self.assertIn("road/rail grid cache hit", src)
+
+    def test_accurate_simplification_does_not_update_noise_normalized(self) -> None:
+        import inspect
+        import noise_artifacts.builder as builder
+        import noise_artifacts.dev_fast as dev_fast
+        import noise_artifacts.dissolve as dissolve
+
+        self.assertNotIn(
+            "apply_accurate_simplification(",
+            inspect.getsource(builder.build_noise_artifact),
+        )
+        self.assertNotIn(
+            "UPDATE noise_normalized",
+            inspect.getsource(dev_fast.apply_accurate_simplification),
+        )
+        dissolve_src = inspect.getsource(dissolve._pass1_dissolve)
+        self.assertIn("ST_SimplifyPreserveTopology", dissolve_src)
+        self.assertIn("source_rows AS", dissolve_src)
 
     def test_iter_noise_arrow_batches_streams_vsizip_shapefile(self) -> None:
         import zipfile
@@ -804,6 +863,26 @@ class DevFastModeTests(TestCase):
             self.assertFalse(_dev_fast_use_arrow())
             self.assertFalse(_dev_fast_use_vsizip())
             self.assertFalse(_dev_fast_parallel_specs())
+
+    def test_dev_fast_parallel_max_workers_defaults_and_validates(self) -> None:
+        from noise_artifacts.dev_fast import _dev_fast_parallel_max_workers
+        from noise_artifacts.exceptions import NoiseIngestError
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NOISE_DEV_FAST_MAX_WORKERS", None)
+            self.assertEqual(_dev_fast_parallel_max_workers(), 2)
+        with patch.dict(os.environ, {"NOISE_DEV_FAST_MAX_WORKERS": "3"}, clear=False):
+            self.assertEqual(_dev_fast_parallel_max_workers(), 3)
+        with patch.dict(os.environ, {"NOISE_DEV_FAST_MAX_WORKERS": "0"}, clear=False):
+            with self.assertRaisesRegex(NoiseIngestError, "NOISE_DEV_FAST_MAX_WORKERS"):
+                _dev_fast_parallel_max_workers()
+
+    def test_dev_fast_arrow_batch_size_defaults_to_memory_safer_value(self) -> None:
+        from noise_artifacts.dev_fast import _dev_fast_arrow_batch_size
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NOISE_DEV_FAST_ARROW_BATCH_SIZE", None)
+            self.assertEqual(_dev_fast_arrow_batch_size(), 16384)
 
     def test_bulk_load_grid_rows_uses_copy_when_psycopg3_available(self) -> None:
         import inspect
@@ -1036,12 +1115,14 @@ class IngestSqlTests(TestCase):
         src = inspect.getsource(ingest_noise_normalized)
         self.assertIn("_delete_source_rows(engine, noise_source_hash)", src)
 
-    def test_bake_stub_raises_not_implemented(self) -> None:
-        from noise_artifacts.bake import bake_noise_artifact_pmtiles
-        from pathlib import Path
-        engine = MagicMock()
-        with self.assertRaises(NotImplementedError):
-            bake_noise_artifact_pmtiles(engine, "tilehash", output_dir=Path("/tmp"))
+    def test_noise_bake_is_implemented(self) -> None:
+        import inspect
+        import noise_artifacts.bake as bake_module
+
+        src = inspect.getsource(bake_module)
+        self.assertIn("_noise_tile_mvt_bytes", src)
+        self.assertIn("Writer", src)
+        self.assertNotIn("NotImplementedError", src)
 
 
 class MainModuleTests(TestCase):
@@ -1718,4 +1799,3 @@ class BuilderProgressTests(TestCase):
 
         self.assertEqual(produced["count"], 500, "ingest must stop after the first invalid batch")
         mock_copy.assert_not_called()
-

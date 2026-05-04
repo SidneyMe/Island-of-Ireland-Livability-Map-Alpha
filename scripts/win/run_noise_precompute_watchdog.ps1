@@ -1,5 +1,5 @@
 param(
-    [ValidateSet("DevReuse", "DevPrepare", "AccuratePrepare")]
+    [ValidateSet("DevReuse", "DevPrepare", "DevForce", "AccurateReuse", "AccuratePrepare", "AccurateForce")]
     [string]$Mode = "DevReuse"
 )
 
@@ -23,15 +23,27 @@ $baseArgs = @(
 
 switch ($Mode) {
     "DevReuse" {
-        $modeArgs = @("--force-precompute", "--require-active-noise-artifact")
+        $modeArgs = @("--require-active-noise-artifact")
         $defaultTimeoutSeconds = 1200
     }
     "DevPrepare" {
-        $modeArgs = @("--refresh-noise-artifact", "--reimport-noise-source", "--force-noise-artifact", "--force-precompute")
+        $modeArgs = @("--refresh-noise-artifact")
         $defaultTimeoutSeconds = 3600
     }
+    "DevForce" {
+        $modeArgs = @("--refresh-noise-artifact", "--reimport-noise-source", "--force-noise-artifact")
+        $defaultTimeoutSeconds = 3600
+    }
+    "AccurateReuse" {
+        $modeArgs = @("--noise-accurate", "--require-active-noise-artifact")
+        $defaultTimeoutSeconds = 1200
+    }
     "AccuratePrepare" {
-        $modeArgs = @("--noise-accurate", "--refresh-noise-artifact", "--reimport-noise-source", "--force-noise-artifact", "--force-precompute")
+        $modeArgs = @("--noise-accurate", "--refresh-noise-artifact")
+        $defaultTimeoutSeconds = 7200
+    }
+    "AccurateForce" {
+        $modeArgs = @("--noise-accurate", "--refresh-noise-artifact", "--reimport-noise-source", "--force-noise-artifact")
         $defaultTimeoutSeconds = 7200
     }
     default {

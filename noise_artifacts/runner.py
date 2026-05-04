@@ -11,6 +11,7 @@ Neither caller needs to duplicate source-signature or domain-hash logic.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import time
@@ -23,12 +24,12 @@ log = logging.getLogger(__name__)
 
 # Version constants — bump any to force re-ingest/re-resolve of all artifacts.
 PARSER_VERSION = 1
-SOURCE_SCHEMA_VERSION = 1
+SOURCE_SCHEMA_VERSION = 2
 TOPOLOGY_RULES_VERSION = 1
-DISSOLVE_RULES_VERSION = 1
+DISSOLVE_RULES_VERSION = 2
 ROUND_PRIORITY_VERSION = 1
 EXTENT_VERSION = 1
-ACCURACY_MODE_VERSION = 1
+ACCURACY_MODE_VERSION = 2
 
 _NOISE_GRID_SIZE_ENV = "NOISE_GRID_SIZE_M"
 _NOISE_ACCURATE_SIMPLIFY_ENV = "NOISE_ACCURATE_SIMPLIFY_M"
@@ -164,7 +165,22 @@ def build_default_noise_artifact(
 
     sig_started = time.perf_counter()
     source_sig = dataset_signature(resolved_data_dir)
-    src_hash = noise_source_hash(source_sig, PARSER_VERSION, SOURCE_SCHEMA_VERSION)
+    source_scope_payload = {
+        "dataset_signature": source_sig,
+        "noise_accuracy_mode": accuracy_mode,
+        "round_scope": "latest" if accuracy_mode == "dev_fast" else "all",
+        "latest_rounds_by_group": latest_rounds if accuracy_mode == "dev_fast" else {},
+    }
+    source_scope_signature = json.dumps(
+        source_scope_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    src_hash = noise_source_hash(
+        source_scope_signature,
+        PARSER_VERSION,
+        SOURCE_SCHEMA_VERSION,
+    )
     _progress(progress_cb, f"source hash: {src_hash}")
     _timing(progress_cb, "noise.signature", time.perf_counter() - sig_started)
 
