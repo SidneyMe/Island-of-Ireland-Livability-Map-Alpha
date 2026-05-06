@@ -615,7 +615,9 @@ def copy_noise_artifact_to_noise_polygons(
                 SELECT
                     CASE
                         WHEN :has_study_area THEN
-                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
+                            ST_MakeValid(
+                                ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
+                            )
                         ELSE NULL
                     END AS geom
             ),
@@ -629,7 +631,7 @@ def copy_noise_artifact_to_noise_polygons(
                     CASE
                         WHEN :has_study_area THEN
                             ST_Multi(ST_CollectionExtract(
-                                ST_MakeValid(ST_Intersection(d.geom, s.geom)), 3
+                                ST_MakeValid(ST_Intersection(ST_MakeValid(d.geom), s.geom)), 3
                             ))
                         ELSE d.geom
                     END AS clipped_geom
@@ -640,7 +642,7 @@ def copy_noise_artifact_to_noise_polygons(
                   AND NOT ST_IsEmpty(d.geom)
                   AND (
                       NOT :has_study_area
-                      OR ST_Intersects(d.geom, s.geom)
+                      OR ST_Intersects(ST_MakeValid(d.geom), s.geom)
                   )
             )
             INSERT INTO noise_polygons (

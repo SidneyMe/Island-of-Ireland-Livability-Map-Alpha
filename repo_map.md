@@ -91,6 +91,7 @@
 
 - Windows wrapper for noise-focused dev precompute with enforced wall-clock timeout. (Confirmed)
 - Runs `scripts/win/geo_env.cmd` with project `.venv` Python and explicit mode selection: `DevReuse` / `AccurateReuse` (reuse-only fast paths, never rebuild), `DevPrepare` / `AccuratePrepare` (cache-aware refresh paths), and `DevForce` / `AccurateForce` (source reimport + resolved rebuild paths). (Confirmed)
+- Supports overriding the Python executable via `NOISE_PYTHON_EXE` (for example `python` in the active conda env) and falls back to conda `python` when `.venv\Scripts\python.exe` is missing. (Confirmed)
 - On timeout, kills the spawned process tree (and attempts cleanup of lingering `ogr2ogr` processes) and returns exit code `124`. (Confirmed)
 
 ---
@@ -548,7 +549,7 @@ tests/test_server_behavior.py
 | `osm2pgsql_livability.lua` | OSM tag filter / import rules |
 | `environment.yml` | Conda-forge Windows GDAL/PostGIS runtime spec (`livability-gdal`) |
 | `.env.example` | Local env template |
-| `scripts/win/geo_env.cmd` | Windows CMD launcher that activates Miniforge env and pins GDAL/PROJ/noise env vars |
+| `scripts/win/geo_env.cmd` | Windows CMD launcher that activates Miniforge env, pins GDAL/PROJ/noise env vars, and hydrates `NOISE_OGR2OGR_*` settings from project `.env` before applying script defaults |
 | `scripts/win/bootstrap_geo_env.cmd` | Windows first-time setup wrapper: activates conda base, creates `%GEO_CONDA_ENV%` from `environment.yml` via mamba when missing, then runs env checks |
 | `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
 | `scripts/win/selftest_geo_env.cmd` | Windows post-check smoke script for `ogr2ogr` path, GDAL/PROJ env vars, PostgreSQL GDAL driver, and core Python imports |

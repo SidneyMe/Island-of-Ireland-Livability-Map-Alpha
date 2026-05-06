@@ -1200,7 +1200,9 @@ def materialize_dev_fast_resolved(
                     source_layer,
                     COUNT(*) AS source_ref_count,
                     encode(
-                        sha256(string_agg(COALESCE(source_ref, '') ORDER BY COALESCE(source_ref, ''))::bytea),
+                        sha256(
+                            string_agg(COALESCE(source_ref, ''), '' ORDER BY COALESCE(source_ref, ''))::bytea
+                        ),
                         'hex'
                     ) AS source_refs_hash
                 FROM noise_normalized
@@ -1236,7 +1238,7 @@ def materialize_dev_fast_resolved(
                     COUNT(*) AS source_ref_count,
                     encode(
                         sha256(
-                            string_agg((cell_x::text || ':' || cell_y::text) ORDER BY cell_x, cell_y)::bytea
+                            string_agg((cell_x::text || ':' || cell_y::text), '' ORDER BY cell_x, cell_y)::bytea
                         ),
                         'hex'
                     ) AS source_refs_hash

@@ -281,7 +281,7 @@ def _insert_provenance(
                 source_dataset, source_layer,
                 SUM(source_ref_count) AS source_ref_count,
                 encode(
-                    sha256(string_agg(source_refs_hash ORDER BY source_refs_hash)::bytea),
+                    sha256(string_agg(source_refs_hash, '' ORDER BY source_refs_hash)::bytea),
                     'hex'
                 ) AS source_refs_hash
             FROM "{round_table}"

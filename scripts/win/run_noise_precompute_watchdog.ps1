@@ -13,10 +13,18 @@ if (-not $env:GEO_CONDA_ENV) { $env:GEO_CONDA_ENV = "base" }
 if (-not $env:MINIFORGE_ROOT) { $env:MINIFORGE_ROOT = Join-Path $env:USERPROFILE "miniforge3" }
 if (-not $env:NOISE_INGEST_MODE) { $env:NOISE_INGEST_MODE = "ogr2ogr" }
 $geoCmd = Join-Path $scriptDir "geo_env.cmd"
+$pythonExe = $env:NOISE_PYTHON_EXE
+if (-not $pythonExe) {
+    $pythonExe = ".\.venv\Scripts\python.exe"
+}
+if ($pythonExe -eq ".\.venv\Scripts\python.exe" -and -not (Test-Path $pythonExe)) {
+    Write-Host "[watchdog] .venv python not found, falling back to conda 'python'"
+    $pythonExe = "python"
+}
 $baseArgs = @(
     "/c",
     "`"$geoCmd`"",
-    ".\.venv\Scripts\python.exe",
+    $pythonExe,
     "main.py",
     "--precompute-dev"
 )
@@ -58,7 +66,7 @@ if ($env:NOISE_PRECOMPUTE_WATCHDOG_TIMEOUT_SEC) {
 }
 
 $argList = @($baseArgs + $modeArgs)
-Write-Host "[watchdog] starting noise mode=$Mode timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV)"
+Write-Host "[watchdog] starting noise mode=$Mode timeout=${timeoutSeconds}s env=$($env:GEO_CONDA_ENV) python=$pythonExe"
 $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $argList -PassThru -NoNewWindow
 
 if ($proc.WaitForExit($timeoutSeconds * 1000)) {

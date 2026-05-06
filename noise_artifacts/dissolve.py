@@ -245,7 +245,7 @@ def _pass1_dissolve(
                     source_dataset, source_layer, tile_geom,
                     COUNT(DISTINCT source_ref) AS source_ref_count,
                     encode(
-                        sha256(string_agg(COALESCE(source_ref,'') ORDER BY source_ref)::bytea),
+                        sha256(string_agg(COALESCE(source_ref,''), '' ORDER BY source_ref)::bytea),
                         'hex'
                     ) AS source_refs_hash,
                     ST_Multi(ST_CollectionExtract(
@@ -307,7 +307,7 @@ def _pass2_dissolve(conn, dissolve_table: str, round_table: str) -> int:
                     source_dataset, source_layer,
                     SUM(source_ref_count) AS source_ref_count,
                     encode(
-                        sha256(string_agg(source_refs_hash ORDER BY source_refs_hash)::bytea),
+                        sha256(string_agg(source_refs_hash, '' ORDER BY source_refs_hash)::bytea),
                         'hex'
                     ) AS source_refs_hash,
                     ST_Multi(ST_CollectionExtract(

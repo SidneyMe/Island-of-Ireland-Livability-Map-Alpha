@@ -59,6 +59,11 @@ set "NOISE_ROAD_GDB_CANONICAL_CACHE=1"
 set "NOISE_REBUILD_ROAD_GDB_CACHE=0"
 set "NOISE_MIN_FREE_DISK_GB=30"
 
+call :set_if_undefined_from_dotenv "NOISE_OGR2OGR_GDB_WORKERS"
+call :set_if_undefined_from_dotenv "NOISE_OGR2OGR_GDB_CHUNK_SIZE"
+call :set_if_undefined_from_dotenv "NOISE_OGR2OGR_HARD_TIMEOUT_SECONDS"
+call :set_if_undefined_from_dotenv "NOISE_OGR2OGR_NO_PROGRESS_TIMEOUT_SECONDS"
+
 if not defined NOISE_OGR2OGR_GDB_WORKERS set "NOISE_OGR2OGR_GDB_WORKERS=2"
 if not defined NOISE_OGR2OGR_GDB_CHUNK_SIZE set "NOISE_OGR2OGR_GDB_CHUNK_SIZE=25"
 if not defined NOISE_OGR2OGR_HARD_TIMEOUT_SECONDS set "NOISE_OGR2OGR_HARD_TIMEOUT_SECONDS=900"
@@ -92,3 +97,20 @@ if "%~1"=="" (
 %*
 set "CMD_EXIT=%ERRORLEVEL%"
 endlocal & exit /b %CMD_EXIT%
+
+:set_if_undefined_from_dotenv
+set "_DOTENV_KEY=%~1"
+if not defined _DOTENV_KEY exit /b 0
+call set "_DOTENV_CUR=%%%_DOTENV_KEY%%%"
+if defined _DOTENV_CUR goto :_dotenv_done
+if not exist "%PROJECT_ROOT%\.env" goto :_dotenv_done
+
+for /f "usebackq tokens=1,* delims==" %%A in (`findstr /B /I /C:"%_DOTENV_KEY%=" "%PROJECT_ROOT%\.env"`) do (
+  set "%_DOTENV_KEY%=%%B"
+  goto :_dotenv_done
+)
+
+:_dotenv_done
+set "_DOTENV_CUR="
+set "_DOTENV_KEY="
+exit /b 0
