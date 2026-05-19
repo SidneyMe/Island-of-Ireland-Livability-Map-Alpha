@@ -326,6 +326,7 @@ def _publish_noise_polygons(
             config_hash=config_hash,
             import_fingerprint=import_fingerprint,
             study_area_wgs84=study_area_wgs84,
+            summary_json=summary_json,
         )
         _update_noise_summary_from_database(
             connection, build_key=build_key, summary_json=summary_json

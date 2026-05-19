@@ -210,8 +210,9 @@ class DirectCopyFunctionTests(TestCase):
 
     def test_copy_sql_uses_st_transform_to_4326(self) -> None:
         import inspect
-        from db_postgis.writes import copy_noise_artifact_to_noise_polygons
-        src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
+        from db_postgis import write_noise as noise_writes
+
+        src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
         self.assertIn("ST_Transform", src)
         self.assertIn("4326", src)
 
@@ -221,17 +222,36 @@ class DirectCopyFunctionTests(TestCase):
         src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
         self.assertIn("noise_resolved_display", src)
 
-    def test_copy_sql_joins_provenance(self) -> None:
+    def test_copy_sql_reads_calibration_from_resolved_display(self) -> None:
         import inspect
         from db_postgis.writes import copy_noise_artifact_to_noise_polygons
         src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
-        self.assertIn("noise_resolved_provenance", src)
+        self.assertIn("_ROAD_LDEN_CALIBRATION_SQL", src)
+        self.assertIn("noise_resolved_display", src)
 
     def test_copy_sql_inserts_into_noise_polygons(self) -> None:
-        import inspect
-        from db_postgis.writes import copy_noise_artifact_to_noise_polygons
-        src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
+        from db_postgis import write_noise as noise_writes
+
+        src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
         self.assertIn("INSERT INTO noise_polygons", src)
+
+    def test_copy_sql_prefers_grid_proxy_path(self) -> None:
+        import inspect
+        from db_postgis import write_noise as noise_writes
+        from db_postgis.writes import copy_noise_artifact_to_noise_polygons
+
+        fn_src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
+        sql_src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
+        self.assertIn("_INSERT_ROAD_PROXY_FROM_GRID_SQL", fn_src)
+        self.assertIn("noise_grid_artifact", sql_src)
+
+    def test_copy_sql_keeps_per_cell_band_mapping_not_global_dissolve(self) -> None:
+        from db_postgis import write_noise as noise_writes
+
+        sql_src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
+        self.assertIn("split_part(g.db_value, '-', 1)::float8", sql_src)
+        self.assertIn("WHEN p.raw_band_min < 57.5 THEN 55", sql_src)
+        self.assertNotIn("ST_UnaryUnion", sql_src)
 
     def test_publish_calls_direct_copy_for_sentinel(self) -> None:
         import inspect

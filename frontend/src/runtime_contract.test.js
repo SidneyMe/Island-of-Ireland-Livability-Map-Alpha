@@ -114,7 +114,7 @@ const devRuntime = {
   };
   const style = buildStyle(runtimeWithoutNoiseArchive, { windowOrigin: "http://127.0.0.1:8000" });
   assert.equal(style.sources.noise, undefined);
-  assert.equal(style.layers.some(function (layer) { return layer.id === "noise-fill"; }), false);
+  assert.equal(style.layers.some(function (layer) { return layer.id === "noise-proxy-fill"; }), false);
 }
 
 {
@@ -165,7 +165,7 @@ const devRuntime = {
   const lifecycle500 = activeGridLifecycle(fullRuntime, 1000, 14);
   const lifecycle1000Stable = activeGridLifecycle(fullRuntime, 1000, 13);
 
-  assert.equal(GRID_INSERT_BEFORE_LAYER_ID, "noise-fill");
+  assert.equal(GRID_INSERT_BEFORE_LAYER_ID, "noise-proxy-fill");
   assert.equal(layers2500.length, 3);
   assert.equal(layers2500[0].id, "grid-fill-active");
   assert.equal(layers2500[1].id, "grid-outline-active");
@@ -219,7 +219,7 @@ const devRuntime = {
     return layer.id === "transport-reality-circle";
   });
   const noiseLayer = style.layers.find(function (layer) {
-    return layer.id === "noise-fill";
+    return layer.id === "noise-proxy-fill";
   });
   const serviceDesertsLayer = style.layers.find(function (layer) {
     return layer.id === "service-deserts-fill";
@@ -266,18 +266,17 @@ const devRuntime = {
   ]);
   assert.equal(transportRealityLayer.source, "livability");
   assert.equal(noiseLayer.source, "noise");
-  assert.equal(noiseLayer["source-layer"], "noise");
+  assert.equal(noiseLayer["source-layer"], "noise_proxy");
   assert.equal(noiseLayer.minzoom, 8);
   assert.deepEqual(noiseLayer.filter, ["all", ["==", ["get", "metric"], "Lden"]]);
   assert.deepEqual(noiseLayer.paint["fill-color"], [
-    "interpolate", ["linear"], ["coalesce", ["get", "db_low"], 0],
-    45, "#fee8c8",
-    50, "#fdbb84",
-    55, "#fc8d59",
-    60, "#ef6548",
-    65, "#d7301f",
-    70, "#990000",
-    75, "#67000d"
+    "interpolate", ["linear"], ["to-number", ["get", "proxy_score"]],
+    0, "#d8f3dc",
+    25, "#f1f7b5",
+    45, "#fdae61",
+    65, "#f46d43",
+    85, "#a50026",
+    100, "#67001f"
   ]);
   assert.equal(transportRealityLayer["source-layer"], "transport_reality");
   assert.equal(transportRealityLayer.minzoom, 9);

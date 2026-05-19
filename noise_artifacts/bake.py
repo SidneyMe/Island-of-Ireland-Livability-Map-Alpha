@@ -1,4 +1,4 @@
-"""Bake the published noise overlay into a standalone PMTiles archive."""
+﻿"""Bake the published noise overlay into a standalone PMTiles archive."""
 
 from __future__ import annotations
 
@@ -39,25 +39,30 @@ _NOISE_BOUNDS_SQL = text(
 
 def _metadata(*, min_zoom: int, max_zoom: int) -> dict[str, object]:
     return {
-        "name": "noise",
-        "attribution": "© OpenStreetMap contributors",
+        "name": "noise_proxy",
+        "attribution": "(c) OpenStreetMap contributors",
         "vector_layers": [
             {
-                "id": "noise",
+                "id": "noise_proxy",
                 "minzoom": min_zoom,
                 "maxzoom": max_zoom,
                 "fields": {
-                    "jurisdiction": "String",
-                    "source_type": "String",
+                    "kind": "String",
+                    "class": "String",
                     "metric": "String",
-                    "round": "Number",
-                    "report_period": "String",
-                    "db_low": "Number",
-                    "db_high": "Number",
-                    "db_value": "String",
-                    "source_dataset": "String",
-                    "source_layer": "String",
-                    "source_ref": "String",
+                    "band_min": "Number",
+                    "band": "String",
+                    "calibrated_band_min": "Number",
+                    "proxy_score": "Number",
+                    "buffer_m": "Number",
+                    "label": "String",
+                    "method": "String",
+                    "calibration_source": "String",
+                    "calibration_layer": "String",
+                    "calibration_stat": "String",
+                    "sample_count": "Number",
+                    "confidence": "String",
+                    "actual_road_geometry": "Number",
                 },
             }
         ],

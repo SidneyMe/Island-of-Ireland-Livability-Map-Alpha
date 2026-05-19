@@ -1,6 +1,6 @@
 const NOISE_METRIC_ORDER = ["Lden", "Lnight"];
-const NOISE_SOURCE_ORDER = ["road", "rail", "airport", "industry", "consolidated"];
-const NOISE_BAND_ORDER = ["45-49", "50-54", "55-59", "60-64", "65-69", "70-74", "70+", "75+"];
+const NOISE_SOURCE_ORDER = ["road", "rail"];
+const NOISE_BAND_ORDER = ["55-59", "60-64", "65-69", "70-74", "75+", "80+"];
 
 const NOISE_METRIC_LABELS = {
   Lden: "Day-evening-night",
@@ -9,10 +9,7 @@ const NOISE_METRIC_LABELS = {
 
 const NOISE_SOURCE_LABELS = {
   road: "Road",
-  rail: "Rail",
-  airport: "Airport",
-  industry: "Industry",
-  consolidated: "Consolidated"
+  rail: "Rail"
 };
 
 function _normalizedCounts(rawCounts) {
@@ -75,11 +72,15 @@ function noiseSourceOptions(runtime) {
   );
 }
 
+function noiseBandLabel(value) {
+  return String(value || "").trim();
+}
+
 function noiseBandOptions(runtime) {
   return _orderedOptions(
     NOISE_BAND_ORDER,
     _normalizedCounts(runtime && runtime.noise_band_counts),
-    function (value) { return value + " dB"; }
+    noiseBandLabel
   );
 }
 
@@ -104,34 +105,35 @@ function buildNoiseLayerFilter(options = {}) {
   if (selectedSources.length > 0) {
     clauses.push([
       "in",
-      ["coalesce", ["get", "source_type"], ""],
+      ["coalesce", ["get", "kind"], ""],
       ["literal", selectedSources]
     ]);
   } else {
-    clauses.push(["in", ["get", "source_type"], ["literal", []]]);
+    clauses.push(["in", ["get", "kind"], ["literal", []]]);
   }
 
   if (selectedBands.length > 0) {
     clauses.push([
       "in",
-      ["coalesce", ["get", "db_value"], ""],
+      ["coalesce", ["get", "band"], ["get", "db_value"], ""],
       ["literal", selectedBands]
     ]);
   } else {
-    clauses.push(["in", ["get", "db_value"], ["literal", []]]);
+    clauses.push(["in", ["get", "band"], ["literal", []]]);
   }
 
   return ["all", ...clauses];
 }
 
 export {
-  NOISE_BAND_ORDER,
   NOISE_METRIC_LABELS,
   NOISE_METRIC_ORDER,
   NOISE_SOURCE_LABELS,
   NOISE_SOURCE_ORDER,
+  NOISE_BAND_ORDER,
   buildNoiseLayerFilter,
   defaultNoiseSelections,
+  noiseBandLabel,
   noiseBandOptions,
   noiseMetricLabel,
   noiseMetricOptions,

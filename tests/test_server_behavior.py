@@ -501,6 +501,15 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["noise_source_counts"]["road"], 4)
         self.assertEqual(payload["noise_metric_counts"], {"Lden": 5, "Lnight": 3})
         self.assertEqual(payload["noise_band_counts"]["75+"], 2)
+        self.assertEqual(payload["noise_proxy_metadata"]["kind"], "road")
+        self.assertEqual(payload["noise_proxy_metadata"]["metric"], "Lden")
+        self.assertEqual(payload["noise_proxy_metadata"]["class"], "unclassified")
+        self.assertEqual(payload["noise_proxy_metadata"]["method"], "official_derived_grid_proxy")
+        self.assertEqual(payload["noise_proxy_metadata"]["source_layer"], "grid_1000m")
+        self.assertEqual(payload["noise_proxy_metadata"]["confidence"], "proxy_not_measured")
+        self.assertFalse(payload["noise_proxy_metadata"]["actual_road_geometry"])
+        self.assertEqual(payload["runtime_mode"], "strict_manifest")
+        self.assertIsNone(payload["runtime_warning"])
         self.assertNotIn("ov_shops", payload["category_colors"])
 
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
@@ -663,6 +672,63 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["pmtiles_url"], "/tiles/livability-test.pmtiles")
         self.assertEqual(payload["fine_resolutions_m"], [2500, 1000, 500, 250, 100, 50])
         self.assertEqual(payload["inspect_url"], "/api/inspect")
+
+    def test_runtime_service_stale_manifest_fallback_is_env_gated(self) -> None:
+        manifest = {
+            "build_key": "build-fallback-123",
+            "reach_hash": "reach-hash-fallback",
+            "score_hash": "score-hash-fallback",
+            "render_hash": "render-hash-fallback",
+            "summary_json": {
+                "build_profile": "full",
+                "map_center": {"lat": 53.4, "lon": -7.7},
+                "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {"corner": 3},
+                    "transport": {},
+                    "healthcare": {},
+                    "parks": {},
+                },
+                "noise_enabled": True,
+                "noise_source_counts": {"road": 1},
+                "noise_metric_counts": {"Lden": 1},
+                "noise_proxy_calibration_table": [{"calibration_stat": "p75"}],
+            },
+        }
+
+        with (
+            mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=None),
+            mock.patch.object(
+                serve_from_db.RuntimeService,
+                "_load_latest_completed_manifest_for_extract",
+                return_value=manifest,
+            ) as fallback_mock,
+            mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
+            mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=False),
+            mock.patch.object(serve_from_db, "noise_pmtiles_output_path", return_value=Path(__file__)),
+        ):
+            with mock.patch.dict("os.environ", {}, clear=False):
+                with self.assertRaises(RuntimeError):
+                    serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
+            fallback_mock.assert_not_called()
+
+        with (
+            mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=None),
+            mock.patch.object(
+                serve_from_db.RuntimeService,
+                "_load_latest_completed_manifest_for_extract",
+                return_value=manifest,
+            ) as fallback_mock,
+            mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
+            mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=False),
+            mock.patch.object(serve_from_db, "noise_pmtiles_output_path", return_value=Path(__file__)),
+            mock.patch.dict("os.environ", {serve_from_db.RUNTIME_STALE_FALLBACK_ENV: "1"}, clear=False),
+        ):
+            payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
+
+        fallback_mock.assert_called_once()
+        self.assertEqual(payload["runtime_mode"], "stale_manifest_fallback")
+        self.assertIsInstance(payload["runtime_warning"], str)
 
     def test_main_serve_flag_starts_local_app(self) -> None:
         with (

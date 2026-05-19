@@ -4,7 +4,7 @@ const ACTIVE_GRID_OUTLINE_LAYER_ID = "grid-outline-active";
 const ACTIVE_DEBUG_GRID_LAYER_ID = "grid-fill-debug-active";
 const GRID_SOURCE_ID = "livability";
 const GRID_SOURCE_LAYER_ID = "grid";
-const GRID_INSERT_BEFORE_LAYER_ID = "noise-fill";
+const GRID_INSERT_BEFORE_LAYER_ID = "noise-proxy-fill";
 
 function runtimeZoomBreaks(runtime) {
   const breaks = runtime && Array.isArray(runtime.surface_zoom_breaks)
@@ -374,14 +374,13 @@ function noiseFillColorExpression() {
   return [
     "interpolate",
     ["linear"],
-    ["coalesce", ["get", "db_low"], 0],
-    45, "#fee8c8",
-    50, "#fdbb84",
-    55, "#fc8d59",
-    60, "#ef6548",
-    65, "#d7301f",
-    70, "#990000",
-    75, "#67000d"
+    ["to-number", ["get", "proxy_score"]],
+    0, "#d8f3dc",
+    25, "#f1f7b5",
+    45, "#fdae61",
+    65, "#f46d43",
+    85, "#a50026",
+    100, "#67001f"
   ];
 }
 
@@ -402,25 +401,40 @@ function buildStyle(runtime, options = {}) {
 
   if (noisePmtilesUrl) {
     layers.push({
-      id: "noise-fill",
+      id: "noise-proxy-fill",
       type: "fill",
       source: "noise",
-      "source-layer": "noise",
+      "source-layer": "noise_proxy",
       minzoom: 8,
       layout: {
         visibility: "none",
-        "fill-sort-key": ["coalesce", ["get", "db_low"], 0]
+        "fill-sort-key": ["coalesce", ["get", "proxy_score"], 0]
       },
       filter: ["all", ["==", ["get", "metric"], "Lden"]],
       paint: {
         "fill-color": noiseFillColorExpression(),
-        "fill-opacity": [
+        "fill-opacity": 0.45
+      }
+    });
+    layers.push({
+      id: "noise-proxy-outline",
+      type: "line",
+      source: "noise",
+      "source-layer": "noise_proxy",
+      minzoom: 8,
+      layout: {
+        visibility: "none"
+      },
+      filter: ["all", ["==", ["get", "metric"], "Lden"]],
+      paint: {
+        "line-color": "#7f1d1d",
+        "line-opacity": 0.35,
+        "line-width": [
           "interpolate", ["linear"], ["zoom"],
-          8, 0.22,
-          13, 0.30,
-          19, 0.36
-        ],
-        "fill-outline-color": "rgba(102, 37, 6, 0.26)"
+          8, 0.5,
+          13, 0.8,
+          19, 1.1
+        ]
       }
     });
   }

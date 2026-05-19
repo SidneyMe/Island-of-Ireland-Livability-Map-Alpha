@@ -217,28 +217,85 @@ class DbPostgisTransitArtifactWriteTests(TestCase):
 
 
 class ArtifactCopyTests(TestCase):
-    """FIX 10: copy_noise_artifact_to_noise_polygons clips to study area."""
+    """Proxy Phase A artifact copy behavior checks."""
 
     def test_copy_sql_uses_st_intersection_when_study_area_given(self) -> None:
         import inspect
-        src = inspect.getsource(db_writes.copy_noise_artifact_to_noise_polygons)
-        self.assertIn("ST_Intersection", src)
+        from db_postgis import write_noise as noise_writes
 
-    def test_copy_sql_clips_to_study_area_with_cte(self) -> None:
-        import inspect
-        src = inspect.getsource(db_writes.copy_noise_artifact_to_noise_polygons)
-        self.assertIn("clipped_geom", src)
-        self.assertIn("has_study_area", src)
+        fn_src = inspect.getsource(db_writes.copy_noise_artifact_to_noise_polygons)
+        sql_src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
+        self.assertIn("_INSERT_ROAD_PROXY_FROM_GRID_SQL", fn_src)
+        self.assertIn("ST_Intersection", sql_src)
 
-    def test_copy_sql_filters_empty_and_zero_area_clipped(self) -> None:
+    def test_copy_sql_uses_proxy_grid_when_available(self) -> None:
         import inspect
-        src = inspect.getsource(db_writes.copy_noise_artifact_to_noise_polygons)
-        self.assertIn("ST_IsEmpty(dr.clipped_geom)", src)
-        self.assertIn("ST_Area(dr.clipped_geom)", src)
+        from db_postgis import write_noise as noise_writes
+
+        src = inspect.getsource(noise_writes)
+        self.assertIn("noise_grid_artifact", src)
+        self.assertIn("_INSERT_ROAD_PROXY_FROM_GRID_SQL", src)
+
+    def test_copy_blocks_when_grid_missing(self) -> None:
+        connection = mock.MagicMock()
+        calibration_result = mock.MagicMock()
+        calibration_result.mappings.return_value.first.return_value = {
+            "sample_count": 20,
+            "median_band_min": 60.0,
+            "p75_band_min": 65.0,
+            "mean_band_min": 61.0,
+        }
+        round_result = mock.MagicMock()
+        round_result.mappings.return_value.first.return_value = {"round_number": 4}
+        grid_result = mock.MagicMock()
+        grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": ""}
+        connection.execute.side_effect = [
+            calibration_result,
+            round_result,
+            grid_result,
+        ]
+        summary: dict[str, object] = {}
+
+        inserted = db_writes.copy_noise_artifact_to_noise_polygons(
+            connection,
+            noise_resolved_hash="res-abc",
+            build_key="bk",
+            config_hash="ch",
+            import_fingerprint="ifp",
+            study_area_wgs84=None,
+            summary_json=summary,
+        )
+
+        self.assertEqual(inserted, 0)
+        self.assertTrue(summary.get("noise_proxy_blocked"))
+        self.assertIn("grid artifact hash", str(summary.get("noise_proxy_blocked_reason", "")))
 
     def test_copy_executes_insert_with_noise_resolved_hash(self) -> None:
         connection = mock.MagicMock()
-        connection.execute.return_value.rowcount = 5
+        calibration_result = mock.MagicMock()
+        calibration_result.mappings.return_value.first.return_value = {
+            "sample_count": 1200,
+            "median_band_min": 60.0,
+            "p75_band_min": 65.0,
+            "mean_band_min": 61.0,
+        }
+        round_result = mock.MagicMock()
+        round_result.mappings.return_value.first.return_value = {"round_number": 4}
+        grid_result = mock.MagicMock()
+        grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
+        available_bands_result = mock.MagicMock()
+        available_bands_result.mappings.return_value.first.return_value = {
+            "available_bands": [55, 60, 65, 70, 75]
+        }
+        insert_result = mock.MagicMock()
+        insert_result.rowcount = 5
+        connection.execute.side_effect = [
+            calibration_result,
+            round_result,
+            grid_result,
+            available_bands_result,
+            insert_result,
+        ]
 
         n = db_writes.copy_noise_artifact_to_noise_polygons(
             connection,
@@ -250,15 +307,41 @@ class ArtifactCopyTests(TestCase):
         )
 
         self.assertEqual(n, 5)
-        sql_text = str(connection.execute.call_args.args[0])
-        params = connection.execute.call_args.args[1]
-        self.assertIn("noise_resolved_display", sql_text)
+        sql_text = str(connection.execute.call_args_list[-1].args[0])
+        params = connection.execute.call_args_list[-1].args[1]
         self.assertIn("INSERT INTO noise_polygons", sql_text)
+        self.assertIn("CASE", sql_text)
+        self.assertIn("noise_grid_artifact", sql_text)
+        self.assertNotIn("ST_UnaryUnion", sql_text)
         self.assertEqual(params["noise_resolved_hash"], "res-abc")
+        self.assertEqual(params["grid_artifact_hash"], "grid-123")
 
     def test_copy_passes_has_study_area_false_when_none(self) -> None:
         connection = mock.MagicMock()
-        connection.execute.return_value.rowcount = 0
+        calibration_result = mock.MagicMock()
+        calibration_result.mappings.return_value.first.return_value = {
+            "sample_count": 20,
+            "median_band_min": 60.0,
+            "p75_band_min": 65.0,
+            "mean_band_min": 61.0,
+        }
+        round_result = mock.MagicMock()
+        round_result.mappings.return_value.first.return_value = {"round_number": 4}
+        grid_result = mock.MagicMock()
+        grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
+        available_bands_result = mock.MagicMock()
+        available_bands_result.mappings.return_value.first.return_value = {
+            "available_bands": [55, 60, 65, 70, 75]
+        }
+        insert_result = mock.MagicMock()
+        insert_result.rowcount = 0
+        connection.execute.side_effect = [
+            calibration_result,
+            round_result,
+            grid_result,
+            available_bands_result,
+            insert_result,
+        ]
 
         db_writes.copy_noise_artifact_to_noise_polygons(
             connection,
@@ -269,13 +352,36 @@ class ArtifactCopyTests(TestCase):
             study_area_wgs84=None,
         )
 
-        params = connection.execute.call_args.args[1]
+        params = connection.execute.call_args_list[-1].args[1]
         self.assertFalse(params["has_study_area"])
         self.assertIsNone(params["study_wkb"])
 
     def test_copy_passes_has_study_area_true_with_wkb(self) -> None:
         connection = mock.MagicMock()
-        connection.execute.return_value.rowcount = 0
+        calibration_result = mock.MagicMock()
+        calibration_result.mappings.return_value.first.return_value = {
+            "sample_count": 20,
+            "median_band_min": 60.0,
+            "p75_band_min": 65.0,
+            "mean_band_min": 61.0,
+        }
+        round_result = mock.MagicMock()
+        round_result.mappings.return_value.first.return_value = {"round_number": 4}
+        grid_result = mock.MagicMock()
+        grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
+        available_bands_result = mock.MagicMock()
+        available_bands_result.mappings.return_value.first.return_value = {
+            "available_bands": [55, 60, 65, 70, 75]
+        }
+        insert_result = mock.MagicMock()
+        insert_result.rowcount = 0
+        connection.execute.side_effect = [
+            calibration_result,
+            round_result,
+            grid_result,
+            available_bands_result,
+            insert_result,
+        ]
         study = box(0.0, 0.0, 1.0, 1.0)
 
         db_writes.copy_noise_artifact_to_noise_polygons(
@@ -287,7 +393,7 @@ class ArtifactCopyTests(TestCase):
             study_area_wgs84=study,
         )
 
-        params = connection.execute.call_args.args[1]
+        params = connection.execute.call_args_list[-1].args[1]
         self.assertTrue(params["has_study_area"])
         self.assertEqual(params["study_wkb"], study.wkb)
 

@@ -35,7 +35,7 @@ export function resolveMapClickAction({
     return { type: CLICK_ACTIONS.SERVICE_DESERT, features: desertFeatures };
   }
 
-  const noiseFeatures = queryLayer(map, point, "noise-fill");
+  const noiseFeatures = queryLayer(map, point, "noise-proxy-fill");
   if (noiseFeatures.length > 0) {
     return { type: CLICK_ACTIONS.NOISE, features: noiseFeatures };
   }

@@ -498,6 +498,34 @@ class NoiseOgrIngestTests(TestCase):
             extracted = extract_source_archive_if_needed(zip_path)
             self.assertTrue((extracted / "Folder" / "Sub" / "layer.shp").exists())
 
+    def test_extract_source_archive_if_needed_replaces_existing_target_dir(self) -> None:
+        from noise_artifacts.ogr_ingest import extract_source_archive_if_needed
+
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            zip_path = tmp / "noise.zip"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("Folder/Sub/layer.shp", b"first")
+
+            extracted = extract_source_archive_if_needed(zip_path)
+            marker = extracted / ".extracted"
+            self.assertTrue(marker.exists())
+            marker.unlink()
+
+            stale_file = extracted / "stale.txt"
+            stale_file.write_text("old", encoding="utf-8")
+
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("Folder/Sub/layer.shp", b"second")
+
+            refreshed = extract_source_archive_if_needed(zip_path)
+            self.assertTrue(refreshed.exists())
+            self.assertFalse((refreshed / "stale.txt").exists())
+            self.assertEqual(
+                (refreshed / "Folder" / "Sub" / "layer.shp").read_bytes(),
+                b"second",
+            )
+
     def test_run_ogr2ogr_import_streams_output(self) -> None:
         from noise_artifacts.ogr_ingest import _run_ogr2ogr_import
 

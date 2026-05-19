@@ -108,20 +108,23 @@ class PmtilesBakeContractTests(TestCase):
         layer_ids = [layer["id"] for layer in metadata["vector_layers"]]
         self.assertNotIn("noise", layer_ids)
 
-    def test_noise_pmtiles_metadata_declares_only_noise_layer(self) -> None:
+    def test_noise_pmtiles_metadata_declares_only_noise_proxy_layer(self) -> None:
         metadata = noise_bake._metadata(
             min_zoom=noise_bake.NOISE_MIN_ZOOM,
             max_zoom=12,
         )
-        self.assertEqual([layer["id"] for layer in metadata["vector_layers"]], ["noise"])
+        self.assertEqual([layer["id"] for layer in metadata["vector_layers"]], ["noise_proxy"])
         noise_layer = metadata["vector_layers"][0]
         self.assertEqual(noise_layer["minzoom"], bake_pmtiles.NOISE_MIN_ZOOM)
         self.assertEqual(noise_layer["maxzoom"], 12)
-        self.assertEqual(noise_layer["fields"]["source_type"], "String")
+        self.assertEqual(noise_layer["fields"]["kind"], "String")
+        self.assertEqual(noise_layer["fields"]["class"], "String")
         self.assertEqual(noise_layer["fields"]["metric"], "String")
-        self.assertEqual(noise_layer["fields"]["round"], "Number")
-        self.assertEqual(noise_layer["fields"]["db_low"], "Number")
-        self.assertEqual(noise_layer["fields"]["db_value"], "String")
+        self.assertEqual(noise_layer["fields"]["band_min"], "Number")
+        self.assertEqual(noise_layer["fields"]["band"], "String")
+        self.assertEqual(noise_layer["fields"]["calibrated_band_min"], "Number")
+        self.assertEqual(noise_layer["fields"]["proxy_score"], "Number")
+        self.assertEqual(noise_layer["fields"]["sample_count"], "Number")
 
     def test_amenity_layer_metadata_declares_tier_name_and_conflict_class(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
@@ -165,23 +168,25 @@ class PmtilesBakeContractTests(TestCase):
     def test_noise_tile_sql_exports_display_fields(self) -> None:
         sql = str(pmtiles_worker._NOISE_TILE_SQL)
 
-        self.assertIn("n.source_type", sql)
+        self.assertIn("n.source_type AS kind", sql)
+        self.assertIn("AS band_min", sql)
+        self.assertIn("AS band", sql)
+        self.assertIn("proxy_score", sql)
+        self.assertIn("calibrated_band_min", sql)
         self.assertIn("n.metric", sql)
-        self.assertIn("n.round_number AS round", sql)
-        self.assertIn("n.db_value", sql)
         self.assertNotIn("ST_Subdivide", sql)
-        self.assertIn("'noise'", sql)
+        self.assertIn("'noise_proxy'", sql)
 
     def test_noise_tile_sql_reads_from_noise_polygons(self) -> None:
         """FIX 13: noise PMTiles layer must read from noise_polygons (compatibility table)."""
         sql = str(pmtiles_worker._NOISE_TILE_SQL)
         self.assertIn("noise_polygons", sql)
 
-    def test_noise_source_layer_id_is_noise(self) -> None:
-        """FIX 13: frontend source-layer name must remain 'noise'."""
+    def test_noise_source_layer_id_is_noise_proxy(self) -> None:
+        """Proxy source-layer name for the standalone archive."""
         metadata = noise_bake._metadata(min_zoom=noise_bake.NOISE_MIN_ZOOM, max_zoom=12)
         layer_ids = [layer["id"] for layer in metadata["vector_layers"]]
-        self.assertIn("noise", layer_ids, "noise layer must be declared in PMTiles metadata")
+        self.assertIn("noise_proxy", layer_ids, "noise proxy layer must be declared in PMTiles metadata")
 
     def test_amenity_tile_sql_exports_tier_name_and_conflict_class(self) -> None:
         sql = str(bake_pmtiles._AMENITY_TILE_SQL)

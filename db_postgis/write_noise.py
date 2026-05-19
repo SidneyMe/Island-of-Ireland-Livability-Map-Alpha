@@ -578,6 +578,260 @@ def _drain_iterable(rows: Iterable[dict[str, Any]]) -> int:
     return count
 
 
+_ROAD_LDEN_CALIBRATION_SQL = text(
+    """
+    WITH road_rows AS (
+        SELECT
+            CASE
+                WHEN d.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(d.db_value, '-', 1)::float8
+                WHEN d.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(d.db_value, '\\+', '')::float8
+                WHEN d.db_low IS NOT NULL THEN d.db_low::float8
+                ELSE NULL
+            END AS band_min
+        FROM noise_resolved_display d
+        WHERE d.noise_resolved_hash = :noise_resolved_hash
+          AND d.source_type = 'road'
+          AND d.metric = 'Lden'
+          AND d.geom IS NOT NULL
+          AND NOT ST_IsEmpty(d.geom)
+    )
+    SELECT
+        COUNT(*) AS sample_count,
+        percentile_cont(0.5) WITHIN GROUP (ORDER BY band_min) AS median_band_min,
+        percentile_cont(0.75) WITHIN GROUP (ORDER BY band_min) AS p75_band_min,
+        AVG(band_min) AS mean_band_min
+    FROM road_rows
+    WHERE band_min IS NOT NULL
+    """
+)
+
+_ROAD_ROUND_SQL = text(
+    """
+    SELECT COALESCE(MAX(round_number), 4) AS round_number
+    FROM noise_resolved_display
+    WHERE noise_resolved_hash = :noise_resolved_hash
+      AND source_type = 'road'
+      AND metric = 'Lden'
+    """
+)
+
+_GRID_ARTIFACT_AVAILABLE_BANDS_SQL = text(
+    """
+    WITH raw_cells AS (
+        SELECT
+            CASE
+                WHEN g.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(g.db_value, '-', 1)::float8
+                WHEN g.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(g.db_value, '\\+', '')::float8
+                WHEN g.db_low IS NOT NULL THEN g.db_low::float8
+                ELSE NULL
+            END AS raw_band_min
+        FROM noise_grid_artifact g
+        WHERE g.artifact_hash = :grid_artifact_hash
+          AND g.source_type = 'road'
+          AND g.metric = 'Lden'
+    ),
+    snapped AS (
+        SELECT
+            CASE
+                WHEN raw_band_min IS NULL THEN NULL
+                WHEN raw_band_min < 57.5 THEN 55
+                WHEN raw_band_min < 62.5 THEN 60
+                WHEN raw_band_min < 67.5 THEN 65
+                WHEN raw_band_min < 72.5 THEN 70
+                WHEN raw_band_min < 77.5 THEN 75
+                ELSE 80
+            END::int AS band_min
+        FROM raw_cells
+    )
+    SELECT ARRAY_AGG(DISTINCT band_min ORDER BY band_min) AS available_bands
+    FROM snapped
+    WHERE band_min IS NOT NULL
+    """
+)
+
+_GRID_ARTIFACT_HASH_SQL = text(
+    """
+    SELECT COALESCE(m.manifest_json ->> 'grid_artifact_hash', '') AS grid_artifact_hash
+    FROM noise_artifact_manifest m
+    WHERE m.artifact_hash = :noise_resolved_hash
+      AND m.artifact_type = 'resolved'
+      AND m.status = 'complete'
+    LIMIT 1
+    """
+)
+
+_INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
+    """
+    WITH study_area_2157 AS (
+        SELECT
+            CASE
+                WHEN :has_study_area THEN
+                    ST_MakeValid(
+                        ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
+                    )
+                ELSE NULL
+            END AS geom
+    ),
+    proxy_cells AS (
+        SELECT
+            COALESCE(g.round_number, :round_number) AS round_number,
+            CASE
+                WHEN g.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(g.db_value, '-', 1)::float8
+                WHEN g.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(g.db_value, '\\+', '')::float8
+                WHEN g.db_low IS NOT NULL THEN g.db_low::float8
+                ELSE NULL
+            END AS raw_band_min,
+            CASE
+                WHEN :has_study_area THEN
+                    ST_Multi(
+                        ST_CollectionExtract(
+                            ST_MakeValid(
+                                ST_Intersection(ST_MakeValid(g.geom), s.geom)
+                            ),
+                            3
+                        )
+                    )
+                ELSE
+                    ST_Multi(ST_CollectionExtract(ST_MakeValid(g.geom), 3))
+            END AS geom
+        FROM noise_grid_artifact g
+        CROSS JOIN study_area_2157 s
+        WHERE g.artifact_hash = :grid_artifact_hash
+          AND g.source_type = 'road'
+          AND g.metric = 'Lden'
+          AND g.geom IS NOT NULL
+          AND NOT ST_IsEmpty(g.geom)
+          AND (
+              NOT :has_study_area
+              OR ST_Intersects(ST_MakeValid(g.geom), s.geom)
+          )
+    ),
+    snapped AS (
+        SELECT
+            p.round_number,
+            CASE
+                WHEN p.raw_band_min IS NULL THEN NULL
+                WHEN p.raw_band_min < 57.5 THEN 55
+                WHEN p.raw_band_min < 62.5 THEN 60
+                WHEN p.raw_band_min < 67.5 THEN 65
+                WHEN p.raw_band_min < 72.5 THEN 70
+                WHEN p.raw_band_min < 77.5 THEN 75
+                ELSE 80
+            END::int AS band_min,
+            p.geom
+        FROM proxy_cells p
+        WHERE p.raw_band_min IS NOT NULL
+          AND p.geom IS NOT NULL
+          AND NOT ST_IsEmpty(p.geom)
+    )
+    INSERT INTO noise_polygons (
+        build_key, config_hash, import_fingerprint,
+        jurisdiction, source_type, metric, round_number, report_period,
+        db_low, db_high, db_value,
+        source_dataset, source_layer, source_ref,
+        geom, created_at
+    )
+    SELECT
+        :build_key,
+        :config_hash,
+        :import_fingerprint,
+        'proxy' AS jurisdiction,
+        'road' AS source_type,
+        'Lden' AS metric,
+        s.round_number AS round_number,
+        :proxy_class AS report_period,
+        s.band_min::float8 AS db_low,
+        CASE s.band_min
+            WHEN 55 THEN 35
+            WHEN 60 THEN 50
+            WHEN 65 THEN 65
+            WHEN 70 THEN 80
+            WHEN 75 THEN 95
+            WHEN 80 THEN 100
+            ELSE 35
+        END::float8 AS db_high,
+        CASE s.band_min
+            WHEN 55 THEN '55-59'
+            WHEN 60 THEN '60-64'
+            WHEN 65 THEN '65-69'
+            WHEN 70 THEN '70-74'
+            WHEN 75 THEN '75+'
+            WHEN 80 THEN '80+'
+            ELSE '55-59'
+        END AS db_value,
+        'noise_grid_artifact' AS source_dataset,
+        'grid_1000m' AS source_layer,
+        '1' AS source_ref,
+        ST_Transform(s.geom, 4326) AS geom,
+        now() AS created_at
+    FROM snapped s
+    WHERE s.band_min IS NOT NULL
+      AND s.geom IS NOT NULL
+      AND NOT ST_IsEmpty(s.geom)
+      AND ST_Area(s.geom) > 0
+    """
+)
+
+_LDEN_PROXY_SCORE_BY_BAND_MIN: dict[int, int] = {
+    55: 35,
+    60: 50,
+    65: 65,
+    70: 80,
+    75: 95,
+    80: 100,
+}
+
+
+def _snap_lden_band_min(value: float | None) -> int:
+    if value is None:
+        raise ValueError("Lden calibrated band minimum cannot be None for proxy phase A.")
+    candidates = sorted(_LDEN_PROXY_SCORE_BY_BAND_MIN.keys())
+    return int(min(candidates, key=lambda candidate: abs(float(value) - float(candidate))))
+
+
+def _append_noise_proxy_summary(
+    summary_json: dict[str, Any] | None,
+    *,
+    sample_count: int,
+    median_band_min: float | None,
+    p75_band_min: float | None,
+    mean_band_min: float | None,
+    selected_band_min: int,
+    selected_proxy_score: int,
+    calibration_stat: str,
+    buffer_m: int,
+    class_available: bool,
+    available_bands: list[int],
+) -> None:
+    if summary_json is None:
+        return
+    summary_json["noise_proxy_label"] = "Official-derived road Lden proxy"
+    summary_json["noise_proxy_caveat"] = (
+        "Approximate road Lden proxy from official-derived noise grid. "
+        "Not measured point noise and not official contour geometry."
+    )
+    summary_json["noise_proxy_phase"] = "phase_a_road_lden"
+    summary_json["noise_proxy_calibration_table"] = [
+        {
+            "road_class": "unclassified",
+            "sample_count": int(sample_count),
+            "median_band_min": median_band_min,
+            "p75_band_min": p75_band_min,
+            "mean_band_min": mean_band_min,
+            "selected_band_min": int(selected_band_min),
+            "proxy_score": int(selected_proxy_score),
+            "buffer_m": int(buffer_m),
+            "calibration_stat": str(calibration_stat),
+            "available_bands": [int(value) for value in available_bands],
+        }
+    ]
+    summary_json["noise_proxy_class_differentiation_available"] = bool(class_available)
+    if not class_available:
+        summary_json["noise_proxy_class_differentiation_note"] = (
+            "Road class tags were unavailable in proxy phase A; using global road calibration."
+        )
+
+
 def copy_noise_artifact_to_noise_polygons(
     connection: Connection,
     *,
@@ -586,99 +840,121 @@ def copy_noise_artifact_to_noise_polygons(
     config_hash: str,
     import_fingerprint: str,
     study_area_wgs84=None,
+    summary_json: dict[str, Any] | None = None,
 ) -> int:
-    """
-    Artifact mode direct copy: noise_resolved_display (EPSG:2157) → noise_polygons (EPSG:4326).
+    calibration_row = connection.execute(
+        _ROAD_LDEN_CALIBRATION_SQL,
+        {"noise_resolved_hash": noise_resolved_hash},
+    ).mappings().first()
+    if not calibration_row:
+        if summary_json is not None:
+            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
+            summary_json["noise_proxy_blocked"] = True
+            summary_json["noise_proxy_blocked_reason"] = (
+                "No official road Lden calibration samples were available in noise_resolved_display."
+            )
+        return 0
+    sample_count = int(calibration_row.get("sample_count") or 0)
+    if sample_count <= 0:
+        if summary_json is not None:
+            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
+            summary_json["noise_proxy_blocked"] = True
+            summary_json["noise_proxy_blocked_reason"] = (
+                "Official road Lden rows were present but produced zero calibration samples."
+            )
+        return 0
 
-    When study_area_wgs84 is provided, geometries are clipped (ST_Intersection) to the
-    study area rather than merely filtered with ST_Intersects, so sub-area profiles do not
-    publish polygons that extend beyond the bbox/county boundary.
+    median_band_min = calibration_row.get("median_band_min")
+    p75_band_min = calibration_row.get("p75_band_min")
+    mean_band_min = calibration_row.get("mean_band_min")
+    if sample_count >= 500 and p75_band_min is not None:
+        selected_stat = "p75"
+        selected_raw = float(p75_band_min)
+    elif median_band_min is not None:
+        selected_stat = "median"
+        selected_raw = float(median_band_min)
+    elif p75_band_min is not None:
+        selected_stat = "p75"
+        selected_raw = float(p75_band_min)
+    elif mean_band_min is not None:
+        selected_stat = "mean"
+        selected_raw = float(mean_band_min)
+    else:
+        if summary_json is not None:
+            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
+            summary_json["noise_proxy_blocked"] = True
+            summary_json["noise_proxy_blocked_reason"] = (
+                "Official road Lden rows were present but no valid calibrated band minimum could be computed."
+            )
+        return 0
 
-    No candidate staging, no ST_Difference, no ST_Subdivide.
-    source_dataset/source_layer/source_ref are lossy compatibility placeholders.
-    Returns row count inserted.
-    """
+    selected_band_min = _snap_lden_band_min(selected_raw)
+    proxy_score = int(_LDEN_PROXY_SCORE_BY_BAND_MIN[selected_band_min])
+
+    round_row = connection.execute(
+        _ROAD_ROUND_SQL,
+        {"noise_resolved_hash": noise_resolved_hash},
+    ).mappings().first()
+    round_number = int((round_row or {}).get("round_number") or 4)
+
     has_study_area = study_area_wgs84 is not None
     params: dict[str, Any] = {
+        "noise_resolved_hash": noise_resolved_hash,
         "build_key": build_key,
         "config_hash": config_hash,
         "import_fingerprint": import_fingerprint,
-        "noise_resolved_hash": noise_resolved_hash,
         "has_study_area": has_study_area,
         "study_wkb": study_area_wgs84.wkb if has_study_area else None,
+        "round_number": round_number,
+        "proxy_class": "unclassified",
+        "calibration_stat": selected_stat,
     }
 
-    result = connection.execute(
-        text(
-            """
-            WITH study_area_2157 AS (
-                SELECT
-                    CASE
-                        WHEN :has_study_area THEN
-                            ST_MakeValid(
-                                ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
-                            )
-                        ELSE NULL
-                    END AS geom
-            ),
-            display_rows AS (
-                SELECT
-                    d.noise_resolved_hash,
-                    d.noise_feature_id,
-                    d.jurisdiction, d.source_type, d.metric,
-                    d.round_number, d.report_period,
-                    d.db_low, d.db_high, d.db_value,
-                    CASE
-                        WHEN :has_study_area THEN
-                            ST_Multi(ST_CollectionExtract(
-                                ST_MakeValid(ST_Intersection(ST_MakeValid(d.geom), s.geom)), 3
-                            ))
-                        ELSE d.geom
-                    END AS clipped_geom
-                FROM noise_resolved_display d
-                CROSS JOIN study_area_2157 s
-                WHERE d.noise_resolved_hash = :noise_resolved_hash
-                  AND d.geom IS NOT NULL
-                  AND NOT ST_IsEmpty(d.geom)
-                  AND (
-                      NOT :has_study_area
-                      OR ST_Intersects(ST_MakeValid(d.geom), s.geom)
-                  )
+    grid_row = connection.execute(
+        _GRID_ARTIFACT_HASH_SQL,
+        {"noise_resolved_hash": noise_resolved_hash},
+    ).mappings().first()
+    grid_artifact_hash = str((grid_row or {}).get("grid_artifact_hash") or "").strip()
+    if not grid_artifact_hash:
+        if summary_json is not None:
+            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
+            summary_json["noise_proxy_blocked"] = True
+            summary_json["noise_proxy_blocked_reason"] = (
+                "No road grid artifact hash was available for lightweight proxy corridors; "
+                "prepare a noise artifact before publish."
             )
-            INSERT INTO noise_polygons (
-                build_key, config_hash, import_fingerprint,
-                jurisdiction, source_type, metric, round_number, report_period,
-                db_low, db_high, db_value,
-                source_dataset, source_layer, source_ref,
-                geom, created_at
-            )
-            SELECT
-                :build_key, :config_hash, :import_fingerprint,
-                dr.jurisdiction, dr.source_type, dr.metric,
-                dr.round_number, dr.report_period,
-                dr.db_low, dr.db_high, dr.db_value,
-                COALESCE(MIN(p.source_dataset), 'noise_artifact') AS source_dataset,
-                COALESCE(MIN(p.source_layer), :noise_resolved_hash) AS source_layer,
-                dr.noise_feature_id::text AS source_ref,
-                ST_Transform(dr.clipped_geom, 4326) AS geom,
-                now()
-            FROM display_rows dr
-            LEFT JOIN noise_resolved_provenance p
-                ON  p.noise_resolved_hash = dr.noise_resolved_hash
-                AND p.jurisdiction        = dr.jurisdiction
-                AND p.source_type         = dr.source_type
-                AND p.metric              = dr.metric
-                AND p.round_number        = dr.round_number
-            WHERE dr.clipped_geom IS NOT NULL
-              AND NOT ST_IsEmpty(dr.clipped_geom)
-              AND ST_Area(dr.clipped_geom) > 0
-            GROUP BY
-                dr.noise_resolved_hash, dr.noise_feature_id,
-                dr.jurisdiction, dr.source_type, dr.metric,
-                dr.round_number, dr.report_period,
-                dr.db_low, dr.db_high, dr.db_value, dr.clipped_geom
-            """
-        ),
-        params,
+        return 0
+    params["grid_artifact_hash"] = grid_artifact_hash
+    available_bands_row = connection.execute(
+        _GRID_ARTIFACT_AVAILABLE_BANDS_SQL,
+        {"grid_artifact_hash": grid_artifact_hash},
+    ).mappings().first()
+    raw_available_bands = (
+        list((available_bands_row or {}).get("available_bands") or [])
+        if available_bands_row is not None
+        else []
     )
+    available_bands = sorted(
+        {
+            int(value)
+            for value in raw_available_bands
+            if value is not None and str(value).strip() != ""
+        }
+    ) or sorted(_LDEN_PROXY_SCORE_BY_BAND_MIN.keys())
+    result = connection.execute(_INSERT_ROAD_PROXY_FROM_GRID_SQL, params)
+
+    _append_noise_proxy_summary(
+        summary_json,
+        sample_count=sample_count,
+        median_band_min=float(median_band_min) if median_band_min is not None else None,
+        p75_band_min=float(p75_band_min) if p75_band_min is not None else None,
+        mean_band_min=float(mean_band_min) if mean_band_min is not None else None,
+        selected_band_min=selected_band_min,
+        selected_proxy_score=proxy_score,
+        calibration_stat=selected_stat,
+        buffer_m=0,
+        class_available=False,
+        available_bands=available_bands,
+    )
+
     return max(int(result.rowcount or 0), 0)

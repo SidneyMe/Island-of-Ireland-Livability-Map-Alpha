@@ -130,6 +130,7 @@ const state = {
   transportRequireExceptionOnly: false,
   serviceDesertsVisible: false,
   noiseVisible: false,
+  noiseOpacity: 0.45,
   selectedNoiseMetric: "Lden",
   selectedNoiseSources: new Set(),
   selectedNoiseBands: new Set(),
@@ -464,43 +465,63 @@ function noiseFilterSummary() {
   const bandOptions = noiseBandOptions(state.runtime);
   const sourceCount = state.selectedNoiseSources.size;
   const bandCount = state.selectedNoiseBands.size;
-  if (!sourceCount || !bandCount) return "No filters selected";
-  const sourceText = sourceCount === sourceOptions.length ? "all sources" : sourceCount + " sources";
+  const sourceText = sourceCount === sourceOptions.length ? "road kind selected" : sourceCount + " kind selected";
   const bandText = bandCount === bandOptions.length ? "all bands" : bandCount + " bands";
-  return state.selectedNoiseMetric + ", " + sourceText + ", " + bandText;
+  return state.selectedNoiseMetric + ", " + sourceText + ", " + bandText + ", opacity " + state.noiseOpacity.toFixed(2);
 }
 
 function updateNoiseNote() {
   if (!elements.noiseNote) return;
   if (!state.runtime.noise_enabled) {
-    elements.noiseNote.textContent = "No noise contours in this build";
+    elements.noiseNote.textContent = "No road noise proxy in this build";
     return;
   }
-  elements.noiseNote.textContent = state.noiseVisible ? noiseFilterSummary() : "Off until enabled";
+  const caveat = "Approximate road Lden proxy from official-derived noise grid. Not measured point noise and not official contour geometry.";
+  elements.noiseNote.textContent = state.noiseVisible
+    ? caveat
+    : caveat + " Off until enabled.";
 }
 
 function applyNoiseFilter() {
   if (!state.map) return;
-  if (!state.map.getLayer("noise-fill")) return;
+  if (!state.map.getLayer("noise-proxy-fill")) return;
+  const filter = buildNoiseLayerFilter({
+    metric: state.selectedNoiseMetric,
+    selectedSources: state.selectedNoiseSources,
+    selectedBands: state.selectedNoiseBands
+  });
   state.map.setFilter(
-    "noise-fill",
-    buildNoiseLayerFilter({
-      metric: state.selectedNoiseMetric,
-      selectedSources: state.selectedNoiseSources,
-      selectedBands: state.selectedNoiseBands
-    })
+    "noise-proxy-fill",
+    filter
   );
+  if (state.map.getLayer("noise-proxy-outline")) {
+    state.map.setFilter("noise-proxy-outline", filter);
+  }
+}
+
+function applyNoiseOpacity() {
+  if (!state.map) return;
+  if (!state.map.getLayer("noise-proxy-fill")) return;
+  state.map.setPaintProperty("noise-proxy-fill", "fill-opacity", state.noiseOpacity);
 }
 
 function applyNoiseVisibility() {
   if (!state.map) return;
-  if (!state.map.getLayer("noise-fill")) return;
+  if (!state.map.getLayer("noise-proxy-fill")) return;
   state.map.setLayoutProperty(
-    "noise-fill",
+    "noise-proxy-fill",
     "visibility",
     state.noiseVisible ? "visible" : "none"
   );
+  if (state.map.getLayer("noise-proxy-outline")) {
+    state.map.setLayoutProperty(
+      "noise-proxy-outline",
+      "visibility",
+      state.noiseVisible ? "visible" : "none"
+    );
+  }
   applyNoiseFilter();
+  applyNoiseOpacity();
 }
 
 function buildAmenityControls() {
@@ -663,10 +684,10 @@ function buildNoiseControls() {
   overlayTextWrap.className = "toggle-label";
 
   const overlayTitle = document.createElement("strong");
-  overlayTitle.textContent = "Show official noise contours";
+  overlayTitle.textContent = "Show road Lden proxy";
 
   const overlaySubtitle = document.createElement("span");
-  overlaySubtitle.textContent = "Lden and Lnight polygons";
+  overlaySubtitle.textContent = "Official-derived grid proxy, not measured dB";
 
   const overlayInput = document.createElement("input");
   overlayInput.type = "checkbox";
@@ -686,7 +707,7 @@ function buildNoiseControls() {
   filterSummary.className = "amenity-tier-summary";
 
   const filterSummaryLabel = document.createElement("span");
-  filterSummaryLabel.textContent = "Noise filters";
+  filterSummaryLabel.textContent = "Proxy filters";
 
   const filterMeta = document.createElement("span");
   filterMeta.className = "amenity-tier-meta";
@@ -709,8 +730,12 @@ function buildNoiseControls() {
         entry.input.checked = state.selectedNoiseSources.has(entry.value);
       } else if (entry.type === "band") {
         entry.input.checked = state.selectedNoiseBands.has(entry.value);
+      } else if (entry.type === "opacity") {
+        entry.input.value = String(state.noiseOpacity.toFixed(2));
       }
-      entry.input.disabled = !state.noiseVisible;
+      if (entry.type !== "opacity") {
+        entry.input.disabled = !state.noiseVisible;
+      }
     });
     filterMeta.textContent = noiseFilterSummary();
     filterDetails.classList.toggle("is-disabled", !state.noiseVisible);
@@ -797,6 +822,41 @@ function buildNoiseControls() {
       inputType: "checkbox"
     });
   });
+
+  const opacityRow = document.createElement("label");
+  opacityRow.className = "amenity-tier-row";
+  opacityRow.htmlFor = "noise-opacity";
+
+  const opacityTextWrap = document.createElement("span");
+  opacityTextWrap.className = "toggle-label";
+
+  const opacityTitle = document.createElement("strong");
+  opacityTitle.textContent = "Noise opacity";
+
+  const opacitySubtitle = document.createElement("span");
+  opacitySubtitle.textContent = "0 to 1 (default 0.45)";
+
+  const opacityInput = document.createElement("input");
+  opacityInput.type = "range";
+  opacityInput.min = "0";
+  opacityInput.max = "1";
+  opacityInput.step = "0.05";
+  opacityInput.value = String(state.noiseOpacity.toFixed(2));
+  opacityInput.id = "noise-opacity";
+  opacityInput.addEventListener("input", function () {
+    const nextOpacity = Number(opacityInput.value);
+    if (!Number.isFinite(nextOpacity)) return;
+    state.noiseOpacity = Math.max(0, Math.min(1, nextOpacity));
+    applyNoiseOpacity();
+    filterMeta.textContent = noiseFilterSummary();
+  });
+  filterRows.push({ type: "opacity", value: "opacity", input: opacityInput });
+
+  opacityTextWrap.appendChild(opacityTitle);
+  opacityTextWrap.appendChild(opacitySubtitle);
+  opacityRow.appendChild(opacityTextWrap);
+  opacityRow.appendChild(opacityInput);
+  filterList.appendChild(opacityRow);
 
   filterDetails.appendChild(filterList);
   elements.noiseControls.appendChild(filterDetails);
@@ -1365,11 +1425,11 @@ function initializeMap() {
   state.map.on("mouseleave", "service-deserts-fill", function () {
     state.map.getCanvas().style.cursor = "";
   });
-  if (state.map.getLayer("noise-fill")) {
-    state.map.on("mouseenter", "noise-fill", function () {
+  if (state.map.getLayer("noise-proxy-fill")) {
+    state.map.on("mouseenter", "noise-proxy-fill", function () {
       state.map.getCanvas().style.cursor = "pointer";
     });
-    state.map.on("mouseleave", "noise-fill", function () {
+    state.map.on("mouseleave", "noise-proxy-fill", function () {
       state.map.getCanvas().style.cursor = "";
     });
   }
@@ -1403,10 +1463,11 @@ function initializeApp(runtime) {
   state.transportIncludeUnscheduled = false;
   state.transportRequireExceptionOnly = false;
   state.noiseVisible = false;
+  state.noiseOpacity = 0.45;
   const noiseDefaults = defaultNoiseSelections(runtime);
   state.selectedNoiseMetric = noiseDefaults.metric;
   state.selectedNoiseSources = new Set(noiseDefaults.sources);
-  state.selectedNoiseBands = new Set(noiseDefaults.bands);
+  state.selectedNoiseBands = new Set(noiseDefaults.bands || []);
   buildAmenityControls();
   buildNoiseControls();
   buildTransitControls();

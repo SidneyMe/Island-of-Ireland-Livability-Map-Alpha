@@ -436,10 +436,11 @@ class NoiseCandidateCacheTests(TestCase):
         study_area = box(0, 0, 1, 1)
         with tempfile.TemporaryDirectory() as tmp_name:
             data_dir = Path(tmp_name)
-            with mock.patch.object(noise_loader, "dataset_signature", return_value="sigA"):
-                key_a = candidates_cache_key(study_area, data_dir)
-            with mock.patch.object(noise_loader, "dataset_signature", return_value="sigB"):
-                key_b = candidates_cache_key(study_area, data_dir)
+            with mock.patch.object(noise_loader, "_ogr2ogr_available", return_value=False):
+                with mock.patch.object(noise_loader, "dataset_signature", return_value="sigA"):
+                    key_a = candidates_cache_key(study_area, data_dir)
+                with mock.patch.object(noise_loader, "dataset_signature", return_value="sigB"):
+                    key_b = candidates_cache_key(study_area, data_dir)
         self.assertNotEqual(key_a, key_b)
 
     def test_cache_key_changes_when_study_area_changes(self) -> None:

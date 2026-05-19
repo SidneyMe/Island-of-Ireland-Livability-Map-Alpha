@@ -211,17 +211,28 @@ _NOISE_TILE_SQL = text(
     ),
     mvtgeom AS (
         SELECT
-            n.jurisdiction,
-            n.source_type,
+            n.source_type AS kind,
+            COALESCE(NULLIF(n.report_period, ''), 'unclassified') AS class,
             n.metric,
-            n.round_number AS round,
-            COALESCE(n.report_period, '') AS report_period,
-            COALESCE(n.db_low, 0.0) AS db_low,
-            COALESCE(n.db_high, 0.0) AS db_high,
-            n.db_value,
-            n.source_dataset,
-            n.source_layer,
-            n.source_ref,
+            COALESCE(n.db_low, 0.0) AS band_min,
+            COALESCE(NULLIF(n.db_value, ''), 'unknown') AS band,
+            COALESCE(n.db_low, 0.0) AS calibrated_band_min,
+            COALESCE(n.db_high, 0.0) AS proxy_score,
+            0.0 AS buffer_m,
+            CONCAT(
+                'Road Lden proxy: ',
+                COALESCE(NULLIF(n.db_value, ''), 'unknown')
+            ) AS label,
+            'official_derived_grid_proxy' AS method,
+            'noise_grid_artifact' AS calibration_source,
+            'grid_1000m' AS calibration_layer,
+            COALESCE(NULLIF(n.source_layer, ''), 'grid_1000m') AS calibration_stat,
+            CASE
+                WHEN COALESCE(n.source_ref, '') ~ '^[0-9]+$' THEN n.source_ref::int
+                ELSE 0
+            END AS sample_count,
+            'proxy_not_measured' AS confidence,
+            0 AS actual_road_geometry,
             ST_AsMVTGeom(
                 ST_Transform(n.geom, 3857),
                 tile.env_3857,
@@ -231,10 +242,11 @@ _NOISE_TILE_SQL = text(
             ) AS geom
         FROM noise_polygons AS n, tile
         WHERE n.build_key = :build_key
+          AND n.source_type = 'road'
           AND n.geom && tile.env_4326
           AND ST_Intersects(n.geom, tile.env_4326)
     )
-    SELECT ST_AsMVT(mvtgeom, 'noise', 4096, 'geom') FROM mvtgeom
+    SELECT ST_AsMVT(mvtgeom, 'noise_proxy', 4096, 'geom') FROM mvtgeom
     """
 )
 

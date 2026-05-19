@@ -3,6 +3,7 @@ from __future__ import annotations
 import gzip
 import json
 import mimetypes
+import os
 import re
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -45,6 +46,12 @@ MISSING_PRECOMPUTE_MESSAGE = "No PostGIS precompute found for current config"
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
 SURFACE_TILE_RE = re.compile(r"^/tiles/surface/(\d+)/(\d+)/(\d+)/(\d+)\.png$")
+RUNTIME_STALE_FALLBACK_ENV = "LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME"
+
+
+def _env_truthy(name: str) -> bool:
+    raw = (os.getenv(name) or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
 def _missing_precompute_message(
@@ -97,6 +104,9 @@ class RuntimeState:
     transit_analysis_window_days: int | None
     transit_service_desert_window_days: int | None
     overture_dataset: dict[str, Any] | None
+    runtime_mode: str
+    runtime_warning: str | None
+    noise_proxy_metadata: dict[str, Any] | None
 
 
 class RuntimeService:
@@ -108,8 +118,26 @@ class RuntimeService:
         self._pmtiles_url = pmtiles_url_path(self._profile)
         self._noise_pmtiles_url = noise_pmtiles_url_path(self._profile)
         self._noise_pmtiles_path = noise_pmtiles_output_path(self._profile)
+        self._allow_stale_runtime_fallback = _env_truthy(RUNTIME_STALE_FALLBACK_ENV)
         self._state: RuntimeState | None = None
         self._surface_runtime: _surface.FineSurfaceRuntime | None = None
+
+    def _load_latest_completed_manifest_for_extract(self) -> dict[str, Any] | None:
+        with self._engine.connect() as connection:
+            row = connection.exec_driver_sql(
+                """
+                SELECT *
+                FROM build_manifest
+                WHERE extract_path = %(extract_path)s
+                  AND status = 'complete'
+                ORDER BY completed_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """,
+                {"extract_path": str(OSM_EXTRACT_PATH)},
+            ).mappings().first()
+        if row is None:
+            return None
+        return dict(row)
 
     @staticmethod
     def _resolution_list(values: Any, fallback: list[int]) -> list[int]:
@@ -136,6 +164,16 @@ class RuntimeService:
             extract_path=str(OSM_EXTRACT_PATH),
             config_hash=self._hashes.config_hash,
         )
+        runtime_mode = "strict_manifest"
+        runtime_warning: str | None = None
+        if manifest is None and self._allow_stale_runtime_fallback:
+            manifest = self._load_latest_completed_manifest_for_extract()
+            if manifest is not None:
+                runtime_mode = "stale_manifest_fallback"
+                runtime_warning = (
+                    "Using latest completed build_manifest for this extract path because "
+                    f"{RUNTIME_STALE_FALLBACK_ENV}=1; config hash does not match current runtime config."
+                )
         if manifest is None:
             raise RuntimeError(
                 _missing_precompute_message(
@@ -263,6 +301,23 @@ class RuntimeService:
         }
         noise_rows_available = bool(summary_json.get("noise_enabled")) or bool(noise_source_counts)
         noise_pmtiles_available = noise_rows_available and self._noise_pmtiles_path.exists()
+        calibration_rows = summary_json.get("noise_proxy_calibration_table")
+        calibration_row = (
+            calibration_rows[0]
+            if isinstance(calibration_rows, list) and calibration_rows and isinstance(calibration_rows[0], dict)
+            else {}
+        )
+        noise_proxy_metadata = {
+            "kind": "road",
+            "metric": "Lden",
+            "class": "unclassified",
+            "method": "official_derived_grid_proxy",
+            "source_dataset": "noise_grid_artifact",
+            "source_layer": "grid_1000m",
+            "calibration_stat": calibration_row.get("calibration_stat") if calibration_row else None,
+            "confidence": "proxy_not_measured",
+            "actual_road_geometry": False,
+        }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -353,6 +408,9 @@ class RuntimeService:
                 if summary_json.get("overture_dataset")
                 else None
             ),
+            runtime_mode=runtime_mode,
+            runtime_warning=runtime_warning,
+            noise_proxy_metadata=noise_proxy_metadata,
         )
 
     def state(self) -> RuntimeState:
@@ -404,6 +462,9 @@ class RuntimeService:
             "transit_analysis_window_days": state.transit_analysis_window_days,
             "transit_service_desert_window_days": state.transit_service_desert_window_days,
             "overture_dataset": state.overture_dataset,
+            "runtime_mode": state.runtime_mode,
+            "runtime_warning": state.runtime_warning,
+            "noise_proxy_metadata": state.noise_proxy_metadata,
         }
 
     def surface_runtime(self) -> _surface.FineSurfaceRuntime:

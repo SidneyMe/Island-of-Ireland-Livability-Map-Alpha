@@ -6,6 +6,7 @@ import logging
 import os
 import queue
 import re
+import stat
 import shutil
 import subprocess
 import tempfile
@@ -61,6 +62,8 @@ _DEFAULT_SQL_LOCK_TIMEOUT_SECONDS = 30
 _TERMINATE_STALE_IMPORT_BACKENDS_ENV = "NOISE_TERMINATE_STALE_IMPORT_BACKENDS"
 _TERMINATE_STALE_STAGE_LOCKS_ENV = "NOISE_TERMINATE_STALE_STAGE_LOCKS"
 _ROAD_GDB_CANONICAL_VERSION = "road-gdb-canonical-v2-only-ccw"
+_DIR_REPLACE_RETRY_ATTEMPTS = 8
+_DIR_REPLACE_RETRY_SLEEP_SECONDS = 0.05
 _ACTIVE_OGR_PROCS_LOCK = threading.Lock()
 _ACTIVE_OGR_PROCS: dict[int, tuple[subprocess.Popen, str]] = {}
 _ROI_OGR_CANDIDATE_FIELDS = [
@@ -408,6 +411,80 @@ def _source_cache_key(zip_path: Path) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
+def _is_retryable_windows_permission_error(exc: BaseException) -> bool:
+    if not isinstance(exc, (PermissionError, OSError)):
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if winerror == 5:
+        return True
+    return isinstance(exc, PermissionError)
+
+
+def _best_effort_make_writable(path: str) -> None:
+    try:
+        os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    except OSError:
+        return
+
+
+def _rmtree_with_retry(path: Path, *, best_effort: bool = False) -> None:
+    if not path.exists():
+        return
+
+    last_error: BaseException | None = None
+
+    def _onerror(func, value, exc_info):  # noqa: ANN001
+        _best_effort_make_writable(value)
+        func(value)
+
+    for attempt in range(1, _DIR_REPLACE_RETRY_ATTEMPTS + 1):
+        try:
+            shutil.rmtree(path, onerror=_onerror)
+            return
+        except FileNotFoundError:
+            return
+        except BaseException as exc:  # pragma: no cover - platform/locking dependent
+            last_error = exc
+            if not _is_retryable_windows_permission_error(exc):
+                if best_effort:
+                    return
+                raise
+            if attempt < _DIR_REPLACE_RETRY_ATTEMPTS:
+                time.sleep(_DIR_REPLACE_RETRY_SLEEP_SECONDS * attempt)
+                continue
+            if best_effort:
+                return
+            raise
+
+    if not best_effort and last_error is not None:
+        raise last_error
+
+
+def _rename_directory_with_retry(source_dir: Path, target_dir: Path) -> None:
+    last_error: BaseException | None = None
+    for attempt in range(1, _DIR_REPLACE_RETRY_ATTEMPTS + 1):
+        try:
+            source_dir.rename(target_dir)
+            return
+        except BaseException as exc:  # pragma: no cover - platform/locking dependent
+            last_error = exc
+            if not _is_retryable_windows_permission_error(exc):
+                raise
+            if attempt < _DIR_REPLACE_RETRY_ATTEMPTS:
+                time.sleep(_DIR_REPLACE_RETRY_SLEEP_SECONDS * attempt)
+                continue
+            break
+    if last_error is not None:
+        raise last_error
+
+
+def _replace_directory_with_retry(tmp_dir: Path, target_dir: Path) -> None:
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    if target_dir.exists():
+        _rmtree_with_retry(target_dir)
+    _rename_directory_with_retry(tmp_dir, target_dir)
+
+
 def extract_source_archive_if_needed(zip_path: Path) -> Path:
     if not zip_path.exists():
         raise NoiseIngestError(f"noise source archive missing: {zip_path}")
@@ -423,19 +500,23 @@ def extract_source_archive_if_needed(zip_path: Path) -> Path:
 
     tmp_parent = cache_root / f"{target_dir.name}.tmp"
     if tmp_parent.exists():
-        shutil.rmtree(tmp_parent, ignore_errors=True)
+        _rmtree_with_retry(tmp_parent, best_effort=True)
     tmp_parent.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(tmp_parent)
         marker_tmp = tmp_parent / ".extracted"
         marker_tmp.write_text("ok", encoding="utf-8")
-        if target_dir.exists():
-            shutil.rmtree(target_dir, ignore_errors=True)
-        tmp_parent.replace(target_dir)
+        try:
+            _replace_directory_with_retry(tmp_parent, target_dir)
+        except (PermissionError, OSError) as exc:
+            raise NoiseIngestError(
+                "Failed to publish extracted noise source cache directory on this platform. "
+                f"target={target_dir} tmp={tmp_parent} error={exc}"
+            ) from exc
     finally:
         if tmp_parent.exists():
-            shutil.rmtree(tmp_parent, ignore_errors=True)
+            _rmtree_with_retry(tmp_parent, best_effort=True)
 
     return target_dir
 

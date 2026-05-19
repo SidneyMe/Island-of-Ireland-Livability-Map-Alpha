@@ -4,6 +4,29 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-19 - Official-derived road Lden proxy overlay
+
+### Added
+
+- Lightweight official-derived road Lden proxy overlay.
+- Separate `.livability_cache/noise.pmtiles` archive with `noise_proxy` source-layer.
+- MapLibre noise proxy toggle and proxy-score styling.
+
+### Changed
+
+- Runtime/style contract can expose a separate noise proxy PMTiles overlay.
+- Server can serve the allowlisted noise PMTiles archive.
+- Added an explicit local fallback mode for `/api/runtime` (`LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME=1`) that serves the latest completed manifest for the same extract path when the current config hash has no completed manifest.
+
+### Notes
+
+- Approximate road Lden proxy from official-derived noise grid. Not measured point noise and not official contour geometry.
+- Current proxy phase is roads/Lden only unless otherwise stated.
+
+### Scoring logic
+
+- No scoring logic change. Noise proxy is visualization-only and does not affect livability scoring.
+
 ## 2026-04-24 - Reliability fixes for bake, imports, GTFS calendars, and click priority
 
 ### Added

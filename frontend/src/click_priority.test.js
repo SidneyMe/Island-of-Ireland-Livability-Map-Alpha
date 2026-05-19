@@ -45,7 +45,7 @@ function fakeMap(featuresByLayer) {
 
 {
   const map = fakeMap({
-    "noise-fill": [fakeFeature("noise")]
+    "noise-proxy-fill": [fakeFeature("noise")]
   });
   const action = resolveMapClickAction({
     map,
@@ -61,7 +61,7 @@ function fakeMap(featuresByLayer) {
     "transport-reality-circle",
     "amenities-circle",
     "service-deserts-fill",
-    "noise-fill"
+    "noise-proxy-fill"
   ]);
 }
 
@@ -120,7 +120,7 @@ function fakeMap(featuresByLayer) {
     "transport-reality-circle",
     "amenities-circle",
     "service-deserts-fill",
-    "noise-fill",
+    "noise-proxy-fill",
     "grid-fill-active"
   ]);
 }
@@ -140,7 +140,7 @@ function fakeMap(featuresByLayer) {
     "transport-reality-circle",
     "amenities-circle",
     "service-deserts-fill",
-    "noise-fill"
+    "noise-proxy-fill"
   ]);
 }
 
