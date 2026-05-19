@@ -238,22 +238,9 @@ class ArtifactCopyTests(TestCase):
 
     def test_copy_blocks_when_grid_missing(self) -> None:
         connection = mock.MagicMock()
-        calibration_result = mock.MagicMock()
-        calibration_result.mappings.return_value.first.return_value = {
-            "sample_count": 20,
-            "median_band_min": 60.0,
-            "p75_band_min": 65.0,
-            "mean_band_min": 61.0,
-        }
-        round_result = mock.MagicMock()
-        round_result.mappings.return_value.first.return_value = {"round_number": 4}
         grid_result = mock.MagicMock()
         grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": ""}
-        connection.execute.side_effect = [
-            calibration_result,
-            round_result,
-            grid_result,
-        ]
+        connection.execute.side_effect = [grid_result]
         summary: dict[str, object] = {}
 
         inserted = db_writes.copy_noise_artifact_to_noise_polygons(
@@ -272,28 +259,20 @@ class ArtifactCopyTests(TestCase):
 
     def test_copy_executes_insert_with_noise_resolved_hash(self) -> None:
         connection = mock.MagicMock()
-        calibration_result = mock.MagicMock()
-        calibration_result.mappings.return_value.first.return_value = {
-            "sample_count": 1200,
-            "median_band_min": 60.0,
-            "p75_band_min": 65.0,
-            "mean_band_min": 61.0,
-        }
-        round_result = mock.MagicMock()
-        round_result.mappings.return_value.first.return_value = {"round_number": 4}
         grid_result = mock.MagicMock()
         grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
-        available_bands_result = mock.MagicMock()
-        available_bands_result.mappings.return_value.first.return_value = {
-            "available_bands": [55, 60, 65, 70, 75]
-        }
+        band_counts_result = mock.MagicMock()
+        band_counts_result.mappings.return_value = iter(
+            [
+                {"metric": "Lden", "band_min": 55, "row_count": 3},
+                {"metric": "Lnight", "band_min": 45, "row_count": 2},
+            ]
+        )
         insert_result = mock.MagicMock()
         insert_result.rowcount = 5
         connection.execute.side_effect = [
-            calibration_result,
-            round_result,
             grid_result,
-            available_bands_result,
+            band_counts_result,
             insert_result,
         ]
 
@@ -318,28 +297,15 @@ class ArtifactCopyTests(TestCase):
 
     def test_copy_passes_has_study_area_false_when_none(self) -> None:
         connection = mock.MagicMock()
-        calibration_result = mock.MagicMock()
-        calibration_result.mappings.return_value.first.return_value = {
-            "sample_count": 20,
-            "median_band_min": 60.0,
-            "p75_band_min": 65.0,
-            "mean_band_min": 61.0,
-        }
-        round_result = mock.MagicMock()
-        round_result.mappings.return_value.first.return_value = {"round_number": 4}
         grid_result = mock.MagicMock()
         grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
-        available_bands_result = mock.MagicMock()
-        available_bands_result.mappings.return_value.first.return_value = {
-            "available_bands": [55, 60, 65, 70, 75]
-        }
+        band_counts_result = mock.MagicMock()
+        band_counts_result.mappings.return_value = iter([])
         insert_result = mock.MagicMock()
         insert_result.rowcount = 0
         connection.execute.side_effect = [
-            calibration_result,
-            round_result,
             grid_result,
-            available_bands_result,
+            band_counts_result,
             insert_result,
         ]
 
@@ -358,28 +324,15 @@ class ArtifactCopyTests(TestCase):
 
     def test_copy_passes_has_study_area_true_with_wkb(self) -> None:
         connection = mock.MagicMock()
-        calibration_result = mock.MagicMock()
-        calibration_result.mappings.return_value.first.return_value = {
-            "sample_count": 20,
-            "median_band_min": 60.0,
-            "p75_band_min": 65.0,
-            "mean_band_min": 61.0,
-        }
-        round_result = mock.MagicMock()
-        round_result.mappings.return_value.first.return_value = {"round_number": 4}
         grid_result = mock.MagicMock()
         grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
-        available_bands_result = mock.MagicMock()
-        available_bands_result.mappings.return_value.first.return_value = {
-            "available_bands": [55, 60, 65, 70, 75]
-        }
+        band_counts_result = mock.MagicMock()
+        band_counts_result.mappings.return_value = iter([])
         insert_result = mock.MagicMock()
         insert_result.rowcount = 0
         connection.execute.side_effect = [
-            calibration_result,
-            round_result,
             grid_result,
-            available_bands_result,
+            band_counts_result,
             insert_result,
         ]
         study = box(0.0, 0.0, 1.0, 1.0)
@@ -396,6 +349,25 @@ class ArtifactCopyTests(TestCase):
         params = connection.execute.call_args_list[-1].args[1]
         self.assertTrue(params["has_study_area"])
         self.assertEqual(params["study_wkb"], study.wkb)
+
+    def test_copy_sql_publishes_both_lden_and_lnight_metrics(self) -> None:
+        from db_postgis import write_noise as noise_writes
+
+        sql_text = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
+        self.assertIn("g.metric IN ('Lden', 'Lnight')", sql_text)
+        self.assertIn("WHEN s.metric = 'Lnight' THEN CASE s.band_min", sql_text)
+        self.assertIn("WHEN 45 THEN 30", sql_text)
+        self.assertIn("WHEN 70 THEN '70+'", sql_text)
+
+    def test_copy_sql_keeps_lden_mapping_unchanged(self) -> None:
+        from db_postgis import write_noise as noise_writes
+
+        sql_text = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
+        self.assertIn("WHEN 55 THEN 35", sql_text)
+        self.assertIn("WHEN 60 THEN 50", sql_text)
+        self.assertIn("WHEN 65 THEN 65", sql_text)
+        self.assertIn("WHEN 70 THEN 80", sql_text)
+        self.assertIn("WHEN 75 THEN 95", sql_text)
 
     def test_publish_artifact_calls_summary_update_after_copy(self) -> None:
         """FIX 10: summary JSON must be updated from DB rows after artifact copy."""

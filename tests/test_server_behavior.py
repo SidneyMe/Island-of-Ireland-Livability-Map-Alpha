@@ -501,11 +501,13 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["noise_source_counts"]["road"], 4)
         self.assertEqual(payload["noise_metric_counts"], {"Lden": 5, "Lnight": 3})
         self.assertEqual(payload["noise_band_counts"]["75+"], 2)
-        self.assertEqual(payload["noise_proxy_metadata"]["kind"], "road")
-        self.assertEqual(payload["noise_proxy_metadata"]["metric"], "Lden")
-        self.assertEqual(payload["noise_proxy_metadata"]["class"], "unclassified")
+        self.assertTrue(payload["noise_proxy_metadata"]["enabled"])
+        self.assertEqual(payload["noise_proxy_metadata"]["source_id"], "noise")
+        self.assertEqual(payload["noise_proxy_metadata"]["source_layer"], "noise_proxy")
+        self.assertEqual(payload["noise_proxy_metadata"]["kind"], ["road"])
+        self.assertEqual(payload["noise_proxy_metadata"]["metrics"], ["Lden", "Lnight"])
+        self.assertEqual(payload["noise_proxy_metadata"]["default_metric"], "Lden")
         self.assertEqual(payload["noise_proxy_metadata"]["method"], "official_derived_grid_proxy")
-        self.assertEqual(payload["noise_proxy_metadata"]["source_layer"], "grid_1000m")
         self.assertEqual(payload["noise_proxy_metadata"]["confidence"], "proxy_not_measured")
         self.assertFalse(payload["noise_proxy_metadata"]["actual_road_geometry"])
         self.assertEqual(payload["runtime_mode"], "strict_manifest")
@@ -729,6 +731,9 @@ class RenderAndCliTests(TestCase):
         fallback_mock.assert_called_once()
         self.assertEqual(payload["runtime_mode"], "stale_manifest_fallback")
         self.assertIsInstance(payload["runtime_warning"], str)
+        self.assertEqual(payload["noise_metric_counts"], {"Lden": 1})
+        self.assertEqual(payload["noise_proxy_metadata"]["metrics"], ["Lden"])
+        self.assertEqual(payload["noise_proxy_metadata"]["default_metric"], "Lden")
 
     def test_main_serve_flag_starts_local_app(self) -> None:
         with (

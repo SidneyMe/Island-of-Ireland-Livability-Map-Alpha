@@ -1,6 +1,6 @@
 const NOISE_METRIC_ORDER = ["Lden", "Lnight"];
-const NOISE_SOURCE_ORDER = ["road", "rail"];
-const NOISE_BAND_ORDER = ["55-59", "60-64", "65-69", "70-74", "75+", "80+"];
+const NOISE_SOURCE_ORDER = ["road"];
+const NOISE_BAND_ORDER = ["45-49", "50-54", "55-59", "60-64", "65-69", "70+", "70-74", "75+", "80+"];
 
 const NOISE_METRIC_LABELS = {
   Lden: "Day-evening-night",
@@ -8,8 +8,7 @@ const NOISE_METRIC_LABELS = {
 };
 
 const NOISE_SOURCE_LABELS = {
-  road: "Road",
-  rail: "Rail"
+  road: "Road"
 };
 
 function _normalizedCounts(rawCounts) {
@@ -76,10 +75,17 @@ function noiseBandLabel(value) {
   return String(value || "").trim();
 }
 
-function noiseBandOptions(runtime) {
+function noiseBandOptions(runtime, metric = null) {
+  const metricKey = String(metric || "").trim();
+  const byMetric = runtime && runtime.noise_band_counts_by_metric && typeof runtime.noise_band_counts_by_metric === "object"
+    ? runtime.noise_band_counts_by_metric
+    : null;
+  const metricCounts = byMetric && metricKey
+    ? _normalizedCounts(byMetric[metricKey])
+    : null;
   return _orderedOptions(
     NOISE_BAND_ORDER,
-    _normalizedCounts(runtime && runtime.noise_band_counts),
+    metricCounts || _normalizedCounts(runtime && runtime.noise_band_counts),
     noiseBandLabel
   );
 }
@@ -92,7 +98,7 @@ function defaultNoiseSelections(runtime) {
   return {
     metric: defaultMetric,
     sources: noiseSourceOptions(runtime).map(function (option) { return option.value; }),
-    bands: noiseBandOptions(runtime).map(function (option) { return option.value; })
+    bands: noiseBandOptions(runtime, defaultMetric).map(function (option) { return option.value; })
   };
 }
 
@@ -100,7 +106,11 @@ function buildNoiseLayerFilter(options = {}) {
   const metric = String(options.metric || "Lden").trim();
   const selectedSources = Array.from(options.selectedSources || []);
   const selectedBands = Array.from(options.selectedBands || []);
-  const clauses = [["==", ["get", "metric"], metric]];
+  const clauses = [
+    ["==", ["get", "kind"], "road"],
+    ["==", ["get", "metric"], metric],
+    ["==", ["get", "method"], "official_derived_grid_proxy"]
+  ];
 
   if (selectedSources.length > 0) {
     clauses.push([

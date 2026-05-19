@@ -418,6 +418,30 @@ def _update_noise_summary_from_database(
         build_key=build_key,
         field_name="db_value",
     )
+    target_name = _qualified_table_name(noise_polygons)
+    metric_band_rows = connection.execute(
+        text(
+            f"""
+            SELECT metric, db_value, COUNT(*) AS row_count
+            FROM {target_name}
+            WHERE build_key = :build_key
+              AND metric IS NOT NULL
+              AND db_value IS NOT NULL
+            GROUP BY metric, db_value
+            ORDER BY metric, db_value
+            """
+        ),
+        {"build_key": build_key},
+    ).mappings()
+    band_counts_by_metric: dict[str, dict[str, int]] = {}
+    for row in metric_band_rows:
+        metric = str(row.get("metric") or "").strip()
+        band = str(row.get("db_value") or "").strip()
+        row_count = int(row.get("row_count") or 0)
+        if not metric or not band or row_count <= 0:
+            continue
+        band_counts_by_metric.setdefault(metric, {})[band] = row_count
+    summary_json["noise_band_counts_by_metric"] = band_counts_by_metric
 
 
 def _materialize_noise_polygons_from_stage(
@@ -578,47 +602,11 @@ def _drain_iterable(rows: Iterable[dict[str, Any]]) -> int:
     return count
 
 
-_ROAD_LDEN_CALIBRATION_SQL = text(
-    """
-    WITH road_rows AS (
-        SELECT
-            CASE
-                WHEN d.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(d.db_value, '-', 1)::float8
-                WHEN d.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(d.db_value, '\\+', '')::float8
-                WHEN d.db_low IS NOT NULL THEN d.db_low::float8
-                ELSE NULL
-            END AS band_min
-        FROM noise_resolved_display d
-        WHERE d.noise_resolved_hash = :noise_resolved_hash
-          AND d.source_type = 'road'
-          AND d.metric = 'Lden'
-          AND d.geom IS NOT NULL
-          AND NOT ST_IsEmpty(d.geom)
-    )
-    SELECT
-        COUNT(*) AS sample_count,
-        percentile_cont(0.5) WITHIN GROUP (ORDER BY band_min) AS median_band_min,
-        percentile_cont(0.75) WITHIN GROUP (ORDER BY band_min) AS p75_band_min,
-        AVG(band_min) AS mean_band_min
-    FROM road_rows
-    WHERE band_min IS NOT NULL
-    """
-)
-
-_ROAD_ROUND_SQL = text(
-    """
-    SELECT COALESCE(MAX(round_number), 4) AS round_number
-    FROM noise_resolved_display
-    WHERE noise_resolved_hash = :noise_resolved_hash
-      AND source_type = 'road'
-      AND metric = 'Lden'
-    """
-)
-
-_GRID_ARTIFACT_AVAILABLE_BANDS_SQL = text(
+_GRID_ARTIFACT_BAND_COUNTS_BY_METRIC_SQL = text(
     """
     WITH raw_cells AS (
         SELECT
+            g.metric,
             CASE
                 WHEN g.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(g.db_value, '-', 1)::float8
                 WHEN g.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(g.db_value, '\\+', '')::float8
@@ -628,24 +616,34 @@ _GRID_ARTIFACT_AVAILABLE_BANDS_SQL = text(
         FROM noise_grid_artifact g
         WHERE g.artifact_hash = :grid_artifact_hash
           AND g.source_type = 'road'
-          AND g.metric = 'Lden'
+          AND g.metric IN ('Lden', 'Lnight')
     ),
     snapped AS (
         SELECT
+            metric,
             CASE
                 WHEN raw_band_min IS NULL THEN NULL
-                WHEN raw_band_min < 57.5 THEN 55
-                WHEN raw_band_min < 62.5 THEN 60
-                WHEN raw_band_min < 67.5 THEN 65
-                WHEN raw_band_min < 72.5 THEN 70
-                WHEN raw_band_min < 77.5 THEN 75
-                ELSE 80
+                WHEN metric = 'Lden' AND raw_band_min < 57.5 THEN 55
+                WHEN metric = 'Lden' AND raw_band_min < 62.5 THEN 60
+                WHEN metric = 'Lden' AND raw_band_min < 67.5 THEN 65
+                WHEN metric = 'Lden' AND raw_band_min < 72.5 THEN 70
+                WHEN metric = 'Lden' AND raw_band_min < 77.5 THEN 75
+                WHEN metric = 'Lden' THEN 80
+                WHEN metric = 'Lnight' AND raw_band_min < 50 THEN 45
+                WHEN metric = 'Lnight' AND raw_band_min < 55 THEN 50
+                WHEN metric = 'Lnight' AND raw_band_min < 60 THEN 55
+                WHEN metric = 'Lnight' AND raw_band_min < 65 THEN 60
+                WHEN metric = 'Lnight' AND raw_band_min < 70 THEN 65
+                WHEN metric = 'Lnight' THEN 70
+                ELSE NULL
             END::int AS band_min
         FROM raw_cells
     )
-    SELECT ARRAY_AGG(DISTINCT band_min ORDER BY band_min) AS available_bands
+    SELECT metric, band_min, COUNT(*) AS row_count
     FROM snapped
     WHERE band_min IS NOT NULL
+    GROUP BY metric, band_min
+    ORDER BY metric, band_min
     """
 )
 
@@ -674,7 +672,8 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
     ),
     proxy_cells AS (
         SELECT
-            COALESCE(g.round_number, :round_number) AS round_number,
+            g.metric,
+            COALESCE(g.round_number, 4) AS round_number,
             CASE
                 WHEN g.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(g.db_value, '-', 1)::float8
                 WHEN g.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(g.db_value, '\\+', '')::float8
@@ -698,7 +697,7 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
         CROSS JOIN study_area_2157 s
         WHERE g.artifact_hash = :grid_artifact_hash
           AND g.source_type = 'road'
-          AND g.metric = 'Lden'
+          AND g.metric IN ('Lden', 'Lnight')
           AND g.geom IS NOT NULL
           AND NOT ST_IsEmpty(g.geom)
           AND (
@@ -708,15 +707,23 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
     ),
     snapped AS (
         SELECT
+            p.metric,
             p.round_number,
             CASE
                 WHEN p.raw_band_min IS NULL THEN NULL
-                WHEN p.raw_band_min < 57.5 THEN 55
-                WHEN p.raw_band_min < 62.5 THEN 60
-                WHEN p.raw_band_min < 67.5 THEN 65
-                WHEN p.raw_band_min < 72.5 THEN 70
-                WHEN p.raw_band_min < 77.5 THEN 75
-                ELSE 80
+                WHEN p.metric = 'Lden' AND p.raw_band_min < 57.5 THEN 55
+                WHEN p.metric = 'Lden' AND p.raw_band_min < 62.5 THEN 60
+                WHEN p.metric = 'Lden' AND p.raw_band_min < 67.5 THEN 65
+                WHEN p.metric = 'Lden' AND p.raw_band_min < 72.5 THEN 70
+                WHEN p.metric = 'Lden' AND p.raw_band_min < 77.5 THEN 75
+                WHEN p.metric = 'Lden' THEN 80
+                WHEN p.metric = 'Lnight' AND p.raw_band_min < 50 THEN 45
+                WHEN p.metric = 'Lnight' AND p.raw_band_min < 55 THEN 50
+                WHEN p.metric = 'Lnight' AND p.raw_band_min < 60 THEN 55
+                WHEN p.metric = 'Lnight' AND p.raw_band_min < 65 THEN 60
+                WHEN p.metric = 'Lnight' AND p.raw_band_min < 70 THEN 65
+                WHEN p.metric = 'Lnight' THEN 70
+                ELSE NULL
             END::int AS band_min,
             p.geom
         FROM proxy_cells p
@@ -737,27 +744,51 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
         :import_fingerprint,
         'proxy' AS jurisdiction,
         'road' AS source_type,
-        'Lden' AS metric,
+        s.metric AS metric,
         s.round_number AS round_number,
         :proxy_class AS report_period,
         s.band_min::float8 AS db_low,
-        CASE s.band_min
-            WHEN 55 THEN 35
-            WHEN 60 THEN 50
-            WHEN 65 THEN 65
-            WHEN 70 THEN 80
-            WHEN 75 THEN 95
-            WHEN 80 THEN 100
-            ELSE 35
+        CASE
+            WHEN s.metric = 'Lden' THEN CASE s.band_min
+                WHEN 55 THEN 35
+                WHEN 60 THEN 50
+                WHEN 65 THEN 65
+                WHEN 70 THEN 80
+                WHEN 75 THEN 95
+                WHEN 80 THEN 100
+                ELSE 35
+            END
+            WHEN s.metric = 'Lnight' THEN CASE s.band_min
+                WHEN 45 THEN 30
+                WHEN 50 THEN 45
+                WHEN 55 THEN 60
+                WHEN 60 THEN 75
+                WHEN 65 THEN 90
+                WHEN 70 THEN 100
+                ELSE 30
+            END
+            ELSE 0
         END::float8 AS db_high,
-        CASE s.band_min
-            WHEN 55 THEN '55-59'
-            WHEN 60 THEN '60-64'
-            WHEN 65 THEN '65-69'
-            WHEN 70 THEN '70-74'
-            WHEN 75 THEN '75+'
-            WHEN 80 THEN '80+'
-            ELSE '55-59'
+        CASE
+            WHEN s.metric = 'Lden' THEN CASE s.band_min
+                WHEN 55 THEN '55-59'
+                WHEN 60 THEN '60-64'
+                WHEN 65 THEN '65-69'
+                WHEN 70 THEN '70-74'
+                WHEN 75 THEN '75+'
+                WHEN 80 THEN '80+'
+                ELSE '55-59'
+            END
+            WHEN s.metric = 'Lnight' THEN CASE s.band_min
+                WHEN 45 THEN '45-49'
+                WHEN 50 THEN '50-54'
+                WHEN 55 THEN '55-59'
+                WHEN 60 THEN '60-64'
+                WHEN 65 THEN '65-69'
+                WHEN 70 THEN '70+'
+                ELSE '45-49'
+            END
+            ELSE 'unknown'
         END AS db_value,
         'noise_grid_artifact' AS source_dataset,
         'grid_1000m' AS source_layer,
@@ -782,53 +813,69 @@ _LDEN_PROXY_SCORE_BY_BAND_MIN: dict[int, int] = {
 }
 
 
-def _snap_lden_band_min(value: float | None) -> int:
-    if value is None:
-        raise ValueError("Lden calibrated band minimum cannot be None for proxy phase A.")
-    candidates = sorted(_LDEN_PROXY_SCORE_BY_BAND_MIN.keys())
-    return int(min(candidates, key=lambda candidate: abs(float(value) - float(candidate))))
+_LNIGHT_PROXY_SCORE_BY_BAND_MIN: dict[int, int] = {
+    45: 30,
+    50: 45,
+    55: 60,
+    60: 75,
+    65: 90,
+    70: 100,
+}
+
+
+_PROXY_BAND_MINS_BY_METRIC: dict[str, tuple[int, ...]] = {
+    "Lden": tuple(sorted(_LDEN_PROXY_SCORE_BY_BAND_MIN.keys())),
+    "Lnight": tuple(sorted(_LNIGHT_PROXY_SCORE_BY_BAND_MIN.keys())),
+}
+
+
+def _load_band_counts_by_metric(
+    connection: Connection,
+    *,
+    grid_artifact_hash: str,
+) -> dict[str, dict[int, int]]:
+    rows = connection.execute(
+        _GRID_ARTIFACT_BAND_COUNTS_BY_METRIC_SQL,
+        {"grid_artifact_hash": grid_artifact_hash},
+    ).mappings()
+    band_counts: dict[str, dict[int, int]] = {}
+    for row in rows:
+        metric = str(row.get("metric") or "").strip()
+        if metric not in _PROXY_BAND_MINS_BY_METRIC:
+            continue
+        band_min = int(row.get("band_min"))
+        row_count = int(row.get("row_count") or 0)
+        if row_count <= 0:
+            continue
+        band_counts.setdefault(metric, {})[band_min] = row_count
+    return band_counts
 
 
 def _append_noise_proxy_summary(
     summary_json: dict[str, Any] | None,
     *,
-    sample_count: int,
-    median_band_min: float | None,
-    p75_band_min: float | None,
-    mean_band_min: float | None,
-    selected_band_min: int,
-    selected_proxy_score: int,
-    calibration_stat: str,
-    buffer_m: int,
+    band_counts_by_metric: dict[str, dict[int, int]],
     class_available: bool,
-    available_bands: list[int],
 ) -> None:
     if summary_json is None:
         return
-    summary_json["noise_proxy_label"] = "Official-derived road Lden proxy"
+    summary_json["noise_proxy_label"] = "Official-derived road noise proxy"
     summary_json["noise_proxy_caveat"] = (
-        "Approximate road Lden proxy from official-derived noise grid. "
+        "Approximate road noise proxy from official-derived noise grid. "
         "Not measured point noise and not official contour geometry."
     )
-    summary_json["noise_proxy_phase"] = "phase_a_road_lden"
-    summary_json["noise_proxy_calibration_table"] = [
-        {
-            "road_class": "unclassified",
-            "sample_count": int(sample_count),
-            "median_band_min": median_band_min,
-            "p75_band_min": p75_band_min,
-            "mean_band_min": mean_band_min,
-            "selected_band_min": int(selected_band_min),
-            "proxy_score": int(selected_proxy_score),
-            "buffer_m": int(buffer_m),
-            "calibration_stat": str(calibration_stat),
-            "available_bands": [int(value) for value in available_bands],
+    summary_json["noise_proxy_phase"] = "phase_b_road_lden_lnight"
+    summary_json["noise_proxy_band_counts_by_metric"] = {
+        metric: {
+            str(int(band_min)): int(row_count)
+            for band_min, row_count in sorted((band_counts or {}).items(), key=lambda item: int(item[0]))
         }
-    ]
+        for metric, band_counts in sorted(band_counts_by_metric.items())
+    }
     summary_json["noise_proxy_class_differentiation_available"] = bool(class_available)
     if not class_available:
         summary_json["noise_proxy_class_differentiation_note"] = (
-            "Road class tags were unavailable in proxy phase A; using global road calibration."
+            "Road class tags are unavailable in this phase; using unclassified road proxy rows."
         )
 
 
@@ -842,61 +889,8 @@ def copy_noise_artifact_to_noise_polygons(
     study_area_wgs84=None,
     summary_json: dict[str, Any] | None = None,
 ) -> int:
-    calibration_row = connection.execute(
-        _ROAD_LDEN_CALIBRATION_SQL,
-        {"noise_resolved_hash": noise_resolved_hash},
-    ).mappings().first()
-    if not calibration_row:
-        if summary_json is not None:
-            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
-            summary_json["noise_proxy_blocked"] = True
-            summary_json["noise_proxy_blocked_reason"] = (
-                "No official road Lden calibration samples were available in noise_resolved_display."
-            )
-        return 0
-    sample_count = int(calibration_row.get("sample_count") or 0)
-    if sample_count <= 0:
-        if summary_json is not None:
-            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
-            summary_json["noise_proxy_blocked"] = True
-            summary_json["noise_proxy_blocked_reason"] = (
-                "Official road Lden rows were present but produced zero calibration samples."
-            )
-        return 0
-
-    median_band_min = calibration_row.get("median_band_min")
-    p75_band_min = calibration_row.get("p75_band_min")
-    mean_band_min = calibration_row.get("mean_band_min")
-    if sample_count >= 500 and p75_band_min is not None:
-        selected_stat = "p75"
-        selected_raw = float(p75_band_min)
-    elif median_band_min is not None:
-        selected_stat = "median"
-        selected_raw = float(median_band_min)
-    elif p75_band_min is not None:
-        selected_stat = "p75"
-        selected_raw = float(p75_band_min)
-    elif mean_band_min is not None:
-        selected_stat = "mean"
-        selected_raw = float(mean_band_min)
-    else:
-        if summary_json is not None:
-            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
-            summary_json["noise_proxy_blocked"] = True
-            summary_json["noise_proxy_blocked_reason"] = (
-                "Official road Lden rows were present but no valid calibrated band minimum could be computed."
-            )
-        return 0
-
-    selected_band_min = _snap_lden_band_min(selected_raw)
-    proxy_score = int(_LDEN_PROXY_SCORE_BY_BAND_MIN[selected_band_min])
-
-    round_row = connection.execute(
-        _ROAD_ROUND_SQL,
-        {"noise_resolved_hash": noise_resolved_hash},
-    ).mappings().first()
-    round_number = int((round_row or {}).get("round_number") or 4)
-
+    if summary_json is not None:
+        summary_json["noise_proxy_phase"] = "phase_b_road_lden_lnight"
     has_study_area = study_area_wgs84 is not None
     params: dict[str, Any] = {
         "noise_resolved_hash": noise_resolved_hash,
@@ -905,9 +899,7 @@ def copy_noise_artifact_to_noise_polygons(
         "import_fingerprint": import_fingerprint,
         "has_study_area": has_study_area,
         "study_wkb": study_area_wgs84.wkb if has_study_area else None,
-        "round_number": round_number,
         "proxy_class": "unclassified",
-        "calibration_stat": selected_stat,
     }
 
     grid_row = connection.execute(
@@ -917,7 +909,6 @@ def copy_noise_artifact_to_noise_polygons(
     grid_artifact_hash = str((grid_row or {}).get("grid_artifact_hash") or "").strip()
     if not grid_artifact_hash:
         if summary_json is not None:
-            summary_json["noise_proxy_phase"] = "phase_a_road_lden"
             summary_json["noise_proxy_blocked"] = True
             summary_json["noise_proxy_blocked_reason"] = (
                 "No road grid artifact hash was available for lightweight proxy corridors; "
@@ -925,36 +916,24 @@ def copy_noise_artifact_to_noise_polygons(
             )
         return 0
     params["grid_artifact_hash"] = grid_artifact_hash
-    available_bands_row = connection.execute(
-        _GRID_ARTIFACT_AVAILABLE_BANDS_SQL,
-        {"grid_artifact_hash": grid_artifact_hash},
-    ).mappings().first()
-    raw_available_bands = (
-        list((available_bands_row or {}).get("available_bands") or [])
-        if available_bands_row is not None
-        else []
+    band_counts_by_metric = _load_band_counts_by_metric(
+        connection,
+        grid_artifact_hash=grid_artifact_hash,
     )
-    available_bands = sorted(
-        {
-            int(value)
-            for value in raw_available_bands
-            if value is not None and str(value).strip() != ""
-        }
-    ) or sorted(_LDEN_PROXY_SCORE_BY_BAND_MIN.keys())
     result = connection.execute(_INSERT_ROAD_PROXY_FROM_GRID_SQL, params)
+    inserted = max(int(result.rowcount or 0), 0)
 
     _append_noise_proxy_summary(
         summary_json,
-        sample_count=sample_count,
-        median_band_min=float(median_band_min) if median_band_min is not None else None,
-        p75_band_min=float(p75_band_min) if p75_band_min is not None else None,
-        mean_band_min=float(mean_band_min) if mean_band_min is not None else None,
-        selected_band_min=selected_band_min,
-        selected_proxy_score=proxy_score,
-        calibration_stat=selected_stat,
-        buffer_m=0,
+        band_counts_by_metric=band_counts_by_metric,
         class_available=False,
-        available_bands=available_bands,
     )
-
-    return max(int(result.rowcount or 0), 0)
+    if summary_json is not None:
+        summary_json["noise_proxy_blocked"] = inserted <= 0
+        if inserted <= 0:
+            summary_json["noise_proxy_blocked_reason"] = (
+                "No road Lden/Lnight proxy rows were available in noise_grid_artifact for publish."
+            )
+        else:
+            summary_json.pop("noise_proxy_blocked_reason", None)
+    return inserted

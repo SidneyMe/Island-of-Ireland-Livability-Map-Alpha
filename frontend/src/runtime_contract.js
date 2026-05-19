@@ -391,6 +391,19 @@ function buildStyle(runtime, options = {}) {
   const noisePmtilesUrl = runtime.noise_pmtiles_url
     ? "pmtiles://" + origin + runtime.noise_pmtiles_url
     : null;
+  const noiseDefaultMetric =
+    runtime &&
+    runtime.noise_proxy_metadata &&
+    typeof runtime.noise_proxy_metadata.default_metric === "string" &&
+    runtime.noise_proxy_metadata.default_metric.trim()
+      ? runtime.noise_proxy_metadata.default_metric.trim()
+      : "Lden";
+  const noiseProxyFilter = [
+    "all",
+    ["==", ["get", "kind"], "road"],
+    ["==", ["get", "metric"], noiseDefaultMetric],
+    ["==", ["get", "method"], "official_derived_grid_proxy"]
+  ];
   const layers = [{ id: "basemap", type: "raster", source: "basemap" }];
   buildActiveGridLayers(
     runtime,
@@ -410,7 +423,7 @@ function buildStyle(runtime, options = {}) {
         visibility: "none",
         "fill-sort-key": ["coalesce", ["get", "proxy_score"], 0]
       },
-      filter: ["all", ["==", ["get", "metric"], "Lden"]],
+      filter: noiseProxyFilter,
       paint: {
         "fill-color": noiseFillColorExpression(),
         "fill-opacity": 0.45
@@ -425,7 +438,7 @@ function buildStyle(runtime, options = {}) {
       layout: {
         visibility: "none"
       },
-      filter: ["all", ["==", ["get", "metric"], "Lden"]],
+      filter: noiseProxyFilter,
       paint: {
         "line-color": "#7f1d1d",
         "line-opacity": 0.35,

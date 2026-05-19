@@ -4,6 +4,22 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-19 - Official-derived road noise proxy Phase B
+
+### Added
+
+- Road Lnight proxy support for the official-derived road noise proxy overlay.
+- Metric selector for Lden/Lnight road proxy display.
+
+### Notes
+
+- The noise overlay remains an official-derived grid proxy, not measured point noise and not official contour geometry.
+- Road geometry/classification is still not used in this phase.
+
+### Scoring logic
+
+- No scoring logic change.
+
 ## 2026-05-19 - Official-derived road Lden proxy overlay
 
 ### Added

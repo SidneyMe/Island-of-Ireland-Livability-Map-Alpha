@@ -5,17 +5,18 @@ import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const mainJs = fs.readFileSync(path.join(here, "main.js"), "utf8");
+const noiseFiltersJs = fs.readFileSync(path.join(here, "noise_filters.js"), "utf8");
 
 assert.ok(
-  mainJs.includes('overlayTitle.textContent = "Show road Lden proxy";'),
-  "noise toggle label must use road Lden proxy wording"
+  mainJs.includes('overlayTitle.textContent = "Show road noise proxy";'),
+  "noise toggle label must use road noise proxy wording"
 );
 assert.ok(
-  mainJs.includes('overlaySubtitle.textContent = "Official-derived grid proxy, not measured dB";'),
-  "noise subtitle must state grid proxy / not measured wording"
+  mainJs.includes('overlaySubtitle.textContent = "Official-derived grid proxy, not measured point noise";'),
+  "noise subtitle must state grid proxy / not measured point noise wording"
 );
 assert.ok(
-  mainJs.includes("Approximate road Lden proxy from official-derived noise grid."),
+  mainJs.includes("Approximate road noise proxy from official-derived noise grid."),
   "noise caveat text must be present"
 );
 assert.equal(
@@ -24,9 +25,19 @@ assert.equal(
   "noise UI must not use official contour wording"
 );
 assert.equal(
-  mainJs.includes("Lden and Lnight polygons"),
-  false,
-  "noise UI must not mention Lnight polygons in phase A"
+  mainJs.includes("input.name = \"noise-metric\""),
+  true,
+  "noise metric selector inputs must be present in control builder"
+);
+assert.equal(
+  noiseFiltersJs.includes('Lden: "Day-evening-night"'),
+  true,
+  "noise metric selector must include Lden label"
+);
+assert.equal(
+  noiseFiltersJs.includes('Lnight: "Night"'),
+  true,
+  "noise metric selector must include Lnight label"
 );
 assert.ok(
   mainJs.includes('opacityInput.id = "noise-opacity";'),

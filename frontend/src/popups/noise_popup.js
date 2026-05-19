@@ -1,4 +1,4 @@
-import { noiseSourceLabel } from "../noise_filters.js";
+import { noiseMetricLabel, noiseSourceLabel } from "../noise_filters.js";
 
 function escapeHtml(value) {
   return String(value)
@@ -9,9 +9,10 @@ function escapeHtml(value) {
 
 export function noisePopupHtml(properties) {
   const kind = String(properties.kind || properties.source_type || "road");
+  const metric = String(properties.metric || "Lden");
   const classLabel = String(properties.class || "unclassified");
   const sourceLabel = noiseSourceLabel(kind);
-  const metricLabel = "Day-evening-night";
+  const metricLabel = noiseMetricLabel(metric);
   const proxyScore = Number(properties.proxy_score);
   const calibratedBandMin = Number(properties.band_min ?? properties.calibrated_band_min);
   const details = [
@@ -27,9 +28,9 @@ export function noisePopupHtml(properties) {
   }
   return (
     '<div class="popup-content">' +
-      "<h3>Official-derived road Lden proxy</h3>" +
+      "<h3>Official-derived road noise proxy</h3>" +
       details.join("") +
-      "<p>Approximate road Lden proxy from official-derived noise grid. Not measured point noise and not official contour geometry.</p>" +
+      "<p>Approximate road noise proxy from official-derived noise grid. Not measured point noise and not official contour geometry.</p>" +
     "</div>"
   );
 }

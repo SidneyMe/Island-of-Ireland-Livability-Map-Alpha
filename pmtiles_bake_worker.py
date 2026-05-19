@@ -220,7 +220,9 @@ _NOISE_TILE_SQL = text(
             COALESCE(n.db_high, 0.0) AS proxy_score,
             0.0 AS buffer_m,
             CONCAT(
-                'Road Lden proxy: ',
+                'Road ',
+                COALESCE(NULLIF(n.metric, ''), 'noise'),
+                ' proxy: ',
                 COALESCE(NULLIF(n.db_value, ''), 'unknown')
             ) AS label,
             'official_derived_grid_proxy' AS method,

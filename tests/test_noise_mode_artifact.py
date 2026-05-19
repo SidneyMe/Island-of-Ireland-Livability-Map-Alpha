@@ -216,18 +216,18 @@ class DirectCopyFunctionTests(TestCase):
         self.assertIn("ST_Transform", src)
         self.assertIn("4326", src)
 
-    def test_copy_sql_reads_from_noise_resolved_display(self) -> None:
+    def test_copy_sql_reads_grid_artifact_hash_from_manifest(self) -> None:
         import inspect
         from db_postgis.writes import copy_noise_artifact_to_noise_polygons
         src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
-        self.assertIn("noise_resolved_display", src)
+        self.assertIn("_GRID_ARTIFACT_HASH_SQL", src)
 
     def test_copy_sql_reads_calibration_from_resolved_display(self) -> None:
         import inspect
         from db_postgis.writes import copy_noise_artifact_to_noise_polygons
         src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
-        self.assertIn("_ROAD_LDEN_CALIBRATION_SQL", src)
-        self.assertIn("noise_resolved_display", src)
+        self.assertNotIn("_ROAD_LDEN_CALIBRATION_SQL", src)
+        self.assertNotIn("noise_resolved_display", src)
 
     def test_copy_sql_inserts_into_noise_polygons(self) -> None:
         from db_postgis import write_noise as noise_writes
@@ -250,7 +250,8 @@ class DirectCopyFunctionTests(TestCase):
 
         sql_src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
         self.assertIn("split_part(g.db_value, '-', 1)::float8", sql_src)
-        self.assertIn("WHEN p.raw_band_min < 57.5 THEN 55", sql_src)
+        self.assertIn("WHEN p.metric = 'Lden' AND p.raw_band_min < 57.5 THEN 55", sql_src)
+        self.assertIn("WHEN p.metric = 'Lnight' AND p.raw_band_min < 50 THEN 45", sql_src)
         self.assertNotIn("ST_UnaryUnion", sql_src)
 
     def test_publish_calls_direct_copy_for_sentinel(self) -> None:

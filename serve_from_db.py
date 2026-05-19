@@ -92,6 +92,7 @@ class RuntimeState:
     noise_source_counts: dict[str, int]
     noise_metric_counts: dict[str, int]
     noise_band_counts: dict[str, int]
+    noise_band_counts_by_metric: dict[str, dict[str, int]]
     noise_pmtiles_url: str | None
     fine_surface_enabled: bool
     surface_shell_dir: Path | None
@@ -299,22 +300,44 @@ class RuntimeService:
             )
             if str(key)
         }
+        raw_noise_band_counts_by_metric = summary_json.get("noise_band_counts_by_metric", {}) or {}
+        noise_band_counts_by_metric: dict[str, dict[str, int]] = {}
+        if isinstance(raw_noise_band_counts_by_metric, dict):
+            for metric, counts in raw_noise_band_counts_by_metric.items():
+                metric_key = str(metric).strip()
+                if not metric_key or not isinstance(counts, dict):
+                    continue
+                normalized_counts = {
+                    str(key): int(value)
+                    for key, value in counts.items()
+                    if str(key)
+                }
+                if normalized_counts:
+                    noise_band_counts_by_metric[metric_key] = normalized_counts
         noise_rows_available = bool(summary_json.get("noise_enabled")) or bool(noise_source_counts)
         noise_pmtiles_available = noise_rows_available and self._noise_pmtiles_path.exists()
-        calibration_rows = summary_json.get("noise_proxy_calibration_table")
-        calibration_row = (
-            calibration_rows[0]
-            if isinstance(calibration_rows, list) and calibration_rows and isinstance(calibration_rows[0], dict)
-            else {}
-        )
+        ordered_metrics = [
+            metric
+            for metric in ("Lden", "Lnight")
+            if int(noise_metric_counts.get(metric, 0)) > 0
+        ]
+        if not ordered_metrics:
+            ordered_metrics = sorted(
+                [
+                    str(metric)
+                    for metric, count in noise_metric_counts.items()
+                    if str(metric) and int(count) > 0
+                ]
+            )
+        default_metric = "Lden" if "Lden" in ordered_metrics else (ordered_metrics[0] if ordered_metrics else "Lden")
         noise_proxy_metadata = {
-            "kind": "road",
-            "metric": "Lden",
-            "class": "unclassified",
+            "enabled": bool(noise_pmtiles_available),
+            "source_id": "noise",
+            "source_layer": "noise_proxy",
+            "kind": ["road"],
+            "metrics": ordered_metrics,
+            "default_metric": default_metric,
             "method": "official_derived_grid_proxy",
-            "source_dataset": "noise_grid_artifact",
-            "source_layer": "grid_1000m",
-            "calibration_stat": calibration_row.get("calibration_stat") if calibration_row else None,
             "confidence": "proxy_not_measured",
             "actual_road_geometry": False,
         }
@@ -376,6 +399,7 @@ class RuntimeService:
             noise_source_counts=noise_source_counts,
             noise_metric_counts=noise_metric_counts,
             noise_band_counts=noise_band_counts,
+            noise_band_counts_by_metric=noise_band_counts_by_metric,
             noise_pmtiles_url=self._noise_pmtiles_url if noise_pmtiles_available else None,
             fine_surface_enabled=fine_surface_enabled,
             surface_shell_dir=surface_shell_dir,
@@ -449,6 +473,7 @@ class RuntimeService:
             "noise_source_counts": state.noise_source_counts,
             "noise_metric_counts": state.noise_metric_counts,
             "noise_band_counts": state.noise_band_counts,
+            "noise_band_counts_by_metric": state.noise_band_counts_by_metric,
             "noise_pmtiles_url": state.noise_pmtiles_url,
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,

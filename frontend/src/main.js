@@ -462,7 +462,7 @@ function applyServiceDesertVisibility() {
 
 function noiseFilterSummary() {
   const sourceOptions = noiseSourceOptions(state.runtime);
-  const bandOptions = noiseBandOptions(state.runtime);
+  const bandOptions = noiseBandOptions(state.runtime, state.selectedNoiseMetric);
   const sourceCount = state.selectedNoiseSources.size;
   const bandCount = state.selectedNoiseBands.size;
   const sourceText = sourceCount === sourceOptions.length ? "road kind selected" : sourceCount + " kind selected";
@@ -476,7 +476,7 @@ function updateNoiseNote() {
     elements.noiseNote.textContent = "No road noise proxy in this build";
     return;
   }
-  const caveat = "Approximate road Lden proxy from official-derived noise grid. Not measured point noise and not official contour geometry.";
+  const caveat = "Approximate road noise proxy from official-derived noise grid. Not measured point noise and not official contour geometry.";
   elements.noiseNote.textContent = state.noiseVisible
     ? caveat
     : caveat + " Off until enabled.";
@@ -684,10 +684,10 @@ function buildNoiseControls() {
   overlayTextWrap.className = "toggle-label";
 
   const overlayTitle = document.createElement("strong");
-  overlayTitle.textContent = "Show road Lden proxy";
+  overlayTitle.textContent = "Show road noise proxy";
 
   const overlaySubtitle = document.createElement("span");
-  overlaySubtitle.textContent = "Official-derived grid proxy, not measured dB";
+  overlaySubtitle.textContent = "Official-derived grid proxy, not measured point noise";
 
   const overlayInput = document.createElement("input");
   overlayInput.type = "checkbox";
@@ -768,6 +768,14 @@ function buildNoiseControls() {
     input.addEventListener("change", function () {
       if (type === "metric" && input.checked) {
         state.selectedNoiseMetric = value;
+        state.selectedNoiseBands = new Set(
+          noiseBandOptions(state.runtime, state.selectedNoiseMetric).map(function (option) {
+            return option.value;
+          })
+        );
+        buildNoiseControls();
+        applyNoiseFilter();
+        return;
       } else if (type === "source") {
         if (input.checked) {
           state.selectedNoiseSources.add(value);
@@ -793,15 +801,18 @@ function buildNoiseControls() {
     filterList.appendChild(row);
   }
 
-  noiseMetricOptions(state.runtime).forEach(function (option) {
-    appendFilterRow({
-      type: "metric",
-      value: option.value,
-      label: option.label,
-      count: option.count,
-      inputType: "radio"
+  const metricOptions = noiseMetricOptions(state.runtime);
+  if (metricOptions.length > 1) {
+    metricOptions.forEach(function (option) {
+      appendFilterRow({
+        type: "metric",
+        value: option.value,
+        label: option.label,
+        count: option.count,
+        inputType: "radio"
+      });
     });
-  });
+  }
 
   noiseSourceOptions(state.runtime).forEach(function (option) {
     appendFilterRow({
@@ -813,7 +824,7 @@ function buildNoiseControls() {
     });
   });
 
-  noiseBandOptions(state.runtime).forEach(function (option) {
+  noiseBandOptions(state.runtime, state.selectedNoiseMetric).forEach(function (option) {
     appendFilterRow({
       type: "band",
       value: option.value,
