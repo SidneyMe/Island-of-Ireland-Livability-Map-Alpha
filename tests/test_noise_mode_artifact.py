@@ -250,6 +250,7 @@ class DirectCopyFunctionTests(TestCase):
 
         sql_src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
         self.assertIn("split_part(g.db_value, '-', 1)::float8", sql_src)
+        self.assertIn("g.source_type IN ('road', 'rail')", sql_src)
         self.assertIn("WHEN p.metric = 'Lden' AND p.raw_band_min < 57.5 THEN 55", sql_src)
         self.assertIn("WHEN p.metric = 'Lnight' AND p.raw_band_min < 50 THEN 45", sql_src)
         self.assertNotIn("ST_UnaryUnion", sql_src)

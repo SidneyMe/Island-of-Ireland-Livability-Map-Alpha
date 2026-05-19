@@ -4,6 +4,22 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-19 - Official-derived transport noise proxy Phase C
+
+### Added
+
+- Rail Lden/Lnight support for the official-derived transport noise proxy overlay.
+- Road/Rail source filter for the noise proxy overlay, when rail data is available.
+
+### Notes
+
+- The overlay remains an official-derived grid proxy, not measured point noise and not official contour geometry.
+- Actual road/rail geometry classification is still not used in this phase.
+
+### Scoring logic
+
+- No scoring logic change.
+
 ## 2026-05-19 - Official-derived road noise proxy Phase B
 
 ### Added

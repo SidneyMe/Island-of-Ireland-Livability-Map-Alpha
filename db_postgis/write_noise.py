@@ -615,7 +615,7 @@ _GRID_ARTIFACT_BAND_COUNTS_BY_METRIC_SQL = text(
             END AS raw_band_min
         FROM noise_grid_artifact g
         WHERE g.artifact_hash = :grid_artifact_hash
-          AND g.source_type = 'road'
+          AND g.source_type IN ('road', 'rail')
           AND g.metric IN ('Lden', 'Lnight')
     ),
     snapped AS (
@@ -647,6 +647,21 @@ _GRID_ARTIFACT_BAND_COUNTS_BY_METRIC_SQL = text(
     """
 )
 
+_GRID_ARTIFACT_SOURCE_METRIC_COUNTS_SQL = text(
+    """
+    SELECT
+        g.source_type,
+        g.metric,
+        COUNT(*) AS row_count
+    FROM noise_grid_artifact g
+    WHERE g.artifact_hash = :grid_artifact_hash
+      AND g.source_type IN ('road', 'rail')
+      AND g.metric IN ('Lden', 'Lnight')
+    GROUP BY g.source_type, g.metric
+    ORDER BY g.source_type, g.metric
+    """
+)
+
 _GRID_ARTIFACT_HASH_SQL = text(
     """
     SELECT COALESCE(m.manifest_json ->> 'grid_artifact_hash', '') AS grid_artifact_hash
@@ -672,6 +687,7 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
     ),
     proxy_cells AS (
         SELECT
+            g.source_type,
             g.metric,
             COALESCE(g.round_number, 4) AS round_number,
             CASE
@@ -696,7 +712,7 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
         FROM noise_grid_artifact g
         CROSS JOIN study_area_2157 s
         WHERE g.artifact_hash = :grid_artifact_hash
-          AND g.source_type = 'road'
+          AND g.source_type IN ('road', 'rail')
           AND g.metric IN ('Lden', 'Lnight')
           AND g.geom IS NOT NULL
           AND NOT ST_IsEmpty(g.geom)
@@ -707,6 +723,7 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
     ),
     snapped AS (
         SELECT
+            p.source_type,
             p.metric,
             p.round_number,
             CASE
@@ -743,7 +760,7 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
         :config_hash,
         :import_fingerprint,
         'proxy' AS jurisdiction,
-        'road' AS source_type,
+        s.source_type AS source_type,
         s.metric AS metric,
         s.round_number AS round_number,
         :proxy_class AS report_period,
@@ -828,6 +845,8 @@ _PROXY_BAND_MINS_BY_METRIC: dict[str, tuple[int, ...]] = {
     "Lnight": tuple(sorted(_LNIGHT_PROXY_SCORE_BY_BAND_MIN.keys())),
 }
 
+_PROXY_SOURCE_TYPES: tuple[str, ...] = ("road", "rail")
+
 
 def _load_band_counts_by_metric(
     connection: Connection,
@@ -851,20 +870,45 @@ def _load_band_counts_by_metric(
     return band_counts
 
 
+def _load_source_metric_counts(
+    connection: Connection,
+    *,
+    grid_artifact_hash: str,
+) -> dict[str, dict[str, int]]:
+    rows = connection.execute(
+        _GRID_ARTIFACT_SOURCE_METRIC_COUNTS_SQL,
+        {"grid_artifact_hash": grid_artifact_hash},
+    ).mappings()
+    counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        source_type = str(row.get("source_type") or "").strip()
+        metric = str(row.get("metric") or "").strip()
+        row_count = int(row.get("row_count") or 0)
+        if source_type not in _PROXY_SOURCE_TYPES:
+            continue
+        if metric not in _PROXY_BAND_MINS_BY_METRIC:
+            continue
+        if row_count <= 0:
+            continue
+        counts.setdefault(source_type, {})[metric] = row_count
+    return counts
+
+
 def _append_noise_proxy_summary(
     summary_json: dict[str, Any] | None,
     *,
     band_counts_by_metric: dict[str, dict[int, int]],
+    source_metric_counts: dict[str, dict[str, int]],
     class_available: bool,
 ) -> None:
     if summary_json is None:
         return
-    summary_json["noise_proxy_label"] = "Official-derived road noise proxy"
+    summary_json["noise_proxy_label"] = "Official-derived transport noise proxy"
     summary_json["noise_proxy_caveat"] = (
-        "Approximate road noise proxy from official-derived noise grid. "
+        "Approximate road/rail noise proxy from official-derived noise grid. "
         "Not measured point noise and not official contour geometry."
     )
-    summary_json["noise_proxy_phase"] = "phase_b_road_lden_lnight"
+    summary_json["noise_proxy_phase"] = "phase_c_road_rail_lden_lnight"
     summary_json["noise_proxy_band_counts_by_metric"] = {
         metric: {
             str(int(band_min)): int(row_count)
@@ -872,10 +916,17 @@ def _append_noise_proxy_summary(
         }
         for metric, band_counts in sorted(band_counts_by_metric.items())
     }
+    summary_json["noise_proxy_source_metric_counts"] = {
+        source_type: {
+            metric: int(row_count)
+            for metric, row_count in sorted((metric_counts or {}).items())
+        }
+        for source_type, metric_counts in sorted(source_metric_counts.items())
+    }
     summary_json["noise_proxy_class_differentiation_available"] = bool(class_available)
     if not class_available:
         summary_json["noise_proxy_class_differentiation_note"] = (
-            "Road class tags are unavailable in this phase; using unclassified road proxy rows."
+            "Road/rail class tags are unavailable in this phase; using unclassified proxy rows."
         )
 
 
@@ -890,7 +941,7 @@ def copy_noise_artifact_to_noise_polygons(
     summary_json: dict[str, Any] | None = None,
 ) -> int:
     if summary_json is not None:
-        summary_json["noise_proxy_phase"] = "phase_b_road_lden_lnight"
+        summary_json["noise_proxy_phase"] = "phase_c_road_rail_lden_lnight"
     has_study_area = study_area_wgs84 is not None
     params: dict[str, Any] = {
         "noise_resolved_hash": noise_resolved_hash,
@@ -911,12 +962,16 @@ def copy_noise_artifact_to_noise_polygons(
         if summary_json is not None:
             summary_json["noise_proxy_blocked"] = True
             summary_json["noise_proxy_blocked_reason"] = (
-                "No road grid artifact hash was available for lightweight proxy corridors; "
+                "No transport grid artifact hash was available for lightweight proxy corridors; "
                 "prepare a noise artifact before publish."
             )
         return 0
     params["grid_artifact_hash"] = grid_artifact_hash
     band_counts_by_metric = _load_band_counts_by_metric(
+        connection,
+        grid_artifact_hash=grid_artifact_hash,
+    )
+    source_metric_counts = _load_source_metric_counts(
         connection,
         grid_artifact_hash=grid_artifact_hash,
     )
@@ -926,13 +981,25 @@ def copy_noise_artifact_to_noise_polygons(
     _append_noise_proxy_summary(
         summary_json,
         band_counts_by_metric=band_counts_by_metric,
+        source_metric_counts=source_metric_counts,
         class_available=False,
     )
     if summary_json is not None:
+        rail_metric_counts = source_metric_counts.get("rail", {})
+        rail_lden_count = int(rail_metric_counts.get("Lden", 0))
+        rail_lnight_count = int(rail_metric_counts.get("Lnight", 0))
+        rail_rows_present = rail_lden_count > 0 and rail_lnight_count > 0
+        summary_json["noise_proxy_rail_source_rows_missing"] = not rail_rows_present
+        if not rail_rows_present:
+            summary_json["noise_proxy_rail_source_rows_missing_reason"] = (
+                "rail source rows missing"
+            )
+        else:
+            summary_json.pop("noise_proxy_rail_source_rows_missing_reason", None)
         summary_json["noise_proxy_blocked"] = inserted <= 0
         if inserted <= 0:
             summary_json["noise_proxy_blocked_reason"] = (
-                "No road Lden/Lnight proxy rows were available in noise_grid_artifact for publish."
+                "No road/rail Lden/Lnight proxy rows were available in noise_grid_artifact for publish."
             )
         else:
             summary_json.pop("noise_proxy_blocked_reason", None)

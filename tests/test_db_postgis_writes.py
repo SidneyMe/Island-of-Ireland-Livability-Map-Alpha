@@ -268,11 +268,19 @@ class ArtifactCopyTests(TestCase):
                 {"metric": "Lnight", "band_min": 45, "row_count": 2},
             ]
         )
+        source_metric_counts_result = mock.MagicMock()
+        source_metric_counts_result.mappings.return_value = iter(
+            [
+                {"source_type": "road", "metric": "Lden", "row_count": 3},
+                {"source_type": "road", "metric": "Lnight", "row_count": 2},
+            ]
+        )
         insert_result = mock.MagicMock()
         insert_result.rowcount = 5
         connection.execute.side_effect = [
             grid_result,
             band_counts_result,
+            source_metric_counts_result,
             insert_result,
         ]
 
@@ -301,11 +309,14 @@ class ArtifactCopyTests(TestCase):
         grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
         band_counts_result = mock.MagicMock()
         band_counts_result.mappings.return_value = iter([])
+        source_metric_counts_result = mock.MagicMock()
+        source_metric_counts_result.mappings.return_value = iter([])
         insert_result = mock.MagicMock()
         insert_result.rowcount = 0
         connection.execute.side_effect = [
             grid_result,
             band_counts_result,
+            source_metric_counts_result,
             insert_result,
         ]
 
@@ -328,11 +339,14 @@ class ArtifactCopyTests(TestCase):
         grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
         band_counts_result = mock.MagicMock()
         band_counts_result.mappings.return_value = iter([])
+        source_metric_counts_result = mock.MagicMock()
+        source_metric_counts_result.mappings.return_value = iter([])
         insert_result = mock.MagicMock()
         insert_result.rowcount = 0
         connection.execute.side_effect = [
             grid_result,
             band_counts_result,
+            source_metric_counts_result,
             insert_result,
         ]
         study = box(0.0, 0.0, 1.0, 1.0)
@@ -358,6 +372,19 @@ class ArtifactCopyTests(TestCase):
         self.assertIn("WHEN s.metric = 'Lnight' THEN CASE s.band_min", sql_text)
         self.assertIn("WHEN 45 THEN 30", sql_text)
         self.assertIn("WHEN 70 THEN '70+'", sql_text)
+
+    def test_copy_sql_publishes_road_and_rail_rows_from_grid_artifact(self) -> None:
+        from db_postgis import write_noise as noise_writes
+
+        sql_text = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
+        self.assertIn("g.source_type IN ('road', 'rail')", sql_text)
+        self.assertIn("s.source_type AS source_type", sql_text)
+
+    def test_band_count_sql_reads_road_and_rail_rows(self) -> None:
+        from db_postgis import write_noise as noise_writes
+
+        sql_text = str(noise_writes._GRID_ARTIFACT_BAND_COUNTS_BY_METRIC_SQL)
+        self.assertIn("g.source_type IN ('road', 'rail')", sql_text)
 
     def test_copy_sql_keeps_lden_mapping_unchanged(self) -> None:
         from db_postgis import write_noise as noise_writes

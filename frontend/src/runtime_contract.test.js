@@ -50,7 +50,7 @@ const fullRuntime = {
   service_deserts_enabled: true,
   noise_enabled: true,
   noise_pmtiles_url: "/tiles/noise.pmtiles",
-  noise_proxy_metadata: { default_metric: "Lden" },
+  noise_proxy_metadata: { default_metric: "Lden", kinds: ["road"] },
   max_zoom: 19
 };
 
@@ -76,7 +76,7 @@ const devRuntime = {
   service_deserts_enabled: true,
   noise_enabled: true,
   noise_pmtiles_url: "/tiles/noise-dev.pmtiles",
-  noise_proxy_metadata: { default_metric: "Lden" },
+  noise_proxy_metadata: { default_metric: "Lden", kinds: ["road"] },
   max_zoom: 19
 };
 
@@ -272,7 +272,7 @@ const devRuntime = {
   assert.equal(noiseLayer.minzoom, 8);
   assert.deepEqual(noiseLayer.filter, [
     "all",
-    ["==", ["get", "kind"], "road"],
+    ["in", ["get", "kind"], ["literal", ["road"]]],
     ["==", ["get", "metric"], "Lden"],
     ["==", ["get", "method"], "official_derived_grid_proxy"]
   ]);

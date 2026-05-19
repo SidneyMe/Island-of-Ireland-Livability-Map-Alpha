@@ -462,21 +462,18 @@ function applyServiceDesertVisibility() {
 
 function noiseFilterSummary() {
   const sourceOptions = noiseSourceOptions(state.runtime);
-  const bandOptions = noiseBandOptions(state.runtime, state.selectedNoiseMetric);
   const sourceCount = state.selectedNoiseSources.size;
-  const bandCount = state.selectedNoiseBands.size;
-  const sourceText = sourceCount === sourceOptions.length ? "road kind selected" : sourceCount + " kind selected";
-  const bandText = bandCount === bandOptions.length ? "all bands" : bandCount + " bands";
-  return state.selectedNoiseMetric + ", " + sourceText + ", " + bandText + ", opacity " + state.noiseOpacity.toFixed(2);
+  const sourceText = sourceCount === sourceOptions.length ? "all kinds selected" : sourceCount + " kind selected";
+  return state.selectedNoiseMetric + ", " + sourceText + ", opacity " + state.noiseOpacity.toFixed(2);
 }
 
 function updateNoiseNote() {
   if (!elements.noiseNote) return;
   if (!state.runtime.noise_enabled) {
-    elements.noiseNote.textContent = "No road noise proxy in this build";
+    elements.noiseNote.textContent = "No transport noise proxy in this build";
     return;
   }
-  const caveat = "Approximate road noise proxy from official-derived noise grid. Not measured point noise and not official contour geometry.";
+  const caveat = "Approximate road/rail noise proxy from official-derived noise grid. Not measured point noise and not official contour geometry.";
   elements.noiseNote.textContent = state.noiseVisible
     ? caveat
     : caveat + " Off until enabled.";
@@ -684,10 +681,10 @@ function buildNoiseControls() {
   overlayTextWrap.className = "toggle-label";
 
   const overlayTitle = document.createElement("strong");
-  overlayTitle.textContent = "Show road noise proxy";
+  overlayTitle.textContent = "Show transport noise proxy";
 
   const overlaySubtitle = document.createElement("span");
-  overlaySubtitle.textContent = "Official-derived grid proxy, not measured point noise";
+  overlaySubtitle.textContent = "Official-derived road/rail grid proxy";
 
   const overlayInput = document.createElement("input");
   overlayInput.type = "checkbox";
@@ -817,16 +814,6 @@ function buildNoiseControls() {
   noiseSourceOptions(state.runtime).forEach(function (option) {
     appendFilterRow({
       type: "source",
-      value: option.value,
-      label: option.label,
-      count: option.count,
-      inputType: "checkbox"
-    });
-  });
-
-  noiseBandOptions(state.runtime, state.selectedNoiseMetric).forEach(function (option) {
-    appendFilterRow({
-      type: "band",
       value: option.value,
       label: option.label,
       count: option.count,

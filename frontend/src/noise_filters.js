@@ -1,5 +1,5 @@
 const NOISE_METRIC_ORDER = ["Lden", "Lnight"];
-const NOISE_SOURCE_ORDER = ["road"];
+const NOISE_SOURCE_ORDER = ["road", "rail"];
 const NOISE_BAND_ORDER = ["45-49", "50-54", "55-59", "60-64", "65-69", "70+", "70-74", "75+", "80+"];
 
 const NOISE_METRIC_LABELS = {
@@ -8,7 +8,8 @@ const NOISE_METRIC_LABELS = {
 };
 
 const NOISE_SOURCE_LABELS = {
-  road: "Road"
+  road: "Road",
+  rail: "Rail"
 };
 
 function _normalizedCounts(rawCounts) {
@@ -105,32 +106,11 @@ function defaultNoiseSelections(runtime) {
 function buildNoiseLayerFilter(options = {}) {
   const metric = String(options.metric || "Lden").trim();
   const selectedSources = Array.from(options.selectedSources || []);
-  const selectedBands = Array.from(options.selectedBands || []);
   const clauses = [
-    ["==", ["get", "kind"], "road"],
+    ["in", ["get", "kind"], ["literal", selectedSources]],
     ["==", ["get", "metric"], metric],
     ["==", ["get", "method"], "official_derived_grid_proxy"]
   ];
-
-  if (selectedSources.length > 0) {
-    clauses.push([
-      "in",
-      ["coalesce", ["get", "kind"], ""],
-      ["literal", selectedSources]
-    ]);
-  } else {
-    clauses.push(["in", ["get", "kind"], ["literal", []]]);
-  }
-
-  if (selectedBands.length > 0) {
-    clauses.push([
-      "in",
-      ["coalesce", ["get", "band"], ["get", "db_value"], ""],
-      ["literal", selectedBands]
-    ]);
-  } else {
-    clauses.push(["in", ["get", "band"], ["literal", []]]);
-  }
 
   return ["all", ...clauses];
 }

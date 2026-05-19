@@ -12,7 +12,7 @@
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
-- Adds a display-only road noise proxy overlay (Phase B: roads + Lden/Lnight) calibrated from official-derived strategic noise data; runtime serves proxy geometry, not official contour geometry and not measured point noise. This does not feed livability scoring yet. (Confirmed)
+- Adds a display-only transport noise proxy overlay (Phase C: roads + rail, Lden/Lnight) calibrated from official-derived strategic noise data; runtime serves proxy geometry, not official contour geometry and not measured point noise. This does not feed livability scoring yet. (Confirmed)
 - Uses layered content hashes so changes to geometry, scoring params, GTFS feeds, Overture data, or importer config only invalidate the affected cache tiers. (Confirmed)
 - Alpha-stage: amenity tiering, Overture merge, service deserts, and the new fine vector grid / inspect-backed surface path are still moving. (Inference from recent migrations, tests, and docs)
 
@@ -358,7 +358,7 @@ Notes:
   - `grid_walk` has `counts_json`, `cluster_counts_json`, `effective_units_json`, `scores_json`, `total_score`, clipped-area fields
   - `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, and public `transport_reality` now also carry `bus_active_days_mask_7d` (legacy export name for the base weekly bus mask), `bus_service_subtier`, `bus_daytime_deps`, `bus_daytime_headway_min`, `bus_frequency_tier`, `bus_frequency_score_units`, `is_unscheduled_stop`, `has_exception_only_service`, `has_any_bus_service`, `has_daily_bus_service`, `route_modes_json`, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`
   - public output tables are `grid_walk`, `amenities`, `transport_reality`, `service_deserts`, `build_manifest`
-  - public `noise_polygons` stores build-scoped noise overlay geometry; in artifact mode this is currently Phase B road-only proxy output (`source_type='road'`, `metric IN ('Lden','Lnight')`, unclassified class) encoded via compatibility columns and exported as `noise_proxy` layer properties
+  - public `noise_polygons` stores build-scoped noise overlay geometry; in artifact mode this is currently Phase C transport proxy output (`source_type IN ('road','rail')`, `metric IN ('Lden','Lnight')`, unclassified class) encoded via compatibility columns and exported as `noise_proxy` layer properties
 - LOC: 497
 
 ### `db_postgis/migrations/versions/`
@@ -602,7 +602,7 @@ tests/test_server_behavior.py
 - Noise force semantics are split: resolved rebuild (`--force-noise-artifact`) is separate from source re-import (`--reimport-noise-source`), and `--force-noise-all` does both.
 - Accurate noise mode reads all available rounds and applies road/rail simplification only inside the dissolve CTE; canonical `noise_normalized` rows must not be updated in place.
 - Dev-fast road/rail grid rows are cached under a deterministic grid artifact hash derived from source hash, grid size, latest-round metadata, and grid algorithm version; `NOISE_REBUILD_DEV_FAST_GRID=1` is the escape hatch.
-- Artifact-mode proxy publish now enforces Phase B road Lden/Lnight behavior: geometry emits only from `noise_grid_artifact` with per-cell metric/band mapping, and missing grid artifact hash is a hard `noise_proxy_blocked` state (no fallback to raw resolved contour geometry).
+- Artifact-mode proxy publish now enforces Phase C road/rail Lden/Lnight behavior: geometry emits only from `noise_grid_artifact` with per-cell metric/band mapping, and missing grid artifact hash is a hard `noise_proxy_blocked` state (no fallback to raw resolved contour geometry).
 - `scripts/win/precompute_noise_dev.cmd` and `scripts/win/precompute_noise_accurate.cmd` are strict reuse wrappers: they require a prebuilt mode-matched artifact and fail fast when missing. `scripts/win/prepare_noise_artifact_dev.cmd` and `scripts/win/prepare_noise_artifact_accurate.cmd` are cache-aware refresh wrappers; use `scripts/win/force_noise_artifact_dev.cmd` or `scripts/win/force_noise_artifact_accurate.cmd` for full source reimport + resolved rebuild workflows.
 - `progress_tracker.py` is intentionally defensive. If tracking breaks, the build keeps going, so ETA regressions can hide without breaking tests.
 - Reachability large-cache recovery is mixed-format now: `{key}.pkl(.gz)` is the base snapshot and `{key}.chunks.pkl(.gz)` is an overlay journal. If you touch cache loaders, preserve that merge order and fallback behavior.

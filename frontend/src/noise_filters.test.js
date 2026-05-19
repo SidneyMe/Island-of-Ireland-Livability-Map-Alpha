@@ -10,7 +10,7 @@ import {
 
 const runtime = {
   noise_metric_counts: { Lden: 10, Lnight: 8 },
-  noise_source_counts: { road: 5 },
+  noise_source_counts: { road: 5, rail: 3 },
   noise_band_counts: { "55-59": 4, "60-64": 3, "65-69": 2, "75+": 1, "45-49": 2, "50-54": 2, "70+": 1 },
   noise_band_counts_by_metric: {
     Lden: { "55-59": 4, "60-64": 3, "65-69": 2, "75+": 1 },
@@ -24,7 +24,7 @@ const runtime = {
   }), ["Lden", "Lnight"]);
   assert.deepEqual(noiseSourceOptions(runtime).map(function (option) {
     return option.value;
-  }), ["road"]);
+  }), ["road", "rail"]);
   assert.deepEqual(noiseBandOptions(runtime, "Lden").map(function (option) {
     return option.value;
   }), ["55-59", "60-64", "65-69", "75+"]);
@@ -34,9 +34,19 @@ const runtime = {
 }
 
 {
+  const roadOnlyRuntime = {
+    noise_metric_counts: { Lden: 2, Lnight: 1 },
+    noise_source_counts: { road: 3 }
+  };
+  assert.deepEqual(noiseSourceOptions(roadOnlyRuntime).map(function (option) {
+    return option.value;
+  }), ["road"]);
+}
+
+{
   assert.deepEqual(defaultNoiseSelections(runtime), {
     metric: "Lden",
-    sources: ["road"],
+    sources: ["road", "rail"],
     bands: ["55-59", "60-64", "65-69", "75+"]
   });
 }
@@ -44,15 +54,13 @@ const runtime = {
 {
   assert.deepEqual(buildNoiseLayerFilter({
     metric: "Lden",
-    selectedSources: new Set(["road"]),
+    selectedSources: new Set(["road", "rail"]),
     selectedBands: new Set(["55-59", "60-64"])
   }), [
     "all",
-    ["==", ["get", "kind"], "road"],
+    ["in", ["get", "kind"], ["literal", ["road", "rail"]]],
     ["==", ["get", "metric"], "Lden"],
-    ["==", ["get", "method"], "official_derived_grid_proxy"],
-    ["in", ["coalesce", ["get", "kind"], ""], ["literal", ["road"]]],
-    ["in", ["coalesce", ["get", "band"], ["get", "db_value"], ""], ["literal", ["55-59", "60-64"]]]
+    ["==", ["get", "method"], "official_derived_grid_proxy"]
   ]);
 }
 
@@ -63,11 +71,9 @@ const runtime = {
     selectedBands: new Set()
   }), [
     "all",
-    ["==", ["get", "kind"], "road"],
-    ["==", ["get", "metric"], "Lden"],
-    ["==", ["get", "method"], "official_derived_grid_proxy"],
     ["in", ["get", "kind"], ["literal", []]],
-    ["in", ["get", "band"], ["literal", []]]
+    ["==", ["get", "metric"], "Lden"],
+    ["==", ["get", "method"], "official_derived_grid_proxy"]
   ]);
 }
 

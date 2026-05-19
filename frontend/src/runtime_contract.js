@@ -398,9 +398,37 @@ function buildStyle(runtime, options = {}) {
     runtime.noise_proxy_metadata.default_metric.trim()
       ? runtime.noise_proxy_metadata.default_metric.trim()
       : "Lden";
+  const noiseKindsFromMetadata =
+    runtime &&
+    runtime.noise_proxy_metadata &&
+    Array.isArray(runtime.noise_proxy_metadata.kinds)
+      ? runtime.noise_proxy_metadata.kinds
+      : (
+        runtime &&
+        runtime.noise_proxy_metadata &&
+        Array.isArray(runtime.noise_proxy_metadata.kind)
+          ? runtime.noise_proxy_metadata.kind
+          : []
+      );
+  const noiseKinds = noiseKindsFromMetadata
+    .map(function (value) {
+      return String(value || "").trim();
+    })
+    .filter(Boolean);
+  if (noiseKinds.length === 0) {
+    const sourceCounts = runtime && runtime.noise_source_counts && typeof runtime.noise_source_counts === "object"
+      ? runtime.noise_source_counts
+      : {};
+    ["road", "rail"].forEach(function (kind) {
+      if (Number(sourceCounts[kind] || 0) > 0) noiseKinds.push(kind);
+    });
+  }
+  if (noiseKinds.length === 0) {
+    noiseKinds.push("road");
+  }
   const noiseProxyFilter = [
     "all",
-    ["==", ["get", "kind"], "road"],
+    ["in", ["get", "kind"], ["literal", noiseKinds]],
     ["==", ["get", "metric"], noiseDefaultMetric],
     ["==", ["get", "method"], "official_derived_grid_proxy"]
   ];

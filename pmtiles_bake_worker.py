@@ -220,7 +220,10 @@ _NOISE_TILE_SQL = text(
             COALESCE(n.db_high, 0.0) AS proxy_score,
             0.0 AS buffer_m,
             CONCAT(
-                'Road ',
+                CASE
+                    WHEN n.source_type = 'rail' THEN 'Rail '
+                    ELSE 'Road '
+                END,
                 COALESCE(NULLIF(n.metric, ''), 'noise'),
                 ' proxy: ',
                 COALESCE(NULLIF(n.db_value, ''), 'unknown')
@@ -235,6 +238,7 @@ _NOISE_TILE_SQL = text(
             END AS sample_count,
             'proxy_not_measured' AS confidence,
             0 AS actual_road_geometry,
+            0 AS actual_rail_geometry,
             ST_AsMVTGeom(
                 ST_Transform(n.geom, 3857),
                 tile.env_3857,
@@ -244,7 +248,7 @@ _NOISE_TILE_SQL = text(
             ) AS geom
         FROM noise_polygons AS n, tile
         WHERE n.build_key = :build_key
-          AND n.source_type = 'road'
+          AND n.source_type IN ('road', 'rail')
           AND n.geom && tile.env_4326
           AND ST_Intersects(n.geom, tile.env_4326)
     )

@@ -125,6 +125,8 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(noise_layer["fields"]["calibrated_band_min"], "Number")
         self.assertEqual(noise_layer["fields"]["proxy_score"], "Number")
         self.assertEqual(noise_layer["fields"]["sample_count"], "Number")
+        self.assertEqual(noise_layer["fields"]["actual_road_geometry"], "Number")
+        self.assertEqual(noise_layer["fields"]["actual_rail_geometry"], "Number")
 
     def test_amenity_layer_metadata_declares_tier_name_and_conflict_class(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
@@ -174,6 +176,8 @@ class PmtilesBakeContractTests(TestCase):
         self.assertIn("proxy_score", sql)
         self.assertIn("calibrated_band_min", sql)
         self.assertIn("n.metric", sql)
+        self.assertIn("actual_rail_geometry", sql)
+        self.assertIn("n.source_type IN ('road', 'rail')", sql)
         self.assertNotIn("ST_Subdivide", sql)
         self.assertIn("'noise_proxy'", sql)
 

@@ -8,21 +8,26 @@ const mainJs = fs.readFileSync(path.join(here, "main.js"), "utf8");
 const noiseFiltersJs = fs.readFileSync(path.join(here, "noise_filters.js"), "utf8");
 
 assert.ok(
-  mainJs.includes('overlayTitle.textContent = "Show road noise proxy";'),
-  "noise toggle label must use road noise proxy wording"
+  mainJs.includes('overlayTitle.textContent = "Show transport noise proxy";'),
+  "noise toggle label must use transport noise proxy wording"
 );
 assert.ok(
-  mainJs.includes('overlaySubtitle.textContent = "Official-derived grid proxy, not measured point noise";'),
-  "noise subtitle must state grid proxy / not measured point noise wording"
+  mainJs.includes('overlaySubtitle.textContent = "Official-derived road/rail grid proxy";'),
+  "noise subtitle must state official-derived road/rail grid proxy wording"
 );
 assert.ok(
-  mainJs.includes("Approximate road noise proxy from official-derived noise grid."),
+  mainJs.includes("Approximate road/rail noise proxy from official-derived noise grid."),
   "noise caveat text must be present"
 );
 assert.equal(
   mainJs.includes("Show official noise contours"),
   false,
   "noise UI must not use official contour wording"
+);
+assert.equal(
+  mainJs.includes("measured dB"),
+  false,
+  "noise UI must not claim measured dB"
 );
 assert.equal(
   mainJs.includes("input.name = \"noise-metric\""),

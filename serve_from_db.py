@@ -329,17 +329,33 @@ class RuntimeService:
                     if str(metric) and int(count) > 0
                 ]
             )
+        ordered_kinds = [
+            source_kind
+            for source_kind in ("road", "rail")
+            if int(noise_source_counts.get(source_kind, 0)) > 0
+        ]
+        if not ordered_kinds:
+            ordered_kinds = sorted(
+                [
+                    str(source_kind)
+                    for source_kind, count in noise_source_counts.items()
+                    if str(source_kind) and int(count) > 0
+                ]
+            )
         default_metric = "Lden" if "Lden" in ordered_metrics else (ordered_metrics[0] if ordered_metrics else "Lden")
         noise_proxy_metadata = {
             "enabled": bool(noise_pmtiles_available),
             "source_id": "noise",
             "source_layer": "noise_proxy",
-            "kind": ["road"],
+            "kind": list(ordered_kinds),
+            "kinds": list(ordered_kinds),
             "metrics": ordered_metrics,
             "default_metric": default_metric,
             "method": "official_derived_grid_proxy",
             "confidence": "proxy_not_measured",
             "actual_road_geometry": False,
+            "actual_rail_geometry": False,
+            "actual_geometry": False,
         }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(

@@ -63,6 +63,7 @@ def _metadata(*, min_zoom: int, max_zoom: int) -> dict[str, object]:
                     "sample_count": "Number",
                     "confidence": "String",
                     "actual_road_geometry": "Number",
+                    "actual_rail_geometry": "Number",
                 },
             }
         ],
