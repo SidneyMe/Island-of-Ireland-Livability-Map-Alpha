@@ -1,5 +1,7 @@
 # Island of Ireland Livability Map
 
+## this is an alpha version, beta is in "beta" tree (expect raw edges). 
+
 Local-first livability mapping for the island of Ireland — built with PostGIS, a Rust walk-graph helper, PMTiles, and MapLibre. Scores places by what's nearby, how quiet it is, how green it is, and whether the transport actually runs — not raw amenity count.
 
 It started as "haha what if I made a silly map of Ireland" and turned into a real local-first geospatial system. Not polished. An experiment that got serious.
