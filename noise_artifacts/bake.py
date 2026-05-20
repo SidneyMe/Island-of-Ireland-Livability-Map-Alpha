@@ -64,6 +64,8 @@ def _metadata(*, min_zoom: int, max_zoom: int) -> dict[str, object]:
                     "confidence": "String",
                     "actual_road_geometry": "Number",
                     "actual_rail_geometry": "Number",
+                    "actual_airport_geometry": "Number",
+                    "actual_runway_geometry": "Number",
                 },
             }
         ],

@@ -50,7 +50,7 @@ const fullRuntime = {
   service_deserts_enabled: true,
   noise_enabled: true,
   noise_pmtiles_url: "/tiles/noise.pmtiles",
-  noise_proxy_metadata: { default_metric: "Lden", kinds: ["road"] },
+  noise_proxy_metadata: { default_metric: "Lden", kinds: ["road", "rail", "airport"] },
   max_zoom: 19
 };
 
@@ -272,9 +272,13 @@ const devRuntime = {
   assert.equal(noiseLayer.minzoom, 8);
   assert.deepEqual(noiseLayer.filter, [
     "all",
-    ["in", ["get", "kind"], ["literal", ["road"]]],
+    ["in", ["get", "kind"], ["literal", ["road", "rail", "airport"]]],
     ["==", ["get", "metric"], "Lden"],
-    ["==", ["get", "method"], "official_derived_grid_proxy"]
+    [
+      "in",
+      ["get", "method"],
+      ["literal", ["official_derived_grid_proxy", "official_resolved_contour"]]
+    ]
   ]);
   assert.deepEqual(noiseLayer.paint["fill-color"], [
     "interpolate", ["linear"], ["to-number", ["get", "proxy_score"]],

@@ -820,6 +820,215 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
     """
 )
 
+_RESOLVED_AIRPORT_SOURCE_METRIC_COUNTS_SQL = text(
+    """
+    SELECT
+        r.source_type,
+        r.metric,
+        COUNT(*) AS row_count
+    FROM noise_resolved_display r
+    WHERE r.noise_resolved_hash = :noise_resolved_hash
+      AND r.source_type = 'airport'
+      AND r.metric IN ('Lden', 'Lnight')
+    GROUP BY r.source_type, r.metric
+    ORDER BY r.source_type, r.metric
+    """
+)
+
+_RESOLVED_AIRPORT_BAND_COUNTS_BY_METRIC_SQL = text(
+    """
+    WITH raw_rows AS (
+        SELECT
+            r.metric,
+            CASE
+                WHEN r.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(r.db_value, '-', 1)::float8
+                WHEN r.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(r.db_value, '\\+', '')::float8
+                WHEN r.db_low IS NOT NULL THEN r.db_low::float8
+                ELSE NULL
+            END AS raw_band_min
+        FROM noise_resolved_display r
+        WHERE r.noise_resolved_hash = :noise_resolved_hash
+          AND r.source_type = 'airport'
+          AND r.metric IN ('Lden', 'Lnight')
+    ),
+    snapped AS (
+        SELECT
+            metric,
+            CASE
+                WHEN raw_band_min IS NULL THEN NULL
+                WHEN metric = 'Lden' AND raw_band_min < 57.5 THEN 55
+                WHEN metric = 'Lden' AND raw_band_min < 62.5 THEN 60
+                WHEN metric = 'Lden' AND raw_band_min < 67.5 THEN 65
+                WHEN metric = 'Lden' AND raw_band_min < 72.5 THEN 70
+                WHEN metric = 'Lden' AND raw_band_min < 77.5 THEN 75
+                WHEN metric = 'Lden' THEN 80
+                WHEN metric = 'Lnight' AND raw_band_min < 50 THEN 45
+                WHEN metric = 'Lnight' AND raw_band_min < 55 THEN 50
+                WHEN metric = 'Lnight' AND raw_band_min < 60 THEN 55
+                WHEN metric = 'Lnight' AND raw_band_min < 65 THEN 60
+                WHEN metric = 'Lnight' AND raw_band_min < 70 THEN 65
+                WHEN metric = 'Lnight' THEN 70
+                ELSE NULL
+            END::int AS band_min
+        FROM raw_rows
+    )
+    SELECT metric, band_min, COUNT(*) AS row_count
+    FROM snapped
+    WHERE band_min IS NOT NULL
+    GROUP BY metric, band_min
+    ORDER BY metric, band_min
+    """
+)
+
+_INSERT_AIRPORT_FROM_RESOLVED_SQL = text(
+    """
+    WITH study_area_2157 AS (
+        SELECT
+            CASE
+                WHEN :has_study_area THEN
+                    ST_MakeValid(
+                        ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
+                    )
+                ELSE NULL
+            END AS geom
+    ),
+    resolved_rows AS (
+        SELECT
+            COALESCE(NULLIF(r.jurisdiction, ''), 'proxy') AS jurisdiction,
+            r.metric,
+            COALESCE(r.round_number, 4) AS round_number,
+            r.noise_feature_id::text AS source_ref,
+            CASE
+                WHEN r.db_value ~ '^[0-9]+-[0-9]+$' THEN split_part(r.db_value, '-', 1)::float8
+                WHEN r.db_value ~ '^[0-9]+\\+$' THEN regexp_replace(r.db_value, '\\+', '')::float8
+                WHEN r.db_low IS NOT NULL THEN r.db_low::float8
+                ELSE NULL
+            END AS raw_band_min,
+            CASE
+                WHEN :has_study_area THEN
+                    ST_Multi(
+                        ST_CollectionExtract(
+                            ST_MakeValid(
+                                ST_Intersection(ST_MakeValid(r.geom), s.geom)
+                            ),
+                            3
+                        )
+                    )
+                ELSE
+                    ST_Multi(ST_CollectionExtract(ST_MakeValid(r.geom), 3))
+            END AS geom
+        FROM noise_resolved_display r
+        CROSS JOIN study_area_2157 s
+        WHERE r.noise_resolved_hash = :noise_resolved_hash
+          AND r.source_type = 'airport'
+          AND r.metric IN ('Lden', 'Lnight')
+          AND r.geom IS NOT NULL
+          AND NOT ST_IsEmpty(r.geom)
+          AND (
+              NOT :has_study_area
+              OR ST_Intersects(ST_MakeValid(r.geom), s.geom)
+          )
+    ),
+    snapped AS (
+        SELECT
+            r.jurisdiction,
+            r.metric,
+            r.round_number,
+            r.source_ref,
+            CASE
+                WHEN r.raw_band_min IS NULL THEN NULL
+                WHEN r.metric = 'Lden' AND r.raw_band_min < 57.5 THEN 55
+                WHEN r.metric = 'Lden' AND r.raw_band_min < 62.5 THEN 60
+                WHEN r.metric = 'Lden' AND r.raw_band_min < 67.5 THEN 65
+                WHEN r.metric = 'Lden' AND r.raw_band_min < 72.5 THEN 70
+                WHEN r.metric = 'Lden' AND r.raw_band_min < 77.5 THEN 75
+                WHEN r.metric = 'Lden' THEN 80
+                WHEN r.metric = 'Lnight' AND r.raw_band_min < 50 THEN 45
+                WHEN r.metric = 'Lnight' AND r.raw_band_min < 55 THEN 50
+                WHEN r.metric = 'Lnight' AND r.raw_band_min < 60 THEN 55
+                WHEN r.metric = 'Lnight' AND r.raw_band_min < 65 THEN 60
+                WHEN r.metric = 'Lnight' AND r.raw_band_min < 70 THEN 65
+                WHEN r.metric = 'Lnight' THEN 70
+                ELSE NULL
+            END::int AS band_min,
+            r.geom
+        FROM resolved_rows r
+        WHERE r.raw_band_min IS NOT NULL
+          AND r.geom IS NOT NULL
+          AND NOT ST_IsEmpty(r.geom)
+    )
+    INSERT INTO noise_polygons (
+        build_key, config_hash, import_fingerprint,
+        jurisdiction, source_type, metric, round_number, report_period,
+        db_low, db_high, db_value,
+        source_dataset, source_layer, source_ref,
+        geom, created_at
+    )
+    SELECT
+        :build_key,
+        :config_hash,
+        :import_fingerprint,
+        s.jurisdiction AS jurisdiction,
+        'airport' AS source_type,
+        s.metric AS metric,
+        s.round_number AS round_number,
+        :proxy_class AS report_period,
+        s.band_min::float8 AS db_low,
+        CASE
+            WHEN s.metric = 'Lden' THEN CASE s.band_min
+                WHEN 55 THEN 35
+                WHEN 60 THEN 50
+                WHEN 65 THEN 65
+                WHEN 70 THEN 80
+                WHEN 75 THEN 95
+                WHEN 80 THEN 100
+                ELSE 35
+            END
+            WHEN s.metric = 'Lnight' THEN CASE s.band_min
+                WHEN 45 THEN 30
+                WHEN 50 THEN 45
+                WHEN 55 THEN 60
+                WHEN 60 THEN 75
+                WHEN 65 THEN 90
+                WHEN 70 THEN 100
+                ELSE 30
+            END
+            ELSE 0
+        END::float8 AS db_high,
+        CASE
+            WHEN s.metric = 'Lden' THEN CASE s.band_min
+                WHEN 55 THEN '55-59'
+                WHEN 60 THEN '60-64'
+                WHEN 65 THEN '65-69'
+                WHEN 70 THEN '70-74'
+                WHEN 75 THEN '75+'
+                WHEN 80 THEN '80+'
+                ELSE '55-59'
+            END
+            WHEN s.metric = 'Lnight' THEN CASE s.band_min
+                WHEN 45 THEN '45-49'
+                WHEN 50 THEN '50-54'
+                WHEN 55 THEN '55-59'
+                WHEN 60 THEN '60-64'
+                WHEN 65 THEN '65-69'
+                WHEN 70 THEN '70+'
+                ELSE '45-49'
+            END
+            ELSE 'unknown'
+        END AS db_value,
+        'noise_resolved_display' AS source_dataset,
+        'resolved_display' AS source_layer,
+        COALESCE(NULLIF(s.source_ref, ''), '1') AS source_ref,
+        ST_Transform(s.geom, 4326) AS geom,
+        now() AS created_at
+    FROM snapped s
+    WHERE s.band_min IS NOT NULL
+      AND s.geom IS NOT NULL
+      AND NOT ST_IsEmpty(s.geom)
+      AND ST_Area(s.geom) > 0
+    """
+)
+
 _LDEN_PROXY_SCORE_BY_BAND_MIN: dict[int, int] = {
     55: 35,
     60: 50,
@@ -845,7 +1054,7 @@ _PROXY_BAND_MINS_BY_METRIC: dict[str, tuple[int, ...]] = {
     "Lnight": tuple(sorted(_LNIGHT_PROXY_SCORE_BY_BAND_MIN.keys())),
 }
 
-_PROXY_SOURCE_TYPES: tuple[str, ...] = ("road", "rail")
+_GRID_PROXY_SOURCE_TYPES: tuple[str, ...] = ("road", "rail")
 
 
 def _load_band_counts_by_metric(
@@ -884,7 +1093,7 @@ def _load_source_metric_counts(
         source_type = str(row.get("source_type") or "").strip()
         metric = str(row.get("metric") or "").strip()
         row_count = int(row.get("row_count") or 0)
-        if source_type not in _PROXY_SOURCE_TYPES:
+        if source_type not in _GRID_PROXY_SOURCE_TYPES:
             continue
         if metric not in _PROXY_BAND_MINS_BY_METRIC:
             continue
@@ -892,6 +1101,82 @@ def _load_source_metric_counts(
             continue
         counts.setdefault(source_type, {})[metric] = row_count
     return counts
+
+
+def _load_airport_source_metric_counts_from_resolved(
+    connection: Connection,
+    *,
+    noise_resolved_hash: str,
+) -> dict[str, dict[str, int]]:
+    rows = connection.execute(
+        _RESOLVED_AIRPORT_SOURCE_METRIC_COUNTS_SQL,
+        {"noise_resolved_hash": noise_resolved_hash},
+    ).mappings()
+    counts: dict[str, dict[str, int]] = {}
+    for row in rows:
+        source_type = str(row.get("source_type") or "").strip()
+        metric = str(row.get("metric") or "").strip()
+        row_count = int(row.get("row_count") or 0)
+        if source_type != "airport":
+            continue
+        if metric not in _PROXY_BAND_MINS_BY_METRIC:
+            continue
+        if row_count <= 0:
+            continue
+        counts.setdefault(source_type, {})[metric] = row_count
+    return counts
+
+
+def _load_airport_band_counts_by_metric_from_resolved(
+    connection: Connection,
+    *,
+    noise_resolved_hash: str,
+) -> dict[str, dict[int, int]]:
+    rows = connection.execute(
+        _RESOLVED_AIRPORT_BAND_COUNTS_BY_METRIC_SQL,
+        {"noise_resolved_hash": noise_resolved_hash},
+    ).mappings()
+    band_counts: dict[str, dict[int, int]] = {}
+    for row in rows:
+        metric = str(row.get("metric") or "").strip()
+        if metric not in _PROXY_BAND_MINS_BY_METRIC:
+            continue
+        band_min = int(row.get("band_min"))
+        row_count = int(row.get("row_count") or 0)
+        if row_count <= 0:
+            continue
+        band_counts.setdefault(metric, {})[band_min] = row_count
+    return band_counts
+
+
+def _merge_band_counts_by_metric(
+    primary: dict[str, dict[int, int]],
+    secondary: dict[str, dict[int, int]],
+) -> dict[str, dict[int, int]]:
+    merged: dict[str, dict[int, int]] = {
+        metric: dict(counts)
+        for metric, counts in primary.items()
+    }
+    for metric, counts in secondary.items():
+        metric_counts = merged.setdefault(metric, {})
+        for band_min, row_count in counts.items():
+            metric_counts[int(band_min)] = int(metric_counts.get(int(band_min), 0)) + int(row_count)
+    return merged
+
+
+def _merge_source_metric_counts(
+    primary: dict[str, dict[str, int]],
+    secondary: dict[str, dict[str, int]],
+) -> dict[str, dict[str, int]]:
+    merged: dict[str, dict[str, int]] = {
+        source_type: dict(metric_counts)
+        for source_type, metric_counts in primary.items()
+    }
+    for source_type, metric_counts in secondary.items():
+        source_counts = merged.setdefault(source_type, {})
+        for metric, row_count in metric_counts.items():
+            source_counts[metric] = int(source_counts.get(metric, 0)) + int(row_count)
+    return merged
 
 
 def _append_noise_proxy_summary(
@@ -905,10 +1190,10 @@ def _append_noise_proxy_summary(
         return
     summary_json["noise_proxy_label"] = "Official-derived transport noise proxy"
     summary_json["noise_proxy_caveat"] = (
-        "Approximate road/rail noise proxy from official-derived noise grid. "
-        "Not measured point noise and not official contour geometry."
+        "Approximate road/rail grid proxy and official-derived airport noise contours. "
+        "Not measured point noise."
     )
-    summary_json["noise_proxy_phase"] = "phase_c_road_rail_lden_lnight"
+    summary_json["noise_proxy_phase"] = "phase_d2_road_rail_grid_airport_resolved_lden_lnight"
     summary_json["noise_proxy_band_counts_by_metric"] = {
         metric: {
             str(int(band_min)): int(row_count)
@@ -926,7 +1211,7 @@ def _append_noise_proxy_summary(
     summary_json["noise_proxy_class_differentiation_available"] = bool(class_available)
     if not class_available:
         summary_json["noise_proxy_class_differentiation_note"] = (
-            "Road/rail class tags are unavailable in this phase; using unclassified proxy rows."
+            "Road/rail/airport class tags are unavailable in this phase; using unclassified overlay rows."
         )
 
 
@@ -941,7 +1226,7 @@ def copy_noise_artifact_to_noise_polygons(
     summary_json: dict[str, Any] | None = None,
 ) -> int:
     if summary_json is not None:
-        summary_json["noise_proxy_phase"] = "phase_c_road_rail_lden_lnight"
+        summary_json["noise_proxy_phase"] = "phase_d2_road_rail_grid_airport_resolved_lden_lnight"
     has_study_area = study_area_wgs84 is not None
     params: dict[str, Any] = {
         "noise_resolved_hash": noise_resolved_hash,
@@ -975,17 +1260,37 @@ def copy_noise_artifact_to_noise_polygons(
         connection,
         grid_artifact_hash=grid_artifact_hash,
     )
-    result = connection.execute(_INSERT_ROAD_PROXY_FROM_GRID_SQL, params)
-    inserted = max(int(result.rowcount or 0), 0)
+    grid_result = connection.execute(_INSERT_ROAD_PROXY_FROM_GRID_SQL, params)
+    inserted_grid = max(int(grid_result.rowcount or 0), 0)
+    resolved_result = connection.execute(_INSERT_AIRPORT_FROM_RESOLVED_SQL, params)
+    inserted_airport = max(int(resolved_result.rowcount or 0), 0)
+    inserted = inserted_grid + inserted_airport
+
+    airport_band_counts = _load_airport_band_counts_by_metric_from_resolved(
+        connection,
+        noise_resolved_hash=noise_resolved_hash,
+    )
+    airport_source_metric_counts = _load_airport_source_metric_counts_from_resolved(
+        connection,
+        noise_resolved_hash=noise_resolved_hash,
+    )
+    merged_band_counts_by_metric = _merge_band_counts_by_metric(
+        band_counts_by_metric,
+        airport_band_counts,
+    )
+    merged_source_metric_counts = _merge_source_metric_counts(
+        source_metric_counts,
+        airport_source_metric_counts,
+    )
 
     _append_noise_proxy_summary(
         summary_json,
-        band_counts_by_metric=band_counts_by_metric,
-        source_metric_counts=source_metric_counts,
+        band_counts_by_metric=merged_band_counts_by_metric,
+        source_metric_counts=merged_source_metric_counts,
         class_available=False,
     )
     if summary_json is not None:
-        rail_metric_counts = source_metric_counts.get("rail", {})
+        rail_metric_counts = merged_source_metric_counts.get("rail", {})
         rail_lden_count = int(rail_metric_counts.get("Lden", 0))
         rail_lnight_count = int(rail_metric_counts.get("Lnight", 0))
         rail_rows_present = rail_lden_count > 0 and rail_lnight_count > 0
@@ -996,10 +1301,21 @@ def copy_noise_artifact_to_noise_polygons(
             )
         else:
             summary_json.pop("noise_proxy_rail_source_rows_missing_reason", None)
+        airport_metric_counts = merged_source_metric_counts.get("airport", {})
+        airport_lden_count = int(airport_metric_counts.get("Lden", 0))
+        airport_lnight_count = int(airport_metric_counts.get("Lnight", 0))
+        airport_rows_present = airport_lden_count > 0 and airport_lnight_count > 0
+        summary_json["noise_proxy_airport_source_rows_missing"] = not airport_rows_present
+        if not airport_rows_present:
+            summary_json["noise_proxy_airport_source_rows_missing_reason"] = (
+                "airport source rows missing"
+            )
+        else:
+            summary_json.pop("noise_proxy_airport_source_rows_missing_reason", None)
         summary_json["noise_proxy_blocked"] = inserted <= 0
         if inserted <= 0:
             summary_json["noise_proxy_blocked_reason"] = (
-                "No road/rail Lden/Lnight proxy rows were available in noise_grid_artifact for publish."
+                "No road/rail grid proxy rows and no airport resolved rows were available for publish."
             )
         else:
             summary_json.pop("noise_proxy_blocked_reason", None)

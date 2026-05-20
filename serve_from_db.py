@@ -331,7 +331,7 @@ class RuntimeService:
             )
         ordered_kinds = [
             source_kind
-            for source_kind in ("road", "rail")
+            for source_kind in ("road", "rail", "airport")
             if int(noise_source_counts.get(source_kind, 0)) > 0
         ]
         if not ordered_kinds:
@@ -343,6 +343,17 @@ class RuntimeService:
                 ]
             )
         default_metric = "Lden" if "Lden" in ordered_metrics else (ordered_metrics[0] if ordered_metrics else "Lden")
+        has_airport = "airport" in ordered_kinds
+        methods = (
+            ["official_derived_grid_proxy", "official_resolved_contour"]
+            if has_airport
+            else ["official_derived_grid_proxy"]
+        )
+        confidences = (
+            ["proxy_not_measured", "official_modelled_not_measured"]
+            if has_airport
+            else ["proxy_not_measured"]
+        )
         noise_proxy_metadata = {
             "enabled": bool(noise_pmtiles_available),
             "source_id": "noise",
@@ -351,10 +362,14 @@ class RuntimeService:
             "kinds": list(ordered_kinds),
             "metrics": ordered_metrics,
             "default_metric": default_metric,
-            "method": "official_derived_grid_proxy",
-            "confidence": "proxy_not_measured",
+            "method": methods[0] if len(methods) == 1 else "mixed",
+            "methods": methods,
+            "confidence": confidences[0] if len(confidences) == 1 else "mixed",
+            "confidences": confidences,
             "actual_road_geometry": False,
             "actual_rail_geometry": False,
+            "actual_airport_geometry": False,
+            "actual_runway_geometry": False,
             "actual_geometry": False,
         }
         profile_name = str(summary_json.get("build_profile") or self._profile)

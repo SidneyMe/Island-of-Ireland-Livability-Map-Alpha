@@ -506,14 +506,24 @@ class RenderAndCliTests(TestCase):
         self.assertTrue(payload["noise_proxy_metadata"]["enabled"])
         self.assertEqual(payload["noise_proxy_metadata"]["source_id"], "noise")
         self.assertEqual(payload["noise_proxy_metadata"]["source_layer"], "noise_proxy")
-        self.assertEqual(payload["noise_proxy_metadata"]["kind"], ["road", "rail"])
-        self.assertEqual(payload["noise_proxy_metadata"]["kinds"], ["road", "rail"])
+        self.assertEqual(payload["noise_proxy_metadata"]["kind"], ["road", "rail", "airport"])
+        self.assertEqual(payload["noise_proxy_metadata"]["kinds"], ["road", "rail", "airport"])
         self.assertEqual(payload["noise_proxy_metadata"]["metrics"], ["Lden", "Lnight"])
         self.assertEqual(payload["noise_proxy_metadata"]["default_metric"], "Lden")
-        self.assertEqual(payload["noise_proxy_metadata"]["method"], "official_derived_grid_proxy")
-        self.assertEqual(payload["noise_proxy_metadata"]["confidence"], "proxy_not_measured")
+        self.assertEqual(payload["noise_proxy_metadata"]["method"], "mixed")
+        self.assertEqual(
+            payload["noise_proxy_metadata"]["methods"],
+            ["official_derived_grid_proxy", "official_resolved_contour"],
+        )
+        self.assertEqual(payload["noise_proxy_metadata"]["confidence"], "mixed")
+        self.assertEqual(
+            payload["noise_proxy_metadata"]["confidences"],
+            ["proxy_not_measured", "official_modelled_not_measured"],
+        )
         self.assertFalse(payload["noise_proxy_metadata"]["actual_road_geometry"])
         self.assertFalse(payload["noise_proxy_metadata"]["actual_rail_geometry"])
+        self.assertFalse(payload["noise_proxy_metadata"]["actual_airport_geometry"])
+        self.assertFalse(payload["noise_proxy_metadata"]["actual_runway_geometry"])
         self.assertFalse(payload["noise_proxy_metadata"]["actual_geometry"])
         self.assertEqual(payload["runtime_mode"], "strict_manifest")
         self.assertIsNone(payload["runtime_warning"])
@@ -592,6 +602,36 @@ class RenderAndCliTests(TestCase):
                 payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
 
         self.assertEqual(payload["noise_proxy_metadata"]["kinds"], ["road"])
+
+    def test_runtime_service_noise_proxy_metadata_stays_road_rail_without_airport_rows(self) -> None:
+        manifest = {
+            "build_key": "build-123",
+            "reach_hash": "reach-hash-123",
+            "score_hash": "score-hash-123",
+            "render_hash": "render-hash-123",
+            "summary_json": {
+                "build_profile": "full",
+                "map_center": {"lat": 53.4, "lon": -7.7},
+                "amenity_counts": {"shops": 0, "transport": 0, "healthcare": 0, "parks": 0},
+                "amenity_tier_counts": {"shops": {}, "transport": {}, "healthcare": {}, "parks": {}},
+                "noise_enabled": True,
+                "noise_counts": {"proxy": 6},
+                "noise_source_counts": {"road": 4, "rail": 2},
+                "noise_metric_counts": {"Lden": 3, "Lnight": 3},
+            },
+        }
+        with TemporaryDirectory() as tmp_name:
+            noise_pmtiles_path = Path(tmp_name) / "noise.pmtiles"
+            noise_pmtiles_path.write_bytes(b"noise")
+            with (
+                mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=manifest),
+                mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
+                mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=False),
+                mock.patch.object(serve_from_db, "noise_pmtiles_output_path", return_value=noise_pmtiles_path),
+            ):
+                payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
+
+        self.assertEqual(payload["noise_proxy_metadata"]["kinds"], ["road", "rail"])
 
     def test_runtime_service_uses_dev_config_hash_and_coarse_only_payload(self) -> None:
         manifest = {

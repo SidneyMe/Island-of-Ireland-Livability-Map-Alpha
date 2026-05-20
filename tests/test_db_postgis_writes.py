@@ -275,13 +275,32 @@ class ArtifactCopyTests(TestCase):
                 {"source_type": "road", "metric": "Lnight", "row_count": 2},
             ]
         )
-        insert_result = mock.MagicMock()
-        insert_result.rowcount = 5
+        grid_insert_result = mock.MagicMock()
+        grid_insert_result.rowcount = 5
+        airport_insert_result = mock.MagicMock()
+        airport_insert_result.rowcount = 2
+        airport_band_counts_result = mock.MagicMock()
+        airport_band_counts_result.mappings.return_value = iter(
+            [
+                {"metric": "Lden", "band_min": 55, "row_count": 1},
+                {"metric": "Lnight", "band_min": 45, "row_count": 1},
+            ]
+        )
+        airport_source_metric_counts_result = mock.MagicMock()
+        airport_source_metric_counts_result.mappings.return_value = iter(
+            [
+                {"source_type": "airport", "metric": "Lden", "row_count": 1},
+                {"source_type": "airport", "metric": "Lnight", "row_count": 1},
+            ]
+        )
         connection.execute.side_effect = [
             grid_result,
             band_counts_result,
             source_metric_counts_result,
-            insert_result,
+            grid_insert_result,
+            airport_insert_result,
+            airport_band_counts_result,
+            airport_source_metric_counts_result,
         ]
 
         n = db_writes.copy_noise_artifact_to_noise_polygons(
@@ -293,15 +312,67 @@ class ArtifactCopyTests(TestCase):
             study_area_wgs84=None,
         )
 
-        self.assertEqual(n, 5)
-        sql_text = str(connection.execute.call_args_list[-1].args[0])
-        params = connection.execute.call_args_list[-1].args[1]
-        self.assertIn("INSERT INTO noise_polygons", sql_text)
-        self.assertIn("CASE", sql_text)
-        self.assertIn("noise_grid_artifact", sql_text)
-        self.assertNotIn("ST_UnaryUnion", sql_text)
+        self.assertEqual(n, 7)
+        executed_sql = [str(call.args[0]) for call in connection.execute.call_args_list]
+        self.assertTrue(any("noise_grid_artifact" in sql for sql in executed_sql))
+        self.assertTrue(any("noise_resolved_display" in sql for sql in executed_sql))
+        self.assertTrue(any("INSERT INTO noise_polygons" in sql for sql in executed_sql))
+        self.assertFalse(any("ST_UnaryUnion" in sql for sql in executed_sql))
+        params = connection.execute.call_args_list[3].args[1]
         self.assertEqual(params["noise_resolved_hash"], "res-abc")
         self.assertEqual(params["grid_artifact_hash"], "grid-123")
+
+    def test_copy_marks_airport_source_rows_missing_when_airport_counts_absent(self) -> None:
+        connection = mock.MagicMock()
+        grid_result = mock.MagicMock()
+        grid_result.mappings.return_value.first.return_value = {"grid_artifact_hash": "grid-123"}
+        band_counts_result = mock.MagicMock()
+        band_counts_result.mappings.return_value = iter(
+            [
+                {"metric": "Lden", "band_min": 55, "row_count": 3},
+                {"metric": "Lnight", "band_min": 45, "row_count": 2},
+            ]
+        )
+        source_metric_counts_result = mock.MagicMock()
+        source_metric_counts_result.mappings.return_value = iter(
+            [
+                {"source_type": "road", "metric": "Lden", "row_count": 3},
+                {"source_type": "road", "metric": "Lnight", "row_count": 2},
+                {"source_type": "rail", "metric": "Lden", "row_count": 1},
+                {"source_type": "rail", "metric": "Lnight", "row_count": 1},
+            ]
+        )
+        grid_insert_result = mock.MagicMock()
+        grid_insert_result.rowcount = 6
+        airport_insert_result = mock.MagicMock()
+        airport_insert_result.rowcount = 0
+        airport_band_counts_result = mock.MagicMock()
+        airport_band_counts_result.mappings.return_value = iter([])
+        airport_source_metric_counts_result = mock.MagicMock()
+        airport_source_metric_counts_result.mappings.return_value = iter([])
+        connection.execute.side_effect = [
+            grid_result,
+            band_counts_result,
+            source_metric_counts_result,
+            grid_insert_result,
+            airport_insert_result,
+            airport_band_counts_result,
+            airport_source_metric_counts_result,
+        ]
+        summary: dict[str, object] = {}
+
+        db_writes.copy_noise_artifact_to_noise_polygons(
+            connection,
+            noise_resolved_hash="res-abc",
+            build_key="bk",
+            config_hash="ch",
+            import_fingerprint="ifp",
+            study_area_wgs84=None,
+            summary_json=summary,
+        )
+
+        self.assertTrue(summary.get("noise_proxy_airport_source_rows_missing"))
+        self.assertEqual(summary.get("noise_proxy_airport_source_rows_missing_reason"), "airport source rows missing")
 
     def test_copy_passes_has_study_area_false_when_none(self) -> None:
         connection = mock.MagicMock()
@@ -311,13 +382,22 @@ class ArtifactCopyTests(TestCase):
         band_counts_result.mappings.return_value = iter([])
         source_metric_counts_result = mock.MagicMock()
         source_metric_counts_result.mappings.return_value = iter([])
-        insert_result = mock.MagicMock()
-        insert_result.rowcount = 0
+        grid_insert_result = mock.MagicMock()
+        grid_insert_result.rowcount = 0
+        airport_insert_result = mock.MagicMock()
+        airport_insert_result.rowcount = 0
+        airport_band_counts_result = mock.MagicMock()
+        airport_band_counts_result.mappings.return_value = iter([])
+        airport_source_metric_counts_result = mock.MagicMock()
+        airport_source_metric_counts_result.mappings.return_value = iter([])
         connection.execute.side_effect = [
             grid_result,
             band_counts_result,
             source_metric_counts_result,
-            insert_result,
+            grid_insert_result,
+            airport_insert_result,
+            airport_band_counts_result,
+            airport_source_metric_counts_result,
         ]
 
         db_writes.copy_noise_artifact_to_noise_polygons(
@@ -329,7 +409,7 @@ class ArtifactCopyTests(TestCase):
             study_area_wgs84=None,
         )
 
-        params = connection.execute.call_args_list[-1].args[1]
+        params = connection.execute.call_args_list[3].args[1]
         self.assertFalse(params["has_study_area"])
         self.assertIsNone(params["study_wkb"])
 
@@ -341,13 +421,22 @@ class ArtifactCopyTests(TestCase):
         band_counts_result.mappings.return_value = iter([])
         source_metric_counts_result = mock.MagicMock()
         source_metric_counts_result.mappings.return_value = iter([])
-        insert_result = mock.MagicMock()
-        insert_result.rowcount = 0
+        grid_insert_result = mock.MagicMock()
+        grid_insert_result.rowcount = 0
+        airport_insert_result = mock.MagicMock()
+        airport_insert_result.rowcount = 0
+        airport_band_counts_result = mock.MagicMock()
+        airport_band_counts_result.mappings.return_value = iter([])
+        airport_source_metric_counts_result = mock.MagicMock()
+        airport_source_metric_counts_result.mappings.return_value = iter([])
         connection.execute.side_effect = [
             grid_result,
             band_counts_result,
             source_metric_counts_result,
-            insert_result,
+            grid_insert_result,
+            airport_insert_result,
+            airport_band_counts_result,
+            airport_source_metric_counts_result,
         ]
         study = box(0.0, 0.0, 1.0, 1.0)
 
@@ -360,7 +449,7 @@ class ArtifactCopyTests(TestCase):
             study_area_wgs84=study,
         )
 
-        params = connection.execute.call_args_list[-1].args[1]
+        params = connection.execute.call_args_list[3].args[1]
         self.assertTrue(params["has_study_area"])
         self.assertEqual(params["study_wkb"], study.wkb)
 
@@ -385,6 +474,16 @@ class ArtifactCopyTests(TestCase):
 
         sql_text = str(noise_writes._GRID_ARTIFACT_BAND_COUNTS_BY_METRIC_SQL)
         self.assertIn("g.source_type IN ('road', 'rail')", sql_text)
+
+    def test_copy_sql_publishes_airport_rows_from_resolved_display(self) -> None:
+        from db_postgis import write_noise as noise_writes
+
+        sql_text = str(noise_writes._INSERT_AIRPORT_FROM_RESOLVED_SQL)
+        self.assertIn("FROM noise_resolved_display r", sql_text)
+        self.assertIn("r.source_type = 'airport'", sql_text)
+        self.assertIn("r.metric IN ('Lden', 'Lnight')", sql_text)
+        self.assertIn("'noise_resolved_display' AS source_dataset", sql_text)
+        self.assertIn("'resolved_display' AS source_layer", sql_text)
 
     def test_copy_sql_keeps_lden_mapping_unchanged(self) -> None:
         from db_postgis import write_noise as noise_writes

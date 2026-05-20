@@ -28,9 +28,9 @@ export function noisePopupHtml(properties) {
   }
   return (
     '<div class="popup-content">' +
-      "<h3>Official-derived transport noise proxy</h3>" +
+      "<h3>Official-derived transport noise overlay</h3>" +
       details.join("") +
-      "<p>Approximate road/rail noise proxy from official-derived noise grid. Not measured point noise and not official contour geometry.</p>" +
+      "<p>Road/rail use grid proxy; airport uses resolved official noise polygons. Not measured point noise.</p>" +
     "</div>"
   );
 }

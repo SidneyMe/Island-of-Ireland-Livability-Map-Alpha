@@ -470,10 +470,10 @@ function noiseFilterSummary() {
 function updateNoiseNote() {
   if (!elements.noiseNote) return;
   if (!state.runtime.noise_enabled) {
-    elements.noiseNote.textContent = "No transport noise proxy in this build";
+    elements.noiseNote.textContent = "No transport noise overlay in this build";
     return;
   }
-  const caveat = "Approximate road/rail noise proxy from official-derived noise grid. Not measured point noise and not official contour geometry.";
+  const caveat = "Official-derived transport noise overlay. Road/rail use grid proxy; airport uses resolved official noise polygons. Not measured point noise.";
   elements.noiseNote.textContent = state.noiseVisible
     ? caveat
     : caveat + " Off until enabled.";
@@ -681,10 +681,10 @@ function buildNoiseControls() {
   overlayTextWrap.className = "toggle-label";
 
   const overlayTitle = document.createElement("strong");
-  overlayTitle.textContent = "Show transport noise proxy";
+  overlayTitle.textContent = "Show transport noise overlay";
 
   const overlaySubtitle = document.createElement("span");
-  overlaySubtitle.textContent = "Official-derived road/rail grid proxy";
+  overlaySubtitle.textContent = "Road/rail grid proxy + airport resolved official polygons";
 
   const overlayInput = document.createElement("input");
   overlayInput.type = "checkbox";

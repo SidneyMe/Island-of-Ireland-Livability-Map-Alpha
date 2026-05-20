@@ -4,6 +4,24 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-19 - Official-derived transport noise overlay Phase D2
+
+### Added
+
+- Airport Lden/Lnight support from active resolved official-derived noise polygons.
+- Airport filter in the transport noise overlay when airport data is available.
+
+### Notes
+
+- Road/rail remain grid-derived proxies.
+- Airport uses resolved official-derived noise polygons.
+- The overlay is not measured point noise.
+- Actual road/rail/airport geometry classification is still not used in this phase.
+
+### Scoring logic
+
+- No scoring logic change.
+
 ## 2026-05-19 - Official-derived transport noise proxy Phase C
 
 ### Added

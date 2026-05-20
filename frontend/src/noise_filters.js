@@ -1,5 +1,5 @@
 const NOISE_METRIC_ORDER = ["Lden", "Lnight"];
-const NOISE_SOURCE_ORDER = ["road", "rail"];
+const NOISE_SOURCE_ORDER = ["road", "rail", "airport"];
 const NOISE_BAND_ORDER = ["45-49", "50-54", "55-59", "60-64", "65-69", "70+", "70-74", "75+", "80+"];
 
 const NOISE_METRIC_LABELS = {
@@ -9,7 +9,8 @@ const NOISE_METRIC_LABELS = {
 
 const NOISE_SOURCE_LABELS = {
   road: "Road",
-  rail: "Rail"
+  rail: "Rail",
+  airport: "Airport"
 };
 
 function _normalizedCounts(rawCounts) {
@@ -106,10 +107,14 @@ function defaultNoiseSelections(runtime) {
 function buildNoiseLayerFilter(options = {}) {
   const metric = String(options.metric || "Lden").trim();
   const selectedSources = Array.from(options.selectedSources || []);
+  const allowedMethods = [
+    "official_derived_grid_proxy",
+    "official_resolved_contour"
+  ];
   const clauses = [
     ["in", ["get", "kind"], ["literal", selectedSources]],
     ["==", ["get", "metric"], metric],
-    ["==", ["get", "method"], "official_derived_grid_proxy"]
+    ["in", ["get", "method"], ["literal", allowedMethods]]
   ];
 
   return ["all", ...clauses];
