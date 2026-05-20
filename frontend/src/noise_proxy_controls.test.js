@@ -8,15 +8,15 @@ const mainJs = fs.readFileSync(path.join(here, "main.js"), "utf8");
 const noiseFiltersJs = fs.readFileSync(path.join(here, "noise_filters.js"), "utf8");
 
 assert.ok(
-  mainJs.includes('overlayTitle.textContent = "Show transport noise overlay";'),
-  "noise toggle label must use transport noise overlay wording"
+  mainJs.includes('overlayTitle.textContent = "Show noise overlay";'),
+  "noise toggle label must use noise overlay wording"
 );
 assert.ok(
-  mainJs.includes('overlaySubtitle.textContent = "Road/rail grid proxy + airport resolved official polygons";'),
-  "noise subtitle must state mixed road/rail grid proxy and airport resolved wording"
+  mainJs.includes('overlaySubtitle.textContent = "Official-derived transport/industry noise overlay";'),
+  "noise subtitle must state transport/industry overlay wording"
 );
 assert.ok(
-  mainJs.includes("Official-derived transport noise overlay. Road/rail use grid proxy; airport uses resolved official noise polygons. Not measured point noise."),
+  mainJs.includes("Official-derived noise overlay. Road/rail use grid proxy; airport/industry use resolved official noise polygons. Not measured point noise."),
   "noise caveat text must be present"
 );
 assert.equal(
@@ -31,8 +31,8 @@ assert.equal(
 );
 assert.equal(
   mainJs.includes("industry"),
-  false,
-  "noise UI must not mention industry"
+  true,
+  "noise UI must mention industry support"
 );
 assert.equal(
   mainJs.includes("input.name = \"noise-metric\""),

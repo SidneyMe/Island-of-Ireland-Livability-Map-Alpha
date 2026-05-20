@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-05-19. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-05-21. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -12,7 +12,7 @@
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
-- Adds a display-only transport noise overlay (Phase D2: roads + rail + airport, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport uses resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
+- Adds a display-only transport/industry noise overlay (Phase E: roads + rail + airport + industry, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport/industry use resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
 - Uses layered content hashes so changes to geometry, scoring params, GTFS feeds, Overture data, or importer config only invalidate the affected cache tiers. (Confirmed)
 - Alpha-stage: amenity tiering, Overture merge, service deserts, and the new fine vector grid / inspect-backed surface path are still moving. (Inference from recent migrations, tests, and docs)
 
@@ -165,7 +165,7 @@
   -> reads PMTiles through pmtiles://
   -> reads runtime JSON from /api/runtime
   -> renders one active vector grid fill+outline pair, recreates those layers when the zoom band changes, and overzooms z15 source tiles to z19
-  -> exposes a default-off Noise proxy panel backed by the separate `noise` vector source and its `noise_proxy` source-layer, with metric + kind filtering, proxy score coloring, opacity control, and an explicit caveat that the overlay is approximate proxy geometry
+  -> exposes a default-off Noise proxy panel backed by the separate `noise` vector source and its `noise_proxy` source-layer, with metric + kind filtering (`road`, `rail`, `airport`, `industry`), proxy score coloring, opacity control, and an explicit caveat that road/rail are grid proxy while airport/industry are resolved official-derived polygons (not measured point noise)
   -> the fixed control panel now scrolls internally when its contents exceed the viewport height, so stacked debug + amenity controls stay reachable
   -> the transport panel now presents public transport tiers: base `calendar.txt` weekly bus-pattern filters (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`), bus frequency tier filters (`Frequent`, `Moderate`, `Low frequency`, `Very low frequency`, `Token / skeletal`), GTFS mode filters (`Tram`, `Rail`), and a strict `calendar_dates`-only intersection filter; tram/rail-only popups show their mode tier instead of a missing bus tier; popups also expose bus headway, commute, Friday-evening, and score-unit frequency fields
   -> `/?debug-grid=1` now opt-in reveals a persistent control-panel `Grid debug` card with live source-vs-rendered counts, layer/source state, a diagnosis line, and a copyable plain-text snapshot; the status pill is reserved for actual runtime errors
@@ -358,7 +358,7 @@ Notes:
   - `grid_walk` has `counts_json`, `cluster_counts_json`, `effective_units_json`, `scores_json`, `total_score`, clipped-area fields
   - `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, and public `transport_reality` now also carry `bus_active_days_mask_7d` (legacy export name for the base weekly bus mask), `bus_service_subtier`, `bus_daytime_deps`, `bus_daytime_headway_min`, `bus_frequency_tier`, `bus_frequency_score_units`, `is_unscheduled_stop`, `has_exception_only_service`, `has_any_bus_service`, `has_daily_bus_service`, `route_modes_json`, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`
   - public output tables are `grid_walk`, `amenities`, `transport_reality`, `service_deserts`, `build_manifest`
-  - public `noise_polygons` stores build-scoped noise overlay geometry; in artifact mode this is currently Phase D2 transport output (`source_type IN ('road','rail','airport')`, `metric IN ('Lden','Lnight')`, unclassified class) encoded via compatibility columns and exported as `noise_proxy` layer properties
+  - public `noise_polygons` stores build-scoped noise overlay geometry; in artifact mode this is currently Phase E transport/industry output (`source_type IN ('road','rail','airport','industry')`, `metric IN ('Lden','Lnight')`, unclassified class) encoded via compatibility columns and exported as `noise_proxy` layer properties
 - LOC: 497
 
 ### `db_postgis/migrations/versions/`
@@ -602,7 +602,7 @@ tests/test_server_behavior.py
 - Noise force semantics are split: resolved rebuild (`--force-noise-artifact`) is separate from source re-import (`--reimport-noise-source`), and `--force-noise-all` does both.
 - Accurate noise mode reads all available rounds and applies road/rail simplification only inside the dissolve CTE; canonical `noise_normalized` rows must not be updated in place.
 - Dev-fast road/rail grid rows are cached under a deterministic grid artifact hash derived from source hash, grid size, latest-round metadata, and grid algorithm version; `NOISE_REBUILD_DEV_FAST_GRID=1` is the escape hatch.
-- Artifact-mode proxy publish now enforces Phase D2 mixed-source behavior: road/rail emit from `noise_grid_artifact` with per-cell metric/band mapping, while airport emits from active `noise_resolved_display` rows with snapped display bands. Missing grid artifact hash is still a hard `noise_proxy_blocked` state.
+- Artifact-mode proxy publish now enforces Phase E mixed-source behavior: road/rail emit from `noise_grid_artifact` with per-cell metric/band mapping, while airport/industry emit from active `noise_resolved_display` rows with snapped display bands. Missing grid artifact hash is still a hard `noise_proxy_blocked` state.
 - `scripts/win/precompute_noise_dev.cmd` and `scripts/win/precompute_noise_accurate.cmd` are strict reuse wrappers: they require a prebuilt mode-matched artifact and fail fast when missing. `scripts/win/prepare_noise_artifact_dev.cmd` and `scripts/win/prepare_noise_artifact_accurate.cmd` are cache-aware refresh wrappers; use `scripts/win/force_noise_artifact_dev.cmd` or `scripts/win/force_noise_artifact_accurate.cmd` for full source reimport + resolved rebuild workflows.
 - `progress_tracker.py` is intentionally defensive. If tracking breaks, the build keeps going, so ETA regressions can hide without breaking tests.
 - Reachability large-cache recovery is mixed-format now: `{key}.pkl(.gz)` is the base snapshot and `{key}.chunks.pkl(.gz)` is an overlay journal. If you touch cache loaders, preserve that merge order and fallback behavior.

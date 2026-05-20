@@ -438,7 +438,7 @@ class RenderAndCliTests(TestCase):
                 "transport_reality_download_url": "/exports/transport-reality.zip",
                 "noise_enabled": True,
                 "noise_counts": {"roi": 5, "ni": 3},
-                "noise_source_counts": {"road": 4, "rail": 2, "airport": 2},
+                "noise_source_counts": {"road": 4, "rail": 2, "airport": 2, "industry": 1},
                 "noise_metric_counts": {"Lden": 5, "Lnight": 3},
                 "noise_band_counts": {"55-59": 6, "75+": 2},
                 "transit_analysis_date": "2026-04-14",
@@ -501,13 +501,14 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["noise_source_counts"]["road"], 4)
         self.assertEqual(payload["noise_source_counts"]["rail"], 2)
         self.assertEqual(payload["noise_source_counts"]["airport"], 2)
+        self.assertEqual(payload["noise_source_counts"]["industry"], 1)
         self.assertEqual(payload["noise_metric_counts"], {"Lden": 5, "Lnight": 3})
         self.assertEqual(payload["noise_band_counts"]["75+"], 2)
         self.assertTrue(payload["noise_proxy_metadata"]["enabled"])
         self.assertEqual(payload["noise_proxy_metadata"]["source_id"], "noise")
         self.assertEqual(payload["noise_proxy_metadata"]["source_layer"], "noise_proxy")
-        self.assertEqual(payload["noise_proxy_metadata"]["kind"], ["road", "rail", "airport"])
-        self.assertEqual(payload["noise_proxy_metadata"]["kinds"], ["road", "rail", "airport"])
+        self.assertEqual(payload["noise_proxy_metadata"]["kind"], ["road", "rail", "airport", "industry"])
+        self.assertEqual(payload["noise_proxy_metadata"]["kinds"], ["road", "rail", "airport", "industry"])
         self.assertEqual(payload["noise_proxy_metadata"]["metrics"], ["Lden", "Lnight"])
         self.assertEqual(payload["noise_proxy_metadata"]["default_metric"], "Lden")
         self.assertEqual(payload["noise_proxy_metadata"]["method"], "mixed")
@@ -515,7 +516,7 @@ class RenderAndCliTests(TestCase):
             payload["noise_proxy_metadata"]["methods"],
             ["official_derived_grid_proxy", "official_resolved_contour"],
         )
-        self.assertEqual(payload["noise_proxy_metadata"]["confidence"], "mixed")
+        self.assertEqual(payload["noise_proxy_metadata"]["confidence"], "proxy_or_modelled_not_measured")
         self.assertEqual(
             payload["noise_proxy_metadata"]["confidences"],
             ["proxy_not_measured", "official_modelled_not_measured"],
@@ -523,6 +524,7 @@ class RenderAndCliTests(TestCase):
         self.assertFalse(payload["noise_proxy_metadata"]["actual_road_geometry"])
         self.assertFalse(payload["noise_proxy_metadata"]["actual_rail_geometry"])
         self.assertFalse(payload["noise_proxy_metadata"]["actual_airport_geometry"])
+        self.assertFalse(payload["noise_proxy_metadata"]["actual_industry_geometry"])
         self.assertFalse(payload["noise_proxy_metadata"]["actual_runway_geometry"])
         self.assertFalse(payload["noise_proxy_metadata"]["actual_geometry"])
         self.assertEqual(payload["runtime_mode"], "strict_manifest")

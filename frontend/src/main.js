@@ -473,7 +473,7 @@ function updateNoiseNote() {
     elements.noiseNote.textContent = "No transport noise overlay in this build";
     return;
   }
-  const caveat = "Official-derived transport noise overlay. Road/rail use grid proxy; airport uses resolved official noise polygons. Not measured point noise.";
+  const caveat = "Official-derived noise overlay. Road/rail use grid proxy; airport/industry use resolved official noise polygons. Not measured point noise.";
   elements.noiseNote.textContent = state.noiseVisible
     ? caveat
     : caveat + " Off until enabled.";
@@ -681,10 +681,10 @@ function buildNoiseControls() {
   overlayTextWrap.className = "toggle-label";
 
   const overlayTitle = document.createElement("strong");
-  overlayTitle.textContent = "Show transport noise overlay";
+  overlayTitle.textContent = "Show noise overlay";
 
   const overlaySubtitle = document.createElement("span");
-  overlaySubtitle.textContent = "Road/rail grid proxy + airport resolved official polygons";
+  overlaySubtitle.textContent = "Official-derived transport/industry noise overlay";
 
   const overlayInput = document.createElement("input");
   overlayInput.type = "checkbox";
@@ -1465,6 +1465,9 @@ function initializeApp(runtime) {
   const noiseDefaults = defaultNoiseSelections(runtime);
   state.selectedNoiseMetric = noiseDefaults.metric;
   state.selectedNoiseSources = new Set(noiseDefaults.sources);
+  if (state.selectedNoiseSources.has("industry") && state.selectedNoiseSources.size > 1) {
+    state.selectedNoiseSources.delete("industry");
+  }
   state.selectedNoiseBands = new Set(noiseDefaults.bands || []);
   buildAmenityControls();
   buildNoiseControls();

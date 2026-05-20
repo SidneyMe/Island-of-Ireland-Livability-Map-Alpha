@@ -419,7 +419,7 @@ function buildStyle(runtime, options = {}) {
     const sourceCounts = runtime && runtime.noise_source_counts && typeof runtime.noise_source_counts === "object"
       ? runtime.noise_source_counts
       : {};
-    ["road", "rail", "airport"].forEach(function (kind) {
+    ["road", "rail", "airport", "industry"].forEach(function (kind) {
       if (Number(sourceCounts[kind] || 0) > 0) noiseKinds.push(kind);
     });
   }

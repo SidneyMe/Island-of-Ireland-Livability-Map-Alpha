@@ -128,6 +128,7 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(noise_layer["fields"]["actual_road_geometry"], "Number")
         self.assertEqual(noise_layer["fields"]["actual_rail_geometry"], "Number")
         self.assertEqual(noise_layer["fields"]["actual_airport_geometry"], "Number")
+        self.assertEqual(noise_layer["fields"]["actual_industry_geometry"], "Number")
         self.assertEqual(noise_layer["fields"]["actual_runway_geometry"], "Number")
 
     def test_amenity_layer_metadata_declares_tier_name_and_conflict_class(self) -> None:
@@ -180,8 +181,9 @@ class PmtilesBakeContractTests(TestCase):
         self.assertIn("n.metric", sql)
         self.assertIn("actual_rail_geometry", sql)
         self.assertIn("actual_airport_geometry", sql)
+        self.assertIn("actual_industry_geometry", sql)
         self.assertIn("actual_runway_geometry", sql)
-        self.assertIn("n.source_type IN ('road', 'rail', 'airport')", sql)
+        self.assertIn("n.source_type IN ('road', 'rail', 'airport', 'industry')", sql)
         self.assertIn("'official_resolved_contour'", sql)
         self.assertIn("'official_modelled_not_measured'", sql)
         self.assertNotIn("ST_Subdivide", sql)

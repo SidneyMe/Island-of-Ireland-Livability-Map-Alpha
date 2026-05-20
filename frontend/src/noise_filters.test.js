@@ -10,7 +10,7 @@ import {
 
 const runtime = {
   noise_metric_counts: { Lden: 10, Lnight: 8 },
-  noise_source_counts: { road: 5, rail: 3, airport: 2 },
+  noise_source_counts: { road: 5, rail: 3, airport: 2, industry: 1 },
   noise_band_counts: { "55-59": 4, "60-64": 3, "65-69": 2, "75+": 1, "45-49": 2, "50-54": 2, "70+": 1 },
   noise_band_counts_by_metric: {
     Lden: { "55-59": 4, "60-64": 3, "65-69": 2, "75+": 1 },
@@ -24,7 +24,7 @@ const runtime = {
   }), ["Lden", "Lnight"]);
   assert.deepEqual(noiseSourceOptions(runtime).map(function (option) {
     return option.value;
-  }), ["road", "rail", "airport"]);
+  }), ["road", "rail", "airport", "industry"]);
   assert.deepEqual(noiseBandOptions(runtime, "Lden").map(function (option) {
     return option.value;
   }), ["55-59", "60-64", "65-69", "75+"]);
@@ -46,7 +46,7 @@ const runtime = {
 {
   assert.deepEqual(defaultNoiseSelections(runtime), {
     metric: "Lden",
-    sources: ["road", "rail", "airport"],
+    sources: ["road", "rail", "airport", "industry"],
     bands: ["55-59", "60-64", "65-69", "75+"]
   });
 }
@@ -54,11 +54,11 @@ const runtime = {
 {
   assert.deepEqual(buildNoiseLayerFilter({
     metric: "Lden",
-    selectedSources: new Set(["road", "rail", "airport"]),
+    selectedSources: new Set(["road", "rail", "airport", "industry"]),
     selectedBands: new Set(["55-59", "60-64"])
   }), [
     "all",
-    ["in", ["get", "kind"], ["literal", ["road", "rail", "airport"]]],
+    ["in", ["get", "kind"], ["literal", ["road", "rail", "airport", "industry"]]],
     ["==", ["get", "metric"], "Lden"],
     [
       "in",

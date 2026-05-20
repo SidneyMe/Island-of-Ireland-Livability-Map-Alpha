@@ -223,6 +223,7 @@ _NOISE_TILE_SQL = text(
                 CASE
                     WHEN n.source_type = 'rail' THEN 'Rail '
                     WHEN n.source_type = 'airport' THEN 'Airport '
+                    WHEN n.source_type = 'industry' THEN 'Industry '
                     ELSE 'Road '
                 END,
                 COALESCE(NULLIF(n.metric, ''), 'noise'),
@@ -230,21 +231,21 @@ _NOISE_TILE_SQL = text(
                 COALESCE(NULLIF(n.db_value, ''), 'unknown')
             ) AS label,
             CASE
-                WHEN n.source_type = 'airport' THEN 'official_resolved_contour'
+                WHEN n.source_type IN ('airport', 'industry') THEN 'official_resolved_contour'
                 ELSE 'official_derived_grid_proxy'
             END AS method,
             CASE
-                WHEN n.source_type = 'airport' THEN 'noise_resolved_display'
+                WHEN n.source_type IN ('airport', 'industry') THEN 'noise_resolved_display'
                 ELSE 'noise_grid_artifact'
             END AS calibration_source,
             CASE
-                WHEN n.source_type = 'airport' THEN 'resolved_display'
+                WHEN n.source_type IN ('airport', 'industry') THEN 'resolved_display'
                 ELSE 'grid_1000m'
             END AS calibration_layer,
             COALESCE(
                 NULLIF(n.source_layer, ''),
                 CASE
-                    WHEN n.source_type = 'airport' THEN 'resolved_display'
+                    WHEN n.source_type IN ('airport', 'industry') THEN 'resolved_display'
                     ELSE 'grid_1000m'
                 END
             ) AS calibration_stat,
@@ -253,12 +254,13 @@ _NOISE_TILE_SQL = text(
                 ELSE 0
             END AS sample_count,
             CASE
-                WHEN n.source_type = 'airport' THEN 'official_modelled_not_measured'
+                WHEN n.source_type IN ('airport', 'industry') THEN 'official_modelled_not_measured'
                 ELSE 'proxy_not_measured'
             END AS confidence,
             0 AS actual_road_geometry,
             0 AS actual_rail_geometry,
             0 AS actual_airport_geometry,
+            0 AS actual_industry_geometry,
             0 AS actual_runway_geometry,
             ST_AsMVTGeom(
                 ST_Transform(n.geom, 3857),
@@ -269,7 +271,7 @@ _NOISE_TILE_SQL = text(
             ) AS geom
         FROM noise_polygons AS n, tile
         WHERE n.build_key = :build_key
-          AND n.source_type IN ('road', 'rail', 'airport')
+          AND n.source_type IN ('road', 'rail', 'airport', 'industry')
           AND n.geom && tile.env_4326
           AND ST_Intersects(n.geom, tile.env_4326)
     )

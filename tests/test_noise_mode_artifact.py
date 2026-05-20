@@ -227,7 +227,7 @@ class DirectCopyFunctionTests(TestCase):
         from db_postgis.writes import copy_noise_artifact_to_noise_polygons
         src = inspect.getsource(copy_noise_artifact_to_noise_polygons)
         self.assertNotIn("_ROAD_LDEN_CALIBRATION_SQL", src)
-        self.assertIn("_INSERT_AIRPORT_FROM_RESOLVED_SQL", src)
+        self.assertIn("_INSERT_EXACT_FROM_RESOLVED_SQL", src)
 
     def test_copy_sql_inserts_into_noise_polygons(self) -> None:
         from db_postgis import write_noise as noise_writes

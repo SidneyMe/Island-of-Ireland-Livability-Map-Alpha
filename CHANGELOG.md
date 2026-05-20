@@ -4,6 +4,24 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-21 - Official-derived transport/industry noise overlay Phase E
+
+### Added
+
+- Industry Lden/Lnight support from active resolved official-derived noise polygons.
+- Industry filter in the noise overlay when industry data is available.
+
+### Notes
+
+- Road/rail remain grid-derived proxies.
+- Airport/industry use resolved official-derived noise polygons.
+- The overlay is not measured point noise.
+- Actual road/rail/airport/industry geometry classification is still not used.
+
+### Scoring logic
+
+- No scoring logic change.
+
 ## 2026-05-19 - Official-derived transport noise overlay Phase D2
 
 ### Added
