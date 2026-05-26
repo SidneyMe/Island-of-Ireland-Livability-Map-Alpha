@@ -27,7 +27,9 @@ import {
   resolveMapClickAction
 } from "./click_priority.js";
 import {
+  DEFAULT_NOISE_OPACITY as runtimeDefaultNoiseOpacity,
   GRID_INSERT_BEFORE_LAYER_ID as runtimeGridInsertBeforeLayerId,
+  noiseOutlineOpacity as runtimeNoiseOutlineOpacity,
   activeGridLifecycle as runtimeActiveGridLifecycle,
   activeDebugGridLayerId as runtimeActiveDebugGridLayerId,
   activeGridLayerId as runtimeActiveGridLayerId,
@@ -130,7 +132,7 @@ const state = {
   transportRequireExceptionOnly: false,
   serviceDesertsVisible: false,
   noiseVisible: false,
-  noiseOpacity: 0.45,
+  noiseOpacity: runtimeDefaultNoiseOpacity,
   selectedNoiseMetric: "Lden",
   selectedNoiseSources: new Set(),
   selectedNoiseBands: new Set(),
@@ -499,7 +501,15 @@ function applyNoiseFilter() {
 function applyNoiseOpacity() {
   if (!state.map) return;
   if (!state.map.getLayer("noise-proxy-fill")) return;
-  state.map.setPaintProperty("noise-proxy-fill", "fill-opacity", state.noiseOpacity);
+  const fillOpacity = Number(state.noiseOpacity ?? runtimeDefaultNoiseOpacity);
+  state.map.setPaintProperty("noise-proxy-fill", "fill-opacity", fillOpacity);
+  if (state.map.getLayer("noise-proxy-outline")) {
+    state.map.setPaintProperty(
+      "noise-proxy-outline",
+      "line-opacity",
+      runtimeNoiseOutlineOpacity(fillOpacity)
+    );
+  }
 }
 
 function applyNoiseVisibility() {
@@ -1461,7 +1471,7 @@ function initializeApp(runtime) {
   state.transportIncludeUnscheduled = false;
   state.transportRequireExceptionOnly = false;
   state.noiseVisible = false;
-  state.noiseOpacity = 0.45;
+  state.noiseOpacity = runtimeDefaultNoiseOpacity;
   const noiseDefaults = defaultNoiseSelections(runtime);
   state.selectedNoiseMetric = noiseDefaults.metric;
   state.selectedNoiseSources = new Set(noiseDefaults.sources);

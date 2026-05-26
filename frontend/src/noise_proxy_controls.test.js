@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const mainJs = fs.readFileSync(path.join(here, "main.js"), "utf8");
 const noiseFiltersJs = fs.readFileSync(path.join(here, "noise_filters.js"), "utf8");
+const runtimeContractJs = fs.readFileSync(path.join(here, "runtime_contract.js"), "utf8");
 
 assert.ok(
   mainJs.includes('overlayTitle.textContent = "Show noise overlay";'),
@@ -60,8 +61,34 @@ assert.ok(
   "noise opacity slider range must be 0..1 with step 0.05"
 );
 assert.ok(
-  mainJs.includes('state.map.setPaintProperty("noise-proxy-fill", "fill-opacity", state.noiseOpacity);'),
+  mainJs.includes('state.map.setPaintProperty("noise-proxy-fill", "fill-opacity", fillOpacity);'),
   "noise opacity must map to fill-opacity paint property"
+);
+assert.ok(
+  mainJs.includes('"noise-proxy-outline"') &&
+    mainJs.includes('"line-opacity"') &&
+    mainJs.includes("runtimeNoiseOutlineOpacity(fillOpacity)"),
+  "noise opacity must also map to outline line-opacity paint property"
+);
+assert.ok(
+  mainJs.includes("const fillOpacity = Number(state.noiseOpacity ?? runtimeDefaultNoiseOpacity);"),
+  "noise opacity mapping must preserve the shared default fallback"
+);
+assert.ok(
+  runtimeContractJs.includes("clampedFillOpacity * NOISE_OUTLINE_OPACITY_MULTIPLIER"),
+  "runtime formula must scale outline opacity from fill opacity"
+);
+assert.ok(
+  runtimeContractJs.includes("Math.min(\n    MAX_NOISE_OUTLINE_OPACITY,\n    clampedFillOpacity * NOISE_OUTLINE_OPACITY_MULTIPLIER\n  );"),
+  "runtime formula must cap outline opacity so high-opacity outlines stay subtle"
+);
+assert.ok(
+  mainJs.includes("noiseOpacity: runtimeDefaultNoiseOpacity"),
+  "noise default fill opacity should come from runtime constant"
+);
+assert.ok(
+  mainJs.includes("state.noiseOpacity = runtimeDefaultNoiseOpacity;"),
+  "noise reset should reuse runtime default opacity"
 );
 assert.ok(
   mainJs.includes("state.noiseVisible = false;"),

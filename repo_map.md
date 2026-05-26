@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-05-21. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-05-26. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -165,7 +165,7 @@
   -> reads PMTiles through pmtiles://
   -> reads runtime JSON from /api/runtime
   -> renders one active vector grid fill+outline pair, recreates those layers when the zoom band changes, and overzooms z15 source tiles to z19
-  -> exposes a default-off Noise proxy panel backed by the separate `noise` vector source and its `noise_proxy` source-layer, with metric + kind filtering (`road`, `rail`, `airport`, `industry`), proxy score coloring, opacity control, and an explicit caveat that road/rail are grid proxy while airport/industry are resolved official-derived polygons (not measured point noise)
+  -> exposes a default-off Noise proxy panel backed by the separate `noise` vector source and its `noise_proxy` source-layer, with metric + kind filtering (`road`, `rail`, `airport`, `industry`), proxy score coloring, opacity control that now updates both fill and outline (`line-opacity = min(0.55, fillOpacity * 0.8)`), and an explicit caveat that road/rail are grid proxy while airport/industry are resolved official-derived polygons (not measured point noise)
   -> the fixed control panel now scrolls internally when its contents exceed the viewport height, so stacked debug + amenity controls stay reachable
   -> the transport panel now presents public transport tiers: base `calendar.txt` weekly bus-pattern filters (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`), bus frequency tier filters (`Frequent`, `Moderate`, `Low frequency`, `Very low frequency`, `Token / skeletal`), GTFS mode filters (`Tram`, `Rail`), and a strict `calendar_dates`-only intersection filter; tram/rail-only popups show their mode tier instead of a missing bus tier; popups also expose bus headway, commute, Friday-evening, and score-unit frequency fields
   -> `/?debug-grid=1` now opt-in reveals a persistent control-panel `Grid debug` card with live source-vs-rendered counts, layer/source state, a diagnosis line, and a copyable plain-text snapshot; the status pill is reserved for actual runtime errors
@@ -637,6 +637,7 @@ Representative tests confirmed present:
 | `frontend/src/grid_debug.test.js` | persistent grid debug card rendering, diagnosis states, resolution display updates, and copyable snapshot formatting |
 | `frontend/src/transport_filters.test.js` | public transport filter logic including weekly bus tiers, exact rail/tram mode matching, and exception-only intersection logic |
 | `frontend/src/noise_filters.test.js` | noise metric/source/band options and MapLibre filter expression construction |
+| `frontend/src/noise_proxy_controls.test.js` | noise overlay control wiring, opacity slider range, synced fill/outline opacity paint updates, and default/reset opacity handling |
 | `frontend/src/transport_reality_popup.test.js` | multi-row transport popup rendering, bus frequency labels, rail/tram mode tiers, and snapshot wording |
 | `frontend/src/click_priority.test.js` | popup/action priority for transport, amenities, service deserts, noise, fine inspect, and coarse grid fallback |
 

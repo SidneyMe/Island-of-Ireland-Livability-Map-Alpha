@@ -5,6 +5,19 @@ const ACTIVE_DEBUG_GRID_LAYER_ID = "grid-fill-debug-active";
 const GRID_SOURCE_ID = "livability";
 const GRID_SOURCE_LAYER_ID = "grid";
 const GRID_INSERT_BEFORE_LAYER_ID = "noise-proxy-fill";
+const DEFAULT_NOISE_OPACITY = 0.45;
+const NOISE_OUTLINE_OPACITY_MULTIPLIER = 0.8;
+const MAX_NOISE_OUTLINE_OPACITY = 0.55;
+
+function noiseOutlineOpacity(fillOpacity) {
+  const numericFillOpacity = Number(fillOpacity);
+  if (!Number.isFinite(numericFillOpacity)) return 0;
+  const clampedFillOpacity = Math.max(0, Math.min(1, numericFillOpacity));
+  return Math.min(
+    MAX_NOISE_OUTLINE_OPACITY,
+    clampedFillOpacity * NOISE_OUTLINE_OPACITY_MULTIPLIER
+  );
+}
 
 function runtimeZoomBreaks(runtime) {
   const breaks = runtime && Array.isArray(runtime.surface_zoom_breaks)
@@ -458,7 +471,7 @@ function buildStyle(runtime, options = {}) {
       filter: noiseProxyFilter,
       paint: {
         "fill-color": noiseFillColorExpression(),
-        "fill-opacity": 0.45
+        "fill-opacity": DEFAULT_NOISE_OPACITY
       }
     });
     layers.push({
@@ -473,7 +486,7 @@ function buildStyle(runtime, options = {}) {
       filter: noiseProxyFilter,
       paint: {
         "line-color": "#7f1d1d",
-        "line-opacity": 0.35,
+        "line-opacity": noiseOutlineOpacity(DEFAULT_NOISE_OPACITY),
         "line-width": [
           "interpolate", ["linear"], ["zoom"],
           8, 0.5,
@@ -564,9 +577,12 @@ function buildStyle(runtime, options = {}) {
 }
 
 export {
+  DEFAULT_NOISE_OPACITY,
   GRID_INSERT_BEFORE_LAYER_ID,
   GRID_SOURCE_ID,
   GRID_SOURCE_LAYER_ID,
+  MAX_NOISE_OUTLINE_OPACITY,
+  NOISE_OUTLINE_OPACITY_MULTIPLIER,
   activeDebugGridFilter,
   activeDebugGridLayerId,
   activeGridFilter,
@@ -587,6 +603,7 @@ export {
   gridOutlineLayerIds,
   gridVisibilityPlan,
   gridLayerIds,
+  noiseOutlineOpacity,
   resolutionForZoom,
   runtimeFineResolutions,
   runtimeZoomBreaks,

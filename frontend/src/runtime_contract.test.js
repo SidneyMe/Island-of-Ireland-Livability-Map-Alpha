@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 
 import {
+  DEFAULT_NOISE_OPACITY,
   GRID_INSERT_BEFORE_LAYER_ID,
+  MAX_NOISE_OUTLINE_OPACITY,
+  NOISE_OUTLINE_OPACITY_MULTIPLIER,
   activeDebugGridFilter,
   activeDebugGridLayerId,
   activeGridFilter,
@@ -18,6 +21,7 @@ import {
   gridLayerIds,
   gridOutlineLayerId,
   gridOutlineLayerIds,
+  noiseOutlineOpacity,
   resolutionForZoom,
   zoomBoundsForResolution
 } from "./runtime_contract.js";
@@ -210,6 +214,16 @@ const devRuntime = {
 }
 
 {
+  assert.equal(noiseOutlineOpacity(0), 0);
+  assert.ok(Math.abs(noiseOutlineOpacity(DEFAULT_NOISE_OPACITY) - 0.36) < 1e-9);
+  assert.equal(noiseOutlineOpacity(1), MAX_NOISE_OUTLINE_OPACITY);
+  assert.equal(
+    noiseOutlineOpacity(DEFAULT_NOISE_OPACITY),
+    DEFAULT_NOISE_OPACITY * NOISE_OUTLINE_OPACITY_MULTIPLIER
+  );
+}
+
+{
   const style = buildStyle(fullRuntime, { windowOrigin: "http://127.0.0.1:8000" });
   const gridFillLayers = style.layers.filter(function (layer) {
     return layer.id === "grid-fill-active";
@@ -222,6 +236,9 @@ const devRuntime = {
   });
   const noiseLayer = style.layers.find(function (layer) {
     return layer.id === "noise-proxy-fill";
+  });
+  const noiseOutlineLayer = style.layers.find(function (layer) {
+    return layer.id === "noise-proxy-outline";
   });
   const serviceDesertsLayer = style.layers.find(function (layer) {
     return layer.id === "service-deserts-fill";
@@ -270,6 +287,11 @@ const devRuntime = {
   assert.equal(noiseLayer.source, "noise");
   assert.equal(noiseLayer["source-layer"], "noise_proxy");
   assert.equal(noiseLayer.minzoom, 8);
+  assert.equal(noiseLayer.paint["fill-opacity"], DEFAULT_NOISE_OPACITY);
+  assert.equal(
+    noiseOutlineLayer.paint["line-opacity"],
+    noiseOutlineOpacity(DEFAULT_NOISE_OPACITY)
+  );
   assert.deepEqual(noiseLayer.filter, [
     "all",
     ["in", ["get", "kind"], ["literal", ["road", "rail", "airport", "industry"]]],
