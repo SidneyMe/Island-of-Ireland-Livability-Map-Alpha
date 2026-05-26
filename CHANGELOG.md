@@ -4,6 +4,21 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-21 - Official-derived noise overlay Phase F QA/polish
+
+### Changed
+
+- Polished official-derived noise overlay wording in the static panel shell to match transport/industry scope.
+- Kept Industry disabled by default in the overlay filter defaults to reduce visual overload when other kinds are present.
+
+### Fixed
+
+- Suppressed browser favicon fetch noise by adding an inline empty favicon link (`<link rel="icon" href="data:,">`) in `static/index.html`.
+
+### Scoring logic
+
+- No scoring logic change.
+
 ## 2026-05-21 - Official-derived transport/industry noise overlay Phase E
 
 ### Added
