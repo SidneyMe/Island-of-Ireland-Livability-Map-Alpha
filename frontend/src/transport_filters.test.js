@@ -73,6 +73,7 @@ assert.deepEqual(
     return [entry.value, entry.label, entry.count];
   }),
   [
+    ["bus", "Bus", 21],
     ["tram", "Tram", 4],
     ["rail", "Rail", 6]
   ]
@@ -81,6 +82,12 @@ assert.deepEqual(
 assert.deepEqual(transportFlagCounts(runtime), runtime.transport_flag_counts);
 
 assert.equal(buildTransportLayerFilter({}), null);
+assert.equal(
+  buildTransportLayerFilter({
+    selectedModes: new Set(["bus", "tram", "rail"])
+  }),
+  null
+);
 assert.deepEqual(
   routeModeTokenFilter("rail"),
   ["in", ",rail,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]]
@@ -93,16 +100,35 @@ assert.deepEqual(
     includeUnscheduled: true,
     requireExceptionOnly: true
   }),
+  ["in", ",rail,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]]
+);
+
+assert.deepEqual(
+  buildTransportLayerFilter({
+    selectedSubtiers: new Set(["mon_sat"]),
+    selectedBusFrequencies: new Set(["frequent"]),
+    selectedModes: new Set(["bus"]),
+    includeUnscheduled: false,
+    requireExceptionOnly: true
+  }),
   [
     "all",
-    [
-      "any",
-      ["in", ["coalesce", ["get", "bus_service_subtier"], ""], ["literal", ["mon_sat", "weekdays_only"]]],
-      ["in", ["coalesce", ["get", "bus_frequency_tier"], ""], ["literal", ["frequent"]]],
-      ["in", ",rail,", ["concat", ",", ["coalesce", ["get", "route_modes"], ""], ","]],
-      ["==", ["get", "is_unscheduled_stop"], 1]
-    ],
+    ["==", ["get", "has_any_bus_service"], 1],
+    ["==", ["coalesce", ["get", "bus_service_subtier"], ""], "mon_sat"],
+    ["==", ["coalesce", ["get", "bus_frequency_tier"], ""], "frequent"],
     ["==", ["get", "has_exception_only_service"], 1]
+  ]
+);
+
+assert.deepEqual(
+  buildTransportLayerFilter({
+    selectedModes: new Set(["bus"]),
+    includeUnscheduled: true
+  }),
+  [
+    "any",
+    ["==", ["get", "has_any_bus_service"], 1],
+    ["==", ["get", "is_unscheduled_stop"], 1]
   ]
 );
 

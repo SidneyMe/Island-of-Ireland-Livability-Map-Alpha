@@ -21,6 +21,7 @@ __pycache__/
 .tmp-test/
 .coverage
 htmlcov/
+.test_logs
 
 # Frontend dependencies and caches
 frontend/node_modules/

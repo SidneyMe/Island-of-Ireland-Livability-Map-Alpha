@@ -8,7 +8,7 @@
 
 - Offline-first pipeline that scores grid cells across the island of Ireland for livability using walk access to `shops`, `transport`, `healthcare`, and `parks`. (Confirmed)
 - Shops, healthcare, and parks now use tiered score units instead of flat presence counts. Examples: corner shop vs supermarket, clinic vs emergency hospital, pocket park vs regional park. (Confirmed)
-- Ingests local OSM PBF via `osm2pgsql`, GTFS feeds (NTA, Translink), and optionally an Overture Places geoparquet dataset. (Confirmed)
+- Ingests local OSM PBF via `osm2pgsql`, cache-managed public static GTFS ZIP feeds (default active transit input: `tfi_gtfs_all`), and optionally an Overture Places geoparquet dataset. (Confirmed)
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
@@ -50,6 +50,10 @@
 - Primary CLI entry point. (Confirmed, LOC: 153)
 - Dispatches:
   - `--refresh-import` -> `precompute.refresh_local_import()`
+  - `--refresh-gtfs` -> `transit_refresh_runner.refresh_gtfs()`
+  - `--refresh-gtfs --status` -> `transit_refresh_runner.gtfs_status()` diagnostics only (no download)
+  - `--auto-refresh-gtfs` -> only valid with `--refresh-transit`; refreshes stale/missing GTFS cache before transit preflight
+  - `--force-gtfs-refresh` -> only valid with `--refresh-gtfs` / `--refresh-transit`; forces GTFS ZIP re-download
   - `--refresh-transit` -> `transit_refresh_runner.refresh_transit()`
   - `--force-transit-refresh` -> same path, but only valid with `--refresh-transit`
   - `--precompute` / `--precompute-dev` / `--precompute-test` -> `precompute.run_precompute(profile="full"|"dev"|"test")`
@@ -62,7 +66,7 @@
   - `--serve` / `--render` / `--serve-dev` / `--render-dev` / `--serve-test` / `--render-test` -> `render_from_db.run_render_from_db(...)`
 - `--render` is a legacy alias for `--serve`. `--render-dev` is a legacy alias for `--serve-dev`. `--render-test` is a legacy alias for `--serve-test`. (Confirmed)
 - If no action flag is supplied, serving is the default path. (Confirmed)
-- `--refresh-transit` now goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, and reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged. It still prints the explicit completion line plus the transit-phase `completed` tracker line. (Confirmed)
+- `--refresh-transit` now goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged, and can optionally auto-refresh GTFS cache first via `--auto-refresh-gtfs`. It still prints the explicit completion line plus the transit-phase `completed` tracker line. (Confirmed)
 
 ### `.github/workflows/scheduled_refresh.yml`
 
@@ -101,7 +105,7 @@
 ```text
 1. Local inputs
    osm/ireland-and-northern-ireland-latest.osm.pbf
-   gtfs/*.zip
+   .livability_cache/gtfs/*/current.zip (or override zip paths via env)
    overture/ireland_places.geoparquet (optional)
    noise_datasets/*.zip (optional display overlay)
    boundaries/*.geojson
@@ -163,11 +167,11 @@
 8. Frontend
    static/dist/app.js
   -> reads PMTiles through pmtiles://
-  -> reads runtime JSON from /api/runtime
+  -> reads runtime JSON from /api/runtime with a longer cold-start timeout and one retry after abort so first-load DB/runtime warmup does not leave the app permanently stuck
   -> renders one active vector grid fill+outline pair, recreates those layers when the zoom band changes, and overzooms z15 source tiles to z19
   -> exposes a default-off Noise proxy panel backed by the separate `noise` vector source and its `noise_proxy` source-layer, with metric + kind filtering (`road`, `rail`, `airport`, `industry`), proxy score coloring, opacity control that now updates both fill and outline (`line-opacity = min(0.55, fillOpacity * 0.8)`), and an explicit caveat that road/rail are grid proxy while airport/industry are resolved official-derived polygons (not measured point noise)
   -> the fixed control panel now scrolls internally when its contents exceed the viewport height, so stacked debug + amenity controls stay reachable
-  -> the transport panel now presents public transport tiers: base `calendar.txt` weekly bus-pattern filters (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`), bus frequency tier filters (`Frequent`, `Moderate`, `Low frequency`, `Very low frequency`, `Token / skeletal`), GTFS mode filters (`Tram`, `Rail`), and a strict `calendar_dates`-only intersection filter; tram/rail-only popups show their mode tier instead of a missing bus tier; popups also expose bus headway, commute, Friday-evening, and score-unit frequency fields
+  -> public transport tiers are rendered inside the `Amenities` -> `Transport` card: `Sub-tiers` now contains a `Bus` subgroup (with nested `Schedule` weekly bus-pattern + unscheduled/exception-only filters and nested `Frequency` headway tiers) plus a separate `Transport` mode group (`Bus` / `Rail` / `Tram` toggles), while the default all-mode state intentionally applies no vector filter so older PMTiles transport layers without the newer mode/subtier fields still show stops; narrowed filters require the newer transport fields so selectors visibly narrow when the matching profile PMTiles is served, tram/rail-only popups still show their mode tier, and popups expose bus headway, commute, Friday-evening, and score-unit frequency fields
   -> `/?debug-grid=1` now opt-in reveals a persistent control-panel `Grid debug` card with live source-vs-rendered counts, layer/source state, a diagnosis line, and a copyable plain-text snapshot; the status pill is reserved for actual runtime errors
   -> clicking transport rows now renders all colocated stop rows in one popup instead of taking only the first rendered feature, while clicking the active grid still opens the exact score breakdown popup and uses `/api/inspect` for fine-surface values when available
 ```
@@ -250,9 +254,15 @@ Notes:
 
 ### `transit_refresh_runner.py`
 
-- Purpose: lightweight CLI-only GTFS refresh path used by `main.py --refresh-transit`. (Confirmed)
+- Purpose: lightweight CLI-only GTFS refresh path used by `main.py --refresh-gtfs` and `main.py --refresh-transit`. (Confirmed)
 - Why it matters: avoids importing the whole `precompute` package before the first transit progress line, now starts the tracker before DB/schema checks and source-state resolution, and passes transit progress callbacks into OSM source-state fingerprinting so users can see `osm2pgsql --version` probes plus cached-vs-rehashed `.osm.pbf` resolution immediately in the console. (Confirmed)
-- Main functions: `refresh_transit()`, `_preflight_transit_rebuild()`
+- Main functions: `refresh_gtfs()`, `gtfs_status()`, `refresh_transit()`, `_preflight_transit_rebuild()`
+
+### `transit/gtfs_download.py`
+
+- Purpose: cache-aware public static GTFS downloader/validator used by transit source resolution. (Confirmed)
+- Why it matters: centralizes polite HTTP behavior (timeout, retry/backoff, conditional requests), atomic ZIP replacement, SHA256 manifests, and required-GTFS-file validation before any `current.zip` update is accepted. (Confirmed)
+- Main functions: `refresh_gtfs_feed()`, `refresh_gtfs_feeds()`, `ensure_transit_feed_available()`
 
 ### `precompute/workflow.py`
 
@@ -346,7 +356,7 @@ Notes:
   - `overture_dataset`
 - `/api/runtime` still reports `surface_zoom_breaks`, `fine_resolutions_m`, `fine_surface_enabled`, `inspect_url`, and `max_zoom=19`, but it no longer advertises `surface_tile_url_template`; the main render path is now vector-only. Expected client aborts on `/api/inspect` are suppressed from server logs the same way PMTiles range disconnects are, while `/` and `/static/*` now ship with `Cache-Control: no-store` so rebuilt local frontend assets are not silently cached between reloads. (Confirmed from code and tests)
 - `/api/runtime` includes noise overlay availability, `noise_pmtiles_url` for the separate overlay archive, and filter counts used by the proxy UI (`noise_source_counts`, `noise_metric_counts`); when no noise rows/archive are available it reports `noise_enabled=false` and `noise_pmtiles_url=null`. (Confirmed from code and tests)
-- Strict mode still requires a manifest matching current `config_hash` + `extract_path`. An explicit local fallback can be enabled with `LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME=1`, which serves the latest completed manifest for the same extract path and flags runtime payload with `runtime_mode=stale_manifest_fallback` + `runtime_warning`. (Confirmed from code and tests)
+- Strict mode still requires a manifest matching current `config_hash` + `extract_path`. An explicit local fallback can be enabled with `LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME=1`; it first considers the latest completed manifest for the same extract path, but if that manifest has transport reality enabled without usable transport summary/quality signals, it prefers the latest transport-ready completed manifest and flags runtime payload with `runtime_mode=stale_manifest_fallback` + `runtime_warning`. Runtime `pmtiles_url` follows the selected manifest `build_profile`, and the local server serves existing full/dev/test PMTiles routes so stale fallback does not pair dev runtime filters with a full-profile archive. (Confirmed from code and tests)
 - LOC: 791
 
 ### `db_postgis/tables.py`
@@ -515,9 +525,9 @@ tests/test_server_behavior.py
 |---|---|---|
 | `DATABASE_URL` | Full SQLAlchemy / PostGIS connection string; default `connect_timeout=15` is appended when absent | None |
 | `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT` | DB fallback parts; rendered through the same default `connect_timeout=15` SQLAlchemy URL | None |
-| `GTFS_NTA_ZIP_PATH` | NTA GTFS zip path | `gtfs/nta_gtfs.zip` |
-| `GTFS_TRANSLINK_ZIP_PATH` | Translink GTFS zip path | `gtfs/translink_gtfs.zip` |
-| `GTFS_NTA_URL`, `GTFS_TRANSLINK_URL` | Optional GTFS download URLs | Mostly empty by default |
+| `GTFS_TFI_ALL_ZIP_PATH` | Cache path for `tfi_gtfs_all` static ZIP | `.livability_cache/gtfs/tfi_gtfs_all/current.zip` |
+| `GTFS_TFI_REALTIME_STATIC_ZIP_PATH` | Cache path for `tfi_gtfs_realtime_static` static ZIP | `.livability_cache/gtfs/tfi_gtfs_realtime_static/current.zip` |
+| `GTFS_TFI_ALL_URL`, `GTFS_TFI_REALTIME_STATIC_URL` | Public static GTFS ZIP URLs (override-able) | TFI public ZIP URLs in `config.py` |
 | `GTFS_ANALYSIS_WINDOW_DAYS` | Transit analysis window | `30` |
 | `GTFS_SERVICE_DESERT_WINDOW_DAYS` | Service-desert window | `7` |
 | `GTFS_LOOKAHEAD_DAYS` | Transit lookahead window | `14` |
@@ -570,7 +580,8 @@ tests/test_server_behavior.py
 |---|---|
 | Any pipeline command | reachable PostGIS config |
 | `--refresh-import` | local OSM PBF + `osm2pgsql` available |
-| `--refresh-transit` | GTFS zips or URLs + compiled `walkgraph` with `gtfs-refresh` support |
+| `--refresh-gtfs` | network access to configured public static GTFS ZIP URLs (unless custom local-only URL/path config is used) |
+| `--refresh-transit` | cached GTFS ZIP(s) (or `--auto-refresh-gtfs`) + compiled `walkgraph` with `gtfs-refresh` support |
 | `--precompute` | managed schema ready, raw import ready or `--auto-refresh-import`, boundaries present, compiled `walkgraph` |
 | `--serve` | completed precompute build and main PMTiles archive for the chosen profile; noise PMTiles is optional and advertised only when available |
 | Overture merge | `overture/ireland_places.geoparquet` present; otherwise it degrades gracefully |

@@ -918,7 +918,8 @@ class TransitWorkflowTests(TestCase):
         self.assertIs(state, prepared_state)
         self.assertFalse(refresh_required)
         prepare_state_mock.assert_called_once_with(
-            refresh_download=False,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
             progress_cb=progress_cb,
         )
         manifest_mock.assert_called_once_with(mock.sentinel.engine, "reality-123")

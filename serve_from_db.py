@@ -140,6 +140,84 @@ class RuntimeService:
             return None
         return dict(row)
 
+    def _load_latest_transport_ready_manifest_for_extract(self) -> dict[str, Any] | None:
+        if not hasattr(self._engine, "connect"):
+            return None
+        try:
+            with self._engine.connect() as connection:
+                row = connection.exec_driver_sql(
+                    """
+                    SELECT bm.*
+                    FROM build_manifest AS bm
+                    WHERE bm.extract_path = %(extract_path)s
+                      AND bm.status = 'complete'
+                      AND COALESCE((bm.summary_json ->> 'transport_reality_enabled')::boolean, false)
+                      AND (
+                        COALESCE((bm.summary_json -> 'transport_subtier_counts')::text, '{}') NOT IN ('{}', 'null')
+                        OR COALESCE((bm.summary_json -> 'transport_bus_frequency_counts')::text, '{}') NOT IN ('{}', 'null')
+                        OR COALESCE((bm.summary_json -> 'transport_flag_counts')::text, '{}') NOT IN ('{}', 'null')
+                        OR COALESCE((bm.summary_json -> 'transport_mode_counts')::text, '{}') NOT IN ('{}', 'null')
+                        OR EXISTS (
+                          SELECT 1
+                          FROM transport_reality AS t
+                          WHERE t.build_key = bm.build_key
+                            AND (
+                              COALESCE(t.bus_service_subtier, '') <> ''
+                              OR COALESCE(t.bus_frequency_tier, '') <> ''
+                              OR t.has_any_bus_service
+                              OR t.has_daily_bus_service
+                            )
+                        )
+                      )
+                    ORDER BY bm.completed_at DESC NULLS LAST, bm.created_at DESC
+                    LIMIT 1
+                    """,
+                    {"extract_path": str(OSM_EXTRACT_PATH)},
+                ).mappings().first()
+        except Exception:
+            return None
+        if row is None:
+            return None
+        return dict(row)
+
+    @staticmethod
+    def _summary_has_transport_counts(summary_json: Any) -> bool:
+        if not isinstance(summary_json, dict):
+            return False
+        for key in (
+            "transport_subtier_counts",
+            "transport_bus_frequency_counts",
+            "transport_flag_counts",
+            "transport_mode_counts",
+        ):
+            value = summary_json.get(key)
+            if isinstance(value, dict) and len(value) > 0:
+                return True
+        return False
+
+    def _transport_quality_row_count(self, build_key: str) -> int:
+        if not hasattr(self._engine, "connect"):
+            return 0
+        try:
+            with self._engine.connect() as connection:
+                value = connection.exec_driver_sql(
+                    """
+                    SELECT COUNT(*)::bigint AS transport_quality_rows
+                    FROM transport_reality AS t
+                    WHERE t.build_key = %(build_key)s
+                      AND (
+                        COALESCE(t.bus_service_subtier, '') <> ''
+                        OR COALESCE(t.bus_frequency_tier, '') <> ''
+                        OR t.has_any_bus_service
+                        OR t.has_daily_bus_service
+                      )
+                    """,
+                    {"build_key": str(build_key)},
+                ).scalar_one()
+            return int(value or 0)
+        except Exception:
+            return 0
+
     @staticmethod
     def _resolution_list(values: Any, fallback: list[int]) -> list[int]:
         if not isinstance(values, list):
@@ -175,6 +253,21 @@ class RuntimeService:
                     "Using latest completed build_manifest for this extract path because "
                     f"{RUNTIME_STALE_FALLBACK_ENV}=1; config hash does not match current runtime config."
                 )
+                summary = manifest.get("summary_json", {}) or {}
+                transport_ready = self._summary_has_transport_counts(summary)
+                if not transport_ready:
+                    transport_ready = self._transport_quality_row_count(
+                        str(manifest.get("build_key") or "")
+                    ) > 0
+                if not transport_ready:
+                    replacement = self._load_latest_transport_ready_manifest_for_extract()
+                    if replacement is not None and replacement.get("build_key") != manifest.get("build_key"):
+                        manifest = replacement
+                        runtime_warning = (
+                            "Using latest transport-ready completed build_manifest for this extract path "
+                            f"because {RUNTIME_STALE_FALLBACK_ENV}=1 and the newest completed manifest "
+                            "lacks GTFS transport-reality summary coverage."
+                        )
         if manifest is None:
             raise RuntimeError(
                 _missing_precompute_message(
@@ -515,7 +608,7 @@ class RuntimeService:
             "default_zoom": SURFACE_DEFAULT_ZOOM,
             "max_zoom": SURFACE_MAX_ZOOM,
             "fine_surface_enabled": state.fine_surface_enabled,
-            "pmtiles_url": self._pmtiles_url,
+            "pmtiles_url": pmtiles_url_path(state.build_profile),
             "transport_reality_enabled": state.transport_reality_enabled,
             "service_deserts_enabled": state.service_deserts_enabled,
             "transport_reality_download_url": state.transport_reality_download_url,
@@ -571,6 +664,7 @@ class LivabilityHTTPServer(ThreadingHTTPServer):
         index_html: bytes,
         pmtiles_path: Path,
         pmtiles_url_path: str,
+        pmtiles_paths_by_url_path: dict[str, Path] | None = None,
         noise_pmtiles_path: Path | None = None,
         noise_pmtiles_url_path: str | None = None,
     ) -> None:
@@ -580,10 +674,20 @@ class LivabilityHTTPServer(ThreadingHTTPServer):
         self.index_html = index_html
         self.pmtiles_path = pmtiles_path
         self.pmtiles_url_path = str(pmtiles_url_path)
+        self.pmtiles_paths_by_url_path = {
+            str(pmtiles_url_path): pmtiles_path,
+            **{
+                str(url_path): path
+                for url_path, path in (pmtiles_paths_by_url_path or {}).items()
+            },
+        }
         self.noise_pmtiles_path = noise_pmtiles_path
         self.noise_pmtiles_url_path = (
             str(noise_pmtiles_url_path) if noise_pmtiles_url_path else None
         )
+
+    def pmtiles_path_for_url(self, url_path: str) -> Path | None:
+        return self.pmtiles_paths_by_url_path.get(str(url_path))
 
 
 class LivabilityRequestHandler(BaseHTTPRequestHandler):
@@ -612,9 +716,10 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         # MapLibre/PMTiles will send HEAD for the archive on some flows.
         parsed = urlsplit(self.path)
-        if parsed.path == self.livability_server.pmtiles_url_path:
+        pmtiles_path = self.livability_server.pmtiles_path_for_url(parsed.path)
+        if pmtiles_path is not None:
             try:
-                self._serve_pmtiles(self.livability_server.pmtiles_path, head_only=True)
+                self._serve_pmtiles(pmtiles_path, head_only=True)
             except CLIENT_DISCONNECT_ERRORS as exc:
                 self._log_client_disconnect(parsed.path, exc)
             return
@@ -645,8 +750,9 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         if parsed.path == "/exports/transport-reality.zip":
             self._serve_export(EXPORTS_DIR / ZIP_FILENAME)
             return
-        if parsed.path == self.livability_server.pmtiles_url_path:
-            self._serve_pmtiles(self.livability_server.pmtiles_path)
+        pmtiles_path = self.livability_server.pmtiles_path_for_url(parsed.path)
+        if pmtiles_path is not None:
+            self._serve_pmtiles(pmtiles_path)
             return
         if parsed.path == self.livability_server.noise_pmtiles_url_path:
             self._serve_pmtiles(self.livability_server.noise_pmtiles_path)
@@ -863,6 +969,12 @@ def create_http_server(
     normalized_profile = normalize_build_profile(profile)
     resolved_pmtiles_path = pmtiles_path or pmtiles_output_path(normalized_profile)
     resolved_pmtiles_url_path = pmtiles_url_path(normalized_profile)
+    resolved_pmtiles_paths_by_url_path = {
+        pmtiles_url_path(candidate_profile): pmtiles_output_path(candidate_profile)
+        for candidate_profile in ("full", "dev", "test")
+        if pmtiles_output_path(candidate_profile).exists()
+    }
+    resolved_pmtiles_paths_by_url_path[resolved_pmtiles_url_path] = resolved_pmtiles_path
     resolved_noise_pmtiles_path = (
         noise_pmtiles_path or noise_pmtiles_output_path(normalized_profile)
     )
@@ -886,6 +998,7 @@ def create_http_server(
         index_html=index_html,
         pmtiles_path=resolved_pmtiles_path,
         pmtiles_url_path=resolved_pmtiles_url_path,
+        pmtiles_paths_by_url_path=resolved_pmtiles_paths_by_url_path,
         noise_pmtiles_path=resolved_noise_pmtiles_path,
         noise_pmtiles_url_path=resolved_noise_pmtiles_url_path,
     )

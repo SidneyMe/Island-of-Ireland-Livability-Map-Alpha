@@ -56,6 +56,7 @@ function _routeModesText(properties) {
 function _modeTierText(properties) {
   const modes = new Set(_routeModesList(properties));
   for (const mode of TRANSPORT_MODE_ORDER) {
+    if (mode === "bus") continue;
     if (modes.has(mode)) {
       return transportModeLabel(mode);
     }

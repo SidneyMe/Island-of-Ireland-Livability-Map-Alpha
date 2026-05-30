@@ -19,9 +19,10 @@ const TRANSPORT_SUBTIER_LABELS = {
   unscheduled: "Unscheduled"
 };
 
-const TRANSPORT_MODE_ORDER = ["tram", "rail"];
+const TRANSPORT_MODE_ORDER = ["bus", "tram", "rail"];
 
 const TRANSPORT_MODE_LABELS = {
+  bus: "Bus",
   tram: "Tram",
   rail: "Rail"
 };
@@ -76,11 +77,15 @@ function transportModeLabel(value) {
 
 function transportModeOptions(runtime) {
   const counts = _normalizedCounts(runtime && runtime.transport_mode_counts);
+  const flagCounts = _normalizedCounts(runtime && runtime.transport_flag_counts);
   return TRANSPORT_MODE_ORDER.map(function (mode) {
+    const count = mode === "bus"
+      ? Number(flagCounts.has_any_bus_service || 0)
+      : Number(counts[mode] || 0);
     return {
       value: mode,
       label: transportModeLabel(mode),
-      count: Number(counts[mode] || 0)
+      count: count
     };
   });
 }
@@ -119,45 +124,77 @@ function buildTransportLayerFilter(options = {}) {
   const selectedModes = Array.from(options.selectedModes || []);
   const includeUnscheduled = Boolean(options.includeUnscheduled);
   const requireExceptionOnly = Boolean(options.requireExceptionOnly);
-  const clauses = [];
-  const selectedClauses = [];
+  const selectedModeSet = new Set(
+    selectedModes.map(function (value) { return String(value || "").trim(); }).filter(Boolean)
+  );
+  const allKnownModesSelected = (
+    selectedModeSet.size === TRANSPORT_MODE_ORDER.length &&
+    TRANSPORT_MODE_ORDER.every(function (mode) {
+      return selectedModeSet.has(mode);
+    })
+  );
+  const busConstraintClauses = [];
+  const modeBranches = [];
+  function anyEquals(getExpr, selectedValues) {
+    const values = Array.from(selectedValues || [])
+      .map(function (value) { return String(value || "").trim(); })
+      .filter(Boolean);
+    if (!values.length) return null;
+    const equalityClauses = values.map(function (value) {
+      return ["==", getExpr, value];
+    });
+    return equalityClauses.length === 1 ? equalityClauses[0] : ["any", ...equalityClauses];
+  }
 
-  if (selectedSubtiers.length > 0) {
-    selectedClauses.push([
-      "in",
-      ["coalesce", ["get", "bus_service_subtier"], ""],
-      ["literal", selectedSubtiers]
-    ]);
+  const subtierClause = anyEquals(
+    ["coalesce", ["get", "bus_service_subtier"], ""],
+    selectedSubtiers
+  );
+  if (subtierClause) {
+    busConstraintClauses.push(subtierClause);
   }
-  if (selectedBusFrequencies.length > 0) {
-    selectedClauses.push([
-      "in",
-      ["coalesce", ["get", "bus_frequency_tier"], ""],
-      ["literal", selectedBusFrequencies]
-    ]);
+  const frequencyClause = anyEquals(
+    ["coalesce", ["get", "bus_frequency_tier"], ""],
+    selectedBusFrequencies
+  );
+  if (frequencyClause) {
+    busConstraintClauses.push(frequencyClause);
   }
-  selectedModes.forEach(function (mode) {
-    if (!String(mode || "").trim()) return;
-    selectedClauses.push(routeModeTokenFilter(mode));
-  });
-  if (includeUnscheduled) {
-    selectedClauses.push(["==", ["get", "is_unscheduled_stop"], 1]);
-  }
-  if (selectedClauses.length === 1) {
-    clauses.push(selectedClauses[0]);
-  } else if (selectedClauses.length > 1) {
-    clauses.push(["any", ...selectedClauses]);
-  }
-  if (requireExceptionOnly) {
-    clauses.push(["==", ["get", "has_exception_only_service"], 1]);
-  }
-  if (!clauses.length) {
+
+  const busFiltersRequested = busConstraintClauses.length > 0 || includeUnscheduled || requireExceptionOnly;
+  const busSelected = selectedModeSet.has("bus");
+  const railSelected = selectedModeSet.has("rail");
+  const tramSelected = selectedModeSet.has("tram");
+
+  if (allKnownModesSelected && !busFiltersRequested) {
     return null;
   }
-  if (clauses.length === 1) {
-    return clauses[0];
+
+  if (busSelected || (!selectedModeSet.size && busFiltersRequested)) {
+    const busBranch = [["==", ["get", "has_any_bus_service"], 1], ...busConstraintClauses];
+    if (requireExceptionOnly) {
+      busBranch.push(["==", ["get", "has_exception_only_service"], 1]);
+    }
+    const busBranches = [busBranch.length === 1 ? busBranch[0] : ["all", ...busBranch]];
+    if (includeUnscheduled) {
+      busBranches.push(["==", ["get", "is_unscheduled_stop"], 1]);
+    }
+    modeBranches.push(busBranches.length === 1 ? busBranches[0] : ["any", ...busBranches]);
   }
-  return ["all", ...clauses];
+  if (railSelected) {
+    modeBranches.push(routeModeTokenFilter("rail"));
+  }
+  if (tramSelected) {
+    modeBranches.push(routeModeTokenFilter("tram"));
+  }
+
+  if (!modeBranches.length) {
+    return null;
+  }
+  if (modeBranches.length === 1) {
+    return modeBranches[0];
+  }
+  return ["any", ...modeBranches];
 }
 
 export {

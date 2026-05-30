@@ -4,6 +4,49 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-31 - Transport selector PMTiles profile compatibility
+
+### Fixed
+
+- Restored transport selector behavior when runtime fallback selects a dev/test transport build but the local server was still advertising or serving the full PMTiles archive.
+- `/api/runtime` now reports the PMTiles URL for the selected manifest build profile, so dev fallback runtime metadata is paired with `/tiles/livability-dev.pmtiles` instead of an older full archive.
+- The local server now serves existing full, dev, and test PMTiles routes, allowing profile-specific runtime payloads to load their matching archive.
+- Transport mode filters now use explicit bus, rail, and tram branches; the default all-mode state still applies no vector filter so older PMTiles can show stops by default.
+- The `Unscheduled` bus selector now adds unscheduled stops as an alternate match instead of requiring scheduled bus service at the same time.
+
+### Notes
+
+- Existing running local server processes must be restarted to pick up the server-side PMTiles route/runtime fix.
+- Precise transport selector narrowing depends on loading a PMTiles archive with the newer transport fields.
+
+### Scoring logic
+
+- No scoring logic change.
+
+## 2026-05-26 - Automatic public static GTFS feed updater
+
+### Added
+
+- Automatic public static GTFS downloader/cache module (`transit/gtfs_download.py`) for:
+  - `tfi_gtfs_all` -> `https://www.transportforireland.ie/transitData/Data/GTFS_All.zip`
+  - `tfi_gtfs_realtime_static` -> `https://www.transportforireland.ie/transitData/Data/GTFS_Realtime.zip`
+- Cache-aware GTFS update flow with feed manifests, SHA256 fingerprints, conditional HTTP requests (`If-None-Match`, `If-Modified-Since`), and per-feed download archives (`downloads/<sha>.zip`).
+- New CLI path `python main.py --refresh-gtfs` for feed refresh only (no transit rebuild).
+- New transit flags:
+  - `--auto-refresh-gtfs` (with `--refresh-transit`)
+  - `--force-gtfs-refresh` (with `--refresh-gtfs` or `--refresh-transit`)
+- Combined GTFS feed fingerprinting in transit state so transit refresh can skip when used feed content is unchanged.
+
+### Notes
+
+- Uses public static ZIP downloads only.
+- Does not use GTFS-Realtime API/protobuf endpoints or developer API keys.
+- App startup/serve path does not auto-download remote GTFS.
+
+### Scoring logic
+
+- No scoring logic change.
+
 ## 2026-05-21 - Official-derived noise overlay Phase F QA/polish
 
 ### Changed

@@ -71,14 +71,16 @@ class TransitRefreshRunnerTests(TestCase):
             mock.sentinel.engine,
             import_fingerprint="import-fingerprint-123",
             force_refresh=False,
-            refresh_download=True,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
             progress_cb=tracker.phase_callback.return_value,
         )
         ensure_transit_mock.assert_called_once_with(
             mock.sentinel.engine,
             import_fingerprint="import-fingerprint-123",
             force_refresh=False,
-            refresh_download=False,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
             progress_cb=tracker.phase_callback.return_value,
             reality_state=reality_state,
         )
@@ -168,7 +170,8 @@ class TransitRefreshRunnerTests(TestCase):
         ensure_transit_mock.assert_called_once_with(
             mock.sentinel.engine,
             import_fingerprint="import-fingerprint-123",
-            refresh_download=False,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
             force_refresh=False,
             progress_cb=tracker.phase_callback.return_value,
             reality_state=reality_state,
@@ -262,8 +265,57 @@ class TransitRefreshRunnerTests(TestCase):
         ensure_transit_mock.assert_called_once_with(
             mock.sentinel.engine,
             import_fingerprint="import-fingerprint-123",
-            refresh_download=False,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
             force_refresh=False,
             progress_cb=tracker.phase_callback.return_value,
             reality_state=reality_state,
+        )
+
+    def test_refresh_transit_passes_force_gtfs_refresh_to_preflight(self) -> None:
+        source_state = SimpleNamespace(import_fingerprint="import-fingerprint-123")
+        reality_state = SimpleNamespace(reality_fingerprint="reality-123")
+        tracker = _tracker_mock()
+
+        with (
+            mock.patch.object(
+                transit_refresh_runner,
+                "build_engine",
+                return_value=mock.sentinel.engine,
+            ),
+            mock.patch.object(transit_refresh_runner, "ensure_database_ready"),
+            mock.patch.object(
+                transit_refresh_runner,
+                "resolve_source_state",
+                return_value=source_state,
+            ),
+            mock.patch.object(
+                transit_refresh_runner,
+                "_preflight_transit_rebuild",
+                return_value=(reality_state, False),
+            ) as preflight_mock,
+            mock.patch.object(
+                transit_refresh_runner,
+                "ensure_transit_reality",
+                return_value=reality_state,
+            ),
+            mock.patch.object(
+                transit_refresh_runner,
+                "PrecomputeProgressTracker",
+                return_value=tracker,
+            ),
+        ):
+            result = transit_refresh_runner.refresh_transit(
+                auto_refresh_gtfs=True,
+                force_gtfs_refresh=True,
+            )
+
+        self.assertEqual(result, "reality-123")
+        preflight_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            import_fingerprint="import-fingerprint-123",
+            force_refresh=False,
+            auto_refresh_gtfs=True,
+            force_gtfs_refresh=True,
+            progress_cb=tracker.phase_callback.return_value,
         )

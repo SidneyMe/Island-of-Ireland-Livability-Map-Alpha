@@ -324,6 +324,14 @@ body.panel-hidden #control-panel {
     opacity: 0.62;
 }
 
+.transport-subgroup {
+    margin: 0;
+}
+
+.transport-subgroup + .transport-subgroup {
+    margin-top: 6px;
+}
+
 .amenity-tier-summary {
     display: flex;
     justify-content: space-between;

@@ -12,6 +12,7 @@ from db_postgis import build_engine, ensure_database_ready, import_payload_ready
 from local_osm_import import ensure_local_osm_import, resolve_source_state
 from progress_tracker import PrecomputeProgressTracker
 from transit import ensure_transit_reality, transit_reality_refresh_required
+from transit.sources import describe_gtfs_feeds, refresh_gtfs_feeds
 from walkgraph_support import ensure_walkgraph_subcommand_available
 
 
@@ -29,13 +30,15 @@ def _preflight_transit_rebuild(
     *,
     import_fingerprint: str | None = None,
     force_refresh: bool = False,
-    refresh_download: bool = False,
+    auto_refresh_gtfs: bool = False,
+    force_gtfs_refresh: bool = False,
     progress_cb=None,
 ) -> tuple[Any, bool]:
     reality_state, refresh_required = transit_reality_refresh_required(
         engine,
         import_fingerprint=import_fingerprint,
-        refresh_download=refresh_download,
+        auto_refresh_gtfs=auto_refresh_gtfs,
+        force_gtfs_refresh=force_gtfs_refresh,
         force_refresh=force_refresh,
         progress_cb=progress_cb,
     )
@@ -57,10 +60,40 @@ def _load_study_area_wgs84(profile: str, tracker: PrecomputeProgressTracker):
     return study_area_wgs84
 
 
+def refresh_gtfs(
+    *,
+    force_refresh: bool = False,
+    profile: str | None = None,
+) -> list[Any]:
+    normalized_profile = normalize_build_profile(profile)
+    del normalized_profile
+    tracker = PrecomputeProgressTracker(CACHE_DIR / "precompute_timing_stats.json")
+    tracker.start_phase("transit", detail="checking GTFS feed availability and cache state")
+    transit_progress_cb = tracker.phase_callback("transit")
+    results = refresh_gtfs_feeds(force=force_refresh, progress_cb=transit_progress_cb)
+    tracker.finish_phase("transit", "completed", detail="GTFS static feed cache updated")
+    return results
+
+
+def gtfs_status(
+    *,
+    force_refresh: bool = False,
+    profile: str | None = None,
+) -> list[Any]:
+    normalized_profile = normalize_build_profile(profile)
+    del normalized_profile
+    tracker = PrecomputeProgressTracker(CACHE_DIR / "precompute_timing_stats.json")
+    tracker.start_phase("transit", detail="checking GTFS cache status")
+    statuses = describe_gtfs_feeds(force=force_refresh)
+    tracker.finish_phase("transit", "completed", detail="GTFS cache status collected")
+    return statuses
+
+
 def refresh_transit(
     force_refresh: bool = False,
     *,
-    refresh_download: bool = True,
+    auto_refresh_gtfs: bool = False,
+    force_gtfs_refresh: bool = False,
     profile: str | None = None,
 ) -> str:
     normalized_profile = normalize_build_profile(profile)
@@ -83,7 +116,8 @@ def refresh_transit(
         engine,
         import_fingerprint=source_state.import_fingerprint,
         force_refresh=force_refresh,
-        refresh_download=refresh_download,
+        auto_refresh_gtfs=auto_refresh_gtfs,
+        force_gtfs_refresh=force_gtfs_refresh,
         progress_cb=transit_progress_cb,
     )
     if not refresh_required:
@@ -91,7 +125,8 @@ def refresh_transit(
             engine,
             import_fingerprint=source_state.import_fingerprint,
             force_refresh=False,
-            refresh_download=False,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
             progress_cb=transit_progress_cb,
             reality_state=reality_state,
         )
@@ -123,7 +158,8 @@ def refresh_transit(
     transit_state = ensure_transit_reality(
         engine,
         import_fingerprint=source_state.import_fingerprint,
-        refresh_download=False,
+        auto_refresh_gtfs=False,
+        force_gtfs_refresh=False,
         force_refresh=force_refresh,
         progress_cb=transit_progress_cb,
         reality_state=reality_state,

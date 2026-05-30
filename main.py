@@ -16,6 +16,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Refresh the raw local OSM amenity import without running full scoring.",
     )
     parser.add_argument(
+        "--refresh-gtfs",
+        action="store_true",
+        help="Refresh cached public static GTFS ZIP feeds only (no transit rebuild).",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="With --refresh-gtfs, print GTFS cache freshness diagnostics without downloading.",
+    )
+    parser.add_argument(
+        "--auto-refresh-gtfs",
+        action="store_true",
+        help="With --refresh-transit, refresh GTFS cache if feeds are stale/missing before transit processing.",
+    )
+    parser.add_argument(
+        "--force-gtfs-refresh",
+        action="store_true",
+        help="Force GTFS ZIP re-download before --refresh-gtfs or --refresh-transit.",
+    )
+    parser.add_argument(
         "--refresh-transit",
         action="store_true",
         help="Refresh GTFS-derived transit reality, reusing unchanged manifests when possible.",
@@ -193,8 +213,15 @@ def main() -> int:
     if args.auto_refresh_import and not precompute_requested:
         parser.error("--auto-refresh-import requires --precompute, --precompute-dev, or --precompute-test")
 
+    if args.auto_refresh_gtfs and not args.refresh_transit:
+        parser.error("--auto-refresh-gtfs requires --refresh-transit")
+    if args.force_gtfs_refresh and not (args.refresh_gtfs or args.refresh_transit):
+        parser.error("--force-gtfs-refresh requires --refresh-gtfs or --refresh-transit")
+    if args.status and not args.refresh_gtfs:
+        parser.error("--status requires --refresh-gtfs")
+
     run_render = serve_full_requested or serve_dev_requested or serve_test_requested or (
-        not precompute_requested and not args.refresh_import and not args.refresh_transit
+        not precompute_requested and not args.refresh_import and not args.refresh_gtfs and not args.refresh_transit
     )
     serve_profile = "dev" if serve_dev_requested else "test" if serve_test_requested else "full"
 
@@ -203,13 +230,55 @@ def main() -> int:
             from precompute import refresh_local_import as _refresh_local_import
 
             _refresh_local_import()
+        if args.refresh_gtfs:
+            if args.status:
+                print("GTFS static feed status", flush=True)
+                from transit_refresh_runner import gtfs_status as _gtfs_status
+
+                statuses = _gtfs_status(force_refresh=args.force_gtfs_refresh)
+                for status in statuses:
+                    print(
+                        "GTFS feed "
+                        f"{status.feed_id}: "
+                        f"path={status.path} "
+                        f"sha256={status.sha256 or 'unknown'} "
+                        f"downloaded_at_utc={status.downloaded_at_utc or 'unknown'} "
+                        f"checked_at_utc={status.checked_at_utc or 'unknown'} "
+                        f"etag={status.etag or 'none'} "
+                        f"last_modified={status.last_modified or 'none'} "
+                        f"calendar_min_date={status.calendar_min_date or 'unknown'} "
+                        f"calendar_max_date={status.calendar_max_date or 'unknown'} "
+                        f"days_until_calendar_end={status.days_until_calendar_end if status.days_until_calendar_end is not None else 'unknown'} "
+                        f"cache_age_hours={f'{status.cache_age_hours:.2f}' if status.cache_age_hours is not None else 'unknown'} "
+                        f"freshness_decision={status.freshness_decision} "
+                        f"network_request={status.network_request}",
+                        flush=True,
+                    )
+            else:
+                print("Starting GTFS static feed refresh...", flush=True)
+                from transit_refresh_runner import refresh_gtfs as _refresh_gtfs
+
+                results = _refresh_gtfs(force_refresh=args.force_gtfs_refresh)
+                for result in results:
+                    print(
+                        "GTFS feed "
+                        f"{result.feed_id}: changed={result.changed} "
+                        f"sha256={result.sha256 or 'unknown'} "
+                        f"size={result.content_length or 0} "
+                        f"valid={result.zip_valid} "
+                        f"calendar={result.calendar_min_date or 'unknown'}..{result.calendar_max_date or 'unknown'} "
+                        f"path={result.path}",
+                        flush=True,
+                    )
+                print("GTFS static feed refresh complete", flush=True)
         if args.refresh_transit:
             print("Starting GTFS transit refresh...", flush=True)
             from transit_refresh_runner import refresh_transit as _refresh_transit
 
             reality_fingerprint = _refresh_transit(
                 force_refresh=args.force_transit_refresh,
-                refresh_download=True,
+                auto_refresh_gtfs=args.auto_refresh_gtfs or args.force_gtfs_refresh,
+                force_gtfs_refresh=args.force_gtfs_refresh,
             )
             print(
                 f"GTFS transit refresh complete -> {reality_fingerprint}",

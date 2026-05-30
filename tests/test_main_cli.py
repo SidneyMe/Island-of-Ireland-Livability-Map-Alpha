@@ -23,6 +23,48 @@ class MainCliTests(TestCase):
             stderr.getvalue(),
         )
 
+    def test_auto_refresh_gtfs_requires_refresh_transit(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--auto-refresh-gtfs"]),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--auto-refresh-gtfs requires --refresh-transit",
+            stderr.getvalue(),
+        )
+
+    def test_force_gtfs_refresh_requires_gtfs_or_transit_refresh(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--force-gtfs-refresh"]),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--force-gtfs-refresh requires --refresh-gtfs or --refresh-transit",
+            stderr.getvalue(),
+        )
+
+    def test_status_requires_refresh_gtfs(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--status"]),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--status requires --refresh-gtfs",
+            stderr.getvalue(),
+        )
+
     def test_force_precompute_requires_precompute(self) -> None:
         with (
             mock.patch.object(sys, "argv", ["main.py", "--force-precompute"]),
@@ -95,6 +137,32 @@ class MainCliTests(TestCase):
             host=main.DEFAULT_SERVER_HOST,
             port=main.DEFAULT_SERVER_PORT,
         )
+
+    def test_serve_never_triggers_gtfs_refresh(self) -> None:
+        render_mock = mock.Mock(return_value="http://127.0.0.1:8000/")
+        fake_render_module = SimpleNamespace(run_render_from_db=render_mock)
+        refresh_transit_mock = mock.Mock(side_effect=AssertionError("should not be called"))
+        refresh_gtfs_mock = mock.Mock(side_effect=AssertionError("should not be called"))
+        fake_runner_module = SimpleNamespace(
+            refresh_transit=refresh_transit_mock,
+            refresh_gtfs=refresh_gtfs_mock,
+        )
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--serve"]),
+            mock.patch.dict(
+                sys.modules,
+                {
+                    "render_from_db": fake_render_module,
+                    "transit_refresh_runner": fake_runner_module,
+                },
+            ),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        refresh_transit_mock.assert_not_called()
+        refresh_gtfs_mock.assert_not_called()
 
     def test_precompute_dev_dispatches_dev_profile(self) -> None:
         precompute_mock = mock.Mock(return_value="build-key-dev")
@@ -347,7 +415,8 @@ class MainCliTests(TestCase):
         self.assertEqual(exit_code, 0)
         refresh_transit_mock.assert_called_once_with(
             force_refresh=False,
-            refresh_download=True,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
         )
         self.assertEqual(
             print_mock.call_args_list,
@@ -375,7 +444,8 @@ class MainCliTests(TestCase):
         self.assertEqual(exit_code, 0)
         refresh_transit_mock.assert_called_once_with(
             force_refresh=True,
-            refresh_download=True,
+            auto_refresh_gtfs=False,
+            force_gtfs_refresh=False,
         )
         self.assertEqual(
             print_mock.call_args_list,
@@ -383,6 +453,100 @@ class MainCliTests(TestCase):
                 mock.call("Starting GTFS transit refresh...", flush=True),
                 mock.call("GTFS transit refresh complete -> transit-reality-123", flush=True),
             ],
+        )
+
+    def test_refresh_gtfs_dispatches_gtfs_refresh_runner(self) -> None:
+        refresh_gtfs_mock = mock.Mock(return_value=[])
+        fake_runner_module = SimpleNamespace(refresh_gtfs=refresh_gtfs_mock)
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--refresh-gtfs"]),
+            mock.patch.dict(sys.modules, {"transit_refresh_runner": fake_runner_module}),
+            mock.patch("builtins.print") as print_mock,
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        refresh_gtfs_mock.assert_called_once_with(force_refresh=False)
+        self.assertEqual(
+            print_mock.call_args_list,
+            [
+                mock.call("Starting GTFS static feed refresh...", flush=True),
+                mock.call("GTFS static feed refresh complete", flush=True),
+            ],
+        )
+
+    def test_refresh_gtfs_status_dispatches_status_runner(self) -> None:
+        status_row = SimpleNamespace(
+            feed_id="tfi_gtfs_all",
+            path="/tmp/current.zip",
+            sha256="abc",
+            downloaded_at_utc="2026-05-26T00:00:00Z",
+            checked_at_utc="2026-05-26T01:00:00Z",
+            etag="etag",
+            last_modified="Tue, 26 May 2026 10:00:00 GMT",
+            calendar_min_date="20260501",
+            calendar_max_date="20261231",
+            days_until_calendar_end=200,
+            cache_age_hours=1.5,
+            freshness_decision="fresh",
+            network_request=False,
+        )
+        gtfs_status_mock = mock.Mock(return_value=[status_row])
+        fake_runner_module = SimpleNamespace(gtfs_status=gtfs_status_mock)
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--refresh-gtfs", "--status"]),
+            mock.patch.dict(sys.modules, {"transit_refresh_runner": fake_runner_module}),
+            mock.patch("builtins.print") as print_mock,
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        gtfs_status_mock.assert_called_once_with(force_refresh=False)
+        self.assertEqual(
+            print_mock.call_args_list[0],
+            mock.call("GTFS static feed status", flush=True),
+        )
+
+    def test_refresh_transit_auto_refresh_gtfs_passes_flags(self) -> None:
+        refresh_transit_mock = mock.Mock(return_value="transit-reality-123")
+        fake_runner_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--refresh-transit", "--auto-refresh-gtfs"]),
+            mock.patch.dict(sys.modules, {"transit_refresh_runner": fake_runner_module}),
+            mock.patch("builtins.print"),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        refresh_transit_mock.assert_called_once_with(
+            force_refresh=False,
+            auto_refresh_gtfs=True,
+            force_gtfs_refresh=False,
+        )
+
+    def test_refresh_transit_force_gtfs_refresh_passes_flags(self) -> None:
+        refresh_transit_mock = mock.Mock(return_value="transit-reality-123")
+        fake_runner_module = SimpleNamespace(refresh_transit=refresh_transit_mock)
+
+        with (
+            mock.patch.object(
+                sys,
+                "argv",
+                ["main.py", "--refresh-transit", "--auto-refresh-gtfs", "--force-gtfs-refresh"],
+            ),
+            mock.patch.dict(sys.modules, {"transit_refresh_runner": fake_runner_module}),
+            mock.patch("builtins.print"),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        refresh_transit_mock.assert_called_once_with(
+            force_refresh=False,
+            auto_refresh_gtfs=True,
+            force_gtfs_refresh=True,
         )
 
     def test_render_dev_alias_dispatches_dev_profile(self) -> None:

@@ -63,7 +63,9 @@ maplibregl.addProtocol("pmtiles", protocol.tile);
 
 const MIN_ZOOM = 5;
 const DEBUG_GRID_QUERY_PARAM = "debug-grid";
-const RUNTIME_FETCH_TIMEOUT_MS = 10000;
+const RUNTIME_FETCH_TIMEOUT_MS = 45000;
+const RUNTIME_FETCH_RETRY_DELAY_MS = 1200;
+const RUNTIME_FETCH_MAX_ATTEMPTS = 2;
 const INSPECT_FETCH_TIMEOUT_MS = 15000;
 const DEBUG_GRID_ENABLED = debugGridEnabledFromUrl(window.location.href, {
   paramName: DEBUG_GRID_QUERY_PARAM
@@ -79,10 +81,8 @@ const elements = {
   amenityControls: document.getElementById("amenity-controls"),
   amenityNote: document.getElementById("amenity-note"),
   transitControls: document.getElementById("transit-controls"),
-  transitNote: document.getElementById("transit-note"),
   noiseControls: document.getElementById("noise-controls"),
   noiseNote: document.getElementById("noise-note"),
-  transportRealityDownload: document.getElementById("transport-reality-download"),
   gridToggle: document.getElementById("grid-toggle"),
   map: document.getElementById("map"),
   mapStage: document.getElementById("map-stage"),
@@ -127,7 +127,7 @@ const state = {
   transportRealityVisible: false,
   selectedTransportSubtiers: new Set(),
   selectedTransportBusFrequencies: new Set(),
-  selectedTransportModes: new Set(),
+  selectedTransportModes: new Set(["bus", "rail", "tram"]),
   transportIncludeUnscheduled: false,
   transportRequireExceptionOnly: false,
   serviceDesertsVisible: false,
@@ -189,6 +189,24 @@ function updateAmenityNote() {
   elements.amenityNote.textContent = count
     ? count + " layer" + (count === 1 ? "" : "s") + " on"
     : "Off until enabled";
+}
+
+function transportMappedCount(amenityCounts) {
+  const legacyAmenityCount = Number(amenityCounts && amenityCounts.transport);
+  if (Number.isFinite(legacyAmenityCount) && legacyAmenityCount > 0) {
+    return legacyAmenityCount;
+  }
+  const subtierCounts = state.runtime && state.runtime.transport_subtier_counts;
+  if (!subtierCounts || typeof subtierCounts !== "object") {
+    return 0;
+  }
+  return Object.values(subtierCounts).reduce(function (sum, value) {
+    const count = Number(value);
+    if (!Number.isFinite(count) || count < 0) {
+      return sum;
+    }
+    return sum + count;
+  }, 0);
 }
 
 function selectedAmenityTiers(category) {
@@ -535,9 +553,272 @@ function buildAmenityControls() {
   elements.amenityControls.replaceChildren();
   const colors = state.runtime.category_colors || {};
   const counts = state.runtime.amenity_counts || {};
+  let transportCardAdded = false;
+
+  function appendTransportControlCard(color) {
+    const card = document.createElement("div");
+    card.className = "amenity-control-card";
+
+    const overlayLabel = document.createElement("label");
+    overlayLabel.className = "toggle-row";
+    overlayLabel.htmlFor = "transport-reality-toggle";
+
+    const overlayTextWrap = document.createElement("span");
+    overlayTextWrap.className = "toggle-label";
+
+    const overlayTitle = document.createElement("strong");
+    overlayTitle.textContent = "Transport";
+    if (color) {
+      overlayTitle.style.color = color;
+    }
+
+    const overlaySubtitle = document.createElement("span");
+    overlaySubtitle.textContent = String(transportMappedCount(counts)) + " mapped";
+
+    const overlayInput = document.createElement("input");
+    overlayInput.type = "checkbox";
+    overlayInput.id = "transport-reality-toggle";
+    overlayInput.checked = state.transportRealityVisible;
+    overlayInput.disabled = !state.runtime.transport_reality_enabled;
+
+    overlayTextWrap.appendChild(overlayTitle);
+    overlayTextWrap.appendChild(overlaySubtitle);
+    overlayLabel.appendChild(overlayTextWrap);
+    overlayLabel.appendChild(overlayInput);
+    card.appendChild(overlayLabel);
+
+    if (!state.runtime.transport_reality_enabled) {
+      elements.amenityControls.appendChild(card);
+      return;
+    }
+
+    const tierDetails = document.createElement("details");
+    tierDetails.className = "amenity-tier-details";
+
+    const tierSummary = document.createElement("summary");
+    tierSummary.className = "amenity-tier-summary";
+
+    const tierSummaryLabel = document.createElement("span");
+    tierSummaryLabel.textContent = "Sub-tiers";
+
+    const tierMeta = document.createElement("span");
+    tierMeta.className = "amenity-tier-meta";
+    tierMeta.textContent = transportFilterSummary();
+
+    tierSummary.appendChild(tierSummaryLabel);
+    tierSummary.appendChild(tierMeta);
+    tierDetails.appendChild(tierSummary);
+
+    const tierList = document.createElement("div");
+    tierList.className = "amenity-tier-list";
+
+    const tierRows = [];
+    const groupContainers = [];
+    const flagCounts = transportFlagCounts(state.runtime);
+
+    function appendTransportRow(targetContainer, entry) {
+      const row = document.createElement("label");
+      row.className = "amenity-tier-row";
+      row.htmlFor = entry.id;
+
+      const textWrap = document.createElement("span");
+      textWrap.className = "toggle-label";
+
+      const title = document.createElement("strong");
+      title.textContent = entry.label;
+
+      const subtitle = document.createElement("span");
+      subtitle.textContent = String(entry.count || 0) + " mapped";
+
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.id = entry.id;
+      input.addEventListener("change", function () {
+        if (entry.type === "subtier") {
+          if (input.checked) {
+            state.selectedTransportSubtiers.add(entry.value);
+          } else {
+            state.selectedTransportSubtiers.delete(entry.value);
+          }
+        } else if (entry.type === "bus_frequency") {
+          if (input.checked) {
+            state.selectedTransportBusFrequencies.add(entry.value);
+          } else {
+            state.selectedTransportBusFrequencies.delete(entry.value);
+          }
+        } else if (entry.type === "mode") {
+          if (input.checked) {
+            state.selectedTransportModes.add(entry.value);
+          } else {
+            state.selectedTransportModes.delete(entry.value);
+          }
+        } else if (entry.type === "flag") {
+          if (entry.value === "unscheduled") {
+            state.transportIncludeUnscheduled = input.checked;
+          } else if (entry.value === "exception_only") {
+            state.transportRequireExceptionOnly = input.checked;
+          }
+        }
+        syncTransportInputs();
+        applyTransportRealityFilter();
+      });
+
+      tierRows.push({ type: entry.type, value: entry.value, input: input });
+      textWrap.appendChild(title);
+      textWrap.appendChild(subtitle);
+      row.appendChild(textWrap);
+      row.appendChild(input);
+      targetContainer.appendChild(row);
+    }
+
+    function syncTransportInputs() {
+      const busModeEnabled = state.selectedTransportModes.has("bus");
+      tierRows.forEach(function (entry) {
+        let isChecked = false;
+        if (entry.type === "subtier") {
+          isChecked = state.selectedTransportSubtiers.has(entry.value);
+        } else if (entry.type === "bus_frequency") {
+          isChecked = state.selectedTransportBusFrequencies.has(entry.value);
+        } else if (entry.type === "mode") {
+          isChecked = state.selectedTransportModes.has(entry.value);
+        } else if (entry.value === "unscheduled") {
+          isChecked = state.transportIncludeUnscheduled;
+        } else {
+          isChecked = state.transportRequireExceptionOnly;
+        }
+        entry.input.checked = isChecked;
+        const isBusSubFilter = (
+          entry.type === "subtier" ||
+          entry.type === "bus_frequency" ||
+          entry.type === "flag"
+        );
+        entry.input.disabled = !state.transportRealityVisible || (isBusSubFilter && !busModeEnabled);
+      });
+      tierMeta.textContent = transportFilterSummary();
+      tierDetails.classList.toggle("is-disabled", !state.transportRealityVisible);
+      groupContainers.forEach(function (container) {
+        container.classList.toggle("is-disabled", !state.transportRealityVisible);
+      });
+      busDetails.classList.toggle("is-disabled", !state.transportRealityVisible || !busModeEnabled);
+      if (!state.transportRealityVisible) {
+        tierDetails.open = false;
+      }
+    }
+
+    const transportDetails = document.createElement("details");
+    transportDetails.className = "amenity-tier-details transport-subgroup";
+    const transportSummary = document.createElement("summary");
+    transportSummary.className = "amenity-tier-summary";
+    transportSummary.appendChild(document.createTextNode("Transport"));
+    transportDetails.appendChild(transportSummary);
+    const transportList = document.createElement("div");
+    transportList.className = "amenity-tier-list";
+    transportDetails.appendChild(transportList);
+    tierList.appendChild(transportDetails);
+    groupContainers.push(transportDetails);
+
+    const busDetails = document.createElement("details");
+    busDetails.className = "amenity-tier-details transport-subgroup";
+    const busSummary = document.createElement("summary");
+    busSummary.className = "amenity-tier-summary";
+    busSummary.appendChild(document.createTextNode("Bus"));
+    busDetails.appendChild(busSummary);
+    const busList = document.createElement("div");
+    busList.className = "amenity-tier-list";
+    busDetails.appendChild(busList);
+    tierList.appendChild(busDetails);
+    groupContainers.push(busDetails);
+
+    const scheduleDetails = document.createElement("details");
+    scheduleDetails.className = "amenity-tier-details transport-subgroup";
+    const scheduleSummary = document.createElement("summary");
+    scheduleSummary.className = "amenity-tier-summary";
+    scheduleSummary.appendChild(document.createTextNode("Schedule"));
+    scheduleDetails.appendChild(scheduleSummary);
+    const scheduleList = document.createElement("div");
+    scheduleList.className = "amenity-tier-list";
+    scheduleDetails.appendChild(scheduleList);
+    busList.appendChild(scheduleDetails);
+    groupContainers.push(scheduleDetails);
+
+    const frequencyDetails = document.createElement("details");
+    frequencyDetails.className = "amenity-tier-details transport-subgroup";
+    const frequencySummary = document.createElement("summary");
+    frequencySummary.className = "amenity-tier-summary";
+    frequencySummary.appendChild(document.createTextNode("Frequency"));
+    frequencyDetails.appendChild(frequencySummary);
+    const frequencyList = document.createElement("div");
+    frequencyList.className = "amenity-tier-list";
+    frequencyDetails.appendChild(frequencyList);
+    busList.appendChild(frequencyDetails);
+    groupContainers.push(frequencyDetails);
+
+    transportTierOptions(state.runtime).forEach(function (option) {
+      appendTransportRow(scheduleList, {
+        type: "subtier",
+        value: option.value,
+        label: option.label,
+        count: option.count,
+        id: "transport-tier-" + option.value
+      });
+    });
+
+    appendTransportRow(scheduleList, {
+      type: "flag",
+      value: "unscheduled",
+      label: "Unscheduled",
+      count: Number(flagCounts.is_unscheduled_stop || 0),
+      id: "transport-flag-unscheduled"
+    });
+    appendTransportRow(scheduleList, {
+      type: "flag",
+      value: "exception_only",
+      label: "Has calendar_dates-only bus service",
+      count: Number(flagCounts.has_exception_only_service || 0),
+      id: "transport-flag-exception_only"
+    });
+
+    transportBusFrequencyOptions(state.runtime).forEach(function (option) {
+      appendTransportRow(frequencyList, {
+        type: "bus_frequency",
+        value: option.value,
+        label: option.label,
+        count: option.count,
+        id: "transport-bus-frequency-" + option.value
+      });
+    });
+
+    transportModeOptions(state.runtime).forEach(function (option) {
+      appendTransportRow(transportList, {
+        type: "mode",
+        value: option.value,
+        label: option.label,
+        count: option.count,
+        id: "transport-mode-" + option.value
+      });
+    });
+
+    tierDetails.appendChild(tierList);
+    card.appendChild(tierDetails);
+
+    overlayInput.addEventListener("change", function () {
+      state.transportRealityVisible = overlayInput.checked;
+      syncTransportInputs();
+      applyTransportRealityVisibility();
+    });
+
+    syncTransportInputs();
+    elements.amenityControls.appendChild(card);
+  }
+
   Object.keys(colors)
     .sort()
     .forEach(function (category) {
+      if (category === "transport") {
+        appendTransportControlCard(colors[category]);
+        transportCardAdded = true;
+        return;
+      }
       const tierOptions = tierOptionsForCategory(state.runtime, category);
       if (tierOptions.length && !state.enabledAmenityTiers.has(category)) {
         state.enabledAmenityTiers.set(category, new Set(tierOptions));
@@ -672,6 +953,9 @@ function buildAmenityControls() {
 
       elements.amenityControls.appendChild(card);
     });
+  if (!transportCardAdded && state.runtime.transport_reality_enabled) {
+    appendTransportControlCard("");
+  }
   updateAmenityNote();
 }
 
@@ -878,250 +1162,8 @@ function buildNoiseControls() {
 }
 
 function buildTransitControls() {
+  if (!elements.transitControls) return;
   elements.transitControls.replaceChildren();
-  if (state.runtime.transport_reality_enabled) {
-    const overlayLabel = document.createElement("label");
-    overlayLabel.className = "toggle-row";
-    overlayLabel.htmlFor = "transport-reality-toggle";
-
-    const overlayTextWrap = document.createElement("span");
-    overlayTextWrap.className = "toggle-label";
-
-    const overlayTitle = document.createElement("strong");
-    overlayTitle.textContent = "Show public transport tiers";
-
-    const overlaySubtitle = document.createElement("span");
-    overlaySubtitle.textContent = "GTFS weekly service and mode view";
-
-    const overlayInput = document.createElement("input");
-    overlayInput.type = "checkbox";
-    overlayInput.id = "transport-reality-toggle";
-    overlayInput.checked = state.transportRealityVisible;
-
-    overlayTextWrap.appendChild(overlayTitle);
-    overlayTextWrap.appendChild(overlaySubtitle);
-    overlayLabel.appendChild(overlayTextWrap);
-    overlayLabel.appendChild(overlayInput);
-    elements.transitControls.appendChild(overlayLabel);
-
-    const tierDetails = document.createElement("details");
-    tierDetails.className = "amenity-tier-details";
-
-    const tierSummary = document.createElement("summary");
-    tierSummary.className = "amenity-tier-summary";
-
-    const tierSummaryLabel = document.createElement("span");
-    tierSummaryLabel.textContent = "Public transport filters";
-
-    const tierMeta = document.createElement("span");
-    tierMeta.className = "amenity-tier-meta";
-    tierMeta.textContent = transportFilterSummary();
-
-    tierSummary.appendChild(tierSummaryLabel);
-    tierSummary.appendChild(tierMeta);
-    tierDetails.appendChild(tierSummary);
-
-    const tierList = document.createElement("div");
-    tierList.className = "amenity-tier-list";
-
-    const tierRows = [];
-    const flagCounts = transportFlagCounts(state.runtime);
-
-    function syncTransportInputs() {
-      tierRows.forEach(function (entry) {
-        let isChecked = false;
-        if (entry.type === "subtier") {
-          isChecked = state.selectedTransportSubtiers.has(entry.value);
-        } else if (entry.type === "bus_frequency") {
-          isChecked = state.selectedTransportBusFrequencies.has(entry.value);
-        } else if (entry.type === "mode") {
-          isChecked = state.selectedTransportModes.has(entry.value);
-        } else {
-          isChecked = entry.value === "unscheduled"
-            ? state.transportIncludeUnscheduled
-            : state.transportRequireExceptionOnly;
-        }
-        entry.input.checked = isChecked;
-        entry.input.disabled = !state.transportRealityVisible;
-      });
-      tierMeta.textContent = transportFilterSummary();
-      tierDetails.classList.toggle("is-disabled", !state.transportRealityVisible);
-      if (!state.transportRealityVisible) {
-        tierDetails.open = false;
-      }
-    }
-
-    transportTierOptions(state.runtime).forEach(function (option) {
-      const row = document.createElement("label");
-      row.className = "amenity-tier-row";
-      row.htmlFor = "transport-tier-" + option.value;
-
-      const textWrap = document.createElement("span");
-      textWrap.className = "toggle-label";
-
-      const title = document.createElement("strong");
-      title.textContent = option.label;
-
-      const subtitle = document.createElement("span");
-      subtitle.textContent = String(option.count || 0) + " mapped";
-
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.id = "transport-tier-" + option.value;
-      input.checked = state.selectedTransportSubtiers.has(option.value);
-      input.addEventListener("change", function () {
-        if (input.checked) {
-          state.selectedTransportSubtiers.add(option.value);
-        } else {
-          state.selectedTransportSubtiers.delete(option.value);
-        }
-        syncTransportInputs();
-        applyTransportRealityFilter();
-      });
-
-      tierRows.push({ type: "subtier", value: option.value, input: input });
-      textWrap.appendChild(title);
-      textWrap.appendChild(subtitle);
-      row.appendChild(textWrap);
-      row.appendChild(input);
-      tierList.appendChild(row);
-    });
-
-    transportBusFrequencyOptions(state.runtime).forEach(function (option) {
-      const row = document.createElement("label");
-      row.className = "amenity-tier-row";
-      row.htmlFor = "transport-bus-frequency-" + option.value;
-
-      const textWrap = document.createElement("span");
-      textWrap.className = "toggle-label";
-
-      const title = document.createElement("strong");
-      title.textContent = option.label;
-
-      const subtitle = document.createElement("span");
-      subtitle.textContent = String(option.count || 0) + " mapped";
-
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.id = "transport-bus-frequency-" + option.value;
-      input.checked = state.selectedTransportBusFrequencies.has(option.value);
-      input.addEventListener("change", function () {
-        if (input.checked) {
-          state.selectedTransportBusFrequencies.add(option.value);
-        } else {
-          state.selectedTransportBusFrequencies.delete(option.value);
-        }
-        syncTransportInputs();
-        applyTransportRealityFilter();
-      });
-
-      tierRows.push({ type: "bus_frequency", value: option.value, input: input });
-      textWrap.appendChild(title);
-      textWrap.appendChild(subtitle);
-      row.appendChild(textWrap);
-      row.appendChild(input);
-      tierList.appendChild(row);
-    });
-
-    transportModeOptions(state.runtime).forEach(function (option) {
-      const row = document.createElement("label");
-      row.className = "amenity-tier-row";
-      row.htmlFor = "transport-mode-" + option.value;
-
-      const textWrap = document.createElement("span");
-      textWrap.className = "toggle-label";
-
-      const title = document.createElement("strong");
-      title.textContent = option.label;
-
-      const subtitle = document.createElement("span");
-      subtitle.textContent = String(option.count || 0) + " mapped";
-
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.id = "transport-mode-" + option.value;
-      input.checked = state.selectedTransportModes.has(option.value);
-      input.addEventListener("change", function () {
-        if (input.checked) {
-          state.selectedTransportModes.add(option.value);
-        } else {
-          state.selectedTransportModes.delete(option.value);
-        }
-        syncTransportInputs();
-        applyTransportRealityFilter();
-      });
-
-      tierRows.push({ type: "mode", value: option.value, input: input });
-      textWrap.appendChild(title);
-      textWrap.appendChild(subtitle);
-      row.appendChild(textWrap);
-      row.appendChild(input);
-      tierList.appendChild(row);
-    });
-
-    [
-      {
-        type: "flag",
-        value: "unscheduled",
-        label: "Unscheduled",
-        count: Number(flagCounts.is_unscheduled_stop || 0),
-        onChange: function (checked) {
-          state.transportIncludeUnscheduled = checked;
-        }
-      },
-      {
-        type: "flag",
-        value: "exception_only",
-        label: "Has calendar_dates-only bus service",
-        count: Number(flagCounts.has_exception_only_service || 0),
-        onChange: function (checked) {
-          state.transportRequireExceptionOnly = checked;
-        }
-      }
-    ].forEach(function (option) {
-      const row = document.createElement("label");
-      row.className = "amenity-tier-row";
-      row.htmlFor = "transport-flag-" + option.value;
-
-      const textWrap = document.createElement("span");
-      textWrap.className = "toggle-label";
-
-      const title = document.createElement("strong");
-      title.textContent = option.label;
-
-      const subtitle = document.createElement("span");
-      subtitle.textContent = String(option.count || 0) + " mapped";
-
-      const input = document.createElement("input");
-      input.type = "checkbox";
-      input.id = "transport-flag-" + option.value;
-      input.checked = option.value === "unscheduled"
-        ? state.transportIncludeUnscheduled
-        : state.transportRequireExceptionOnly;
-      input.addEventListener("change", function () {
-        option.onChange(input.checked);
-        syncTransportInputs();
-        applyTransportRealityFilter();
-      });
-
-      tierRows.push({ type: option.type, value: option.value, input: input });
-      textWrap.appendChild(title);
-      textWrap.appendChild(subtitle);
-      row.appendChild(textWrap);
-      row.appendChild(input);
-      tierList.appendChild(row);
-    });
-
-    tierDetails.appendChild(tierList);
-    elements.transitControls.appendChild(tierDetails);
-
-    overlayInput.addEventListener("change", function () {
-      state.transportRealityVisible = overlayInput.checked;
-      syncTransportInputs();
-      applyTransportRealityVisibility();
-    });
-    syncTransportInputs();
-  }
   if (state.runtime.service_deserts_enabled) {
     const label = document.createElement("label");
     label.className = "toggle-row";
@@ -1144,16 +1186,6 @@ function buildTransitControls() {
     elements.transitControls.appendChild(label);
   }
 
-  if (elements.transportRealityDownload) {
-    const href = state.runtime.transport_reality_download_url || "/exports/transport-reality.zip";
-    elements.transportRealityDownload.href = href;
-    elements.transportRealityDownload.style.display = state.runtime.transport_reality_enabled ? "" : "none";
-  }
-
-  if (elements.transitNote) {
-    const analysisDate = state.runtime.transit_analysis_date || "unknown date";
-    elements.transitNote.textContent = "Snapshot as of " + analysisDate;
-  }
 }
 
 function maybeBuildDebugGridControl() {
@@ -1467,7 +1499,7 @@ function initializeApp(runtime) {
   );
   state.selectedTransportSubtiers = new Set();
   state.selectedTransportBusFrequencies = new Set();
-  state.selectedTransportModes = new Set();
+  state.selectedTransportModes = new Set(["bus", "rail", "tram"]);
   state.transportIncludeUnscheduled = false;
   state.transportRequireExceptionOnly = false;
   state.noiseVisible = false;
@@ -1488,15 +1520,45 @@ function initializeApp(runtime) {
   initializeMap();
 }
 
-fetchWithTimeout("/api/runtime", undefined, RUNTIME_FETCH_TIMEOUT_MS)
-  .then(function (response) {
-    if (!response.ok) {
-      return response.json().then(function (payload) {
-        throw new Error(payload.error || response.statusText);
-      });
+function delay(ms) {
+  return new Promise(function (resolve) {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+async function runtimeErrorFromResponse(response) {
+  const payload = await response.json().catch(function () {
+    return {};
+  });
+  return new Error(payload.error || response.statusText);
+}
+
+async function fetchRuntimePayload() {
+  let lastError = null;
+  for (let attempt = 1; attempt <= RUNTIME_FETCH_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(
+        "/api/runtime",
+        undefined,
+        RUNTIME_FETCH_TIMEOUT_MS
+      );
+      if (!response.ok) {
+        throw await runtimeErrorFromResponse(response);
+      }
+      return response.json();
+    } catch (error) {
+      lastError = error;
+      if (!error || error.name !== "AbortError" || attempt >= RUNTIME_FETCH_MAX_ATTEMPTS) {
+        throw error;
+      }
+      updateStatus("Runtime is warming up; retrying...");
+      await delay(RUNTIME_FETCH_RETRY_DELAY_MS);
     }
-    return response.json();
-  })
+  }
+  throw lastError || new Error("Failed to load runtime");
+}
+
+fetchRuntimePayload()
   .then(initializeApp)
   .catch(function (error) {
     const message = error && error.name === "AbortError"

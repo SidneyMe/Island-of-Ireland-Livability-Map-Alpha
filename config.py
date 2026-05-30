@@ -243,6 +243,9 @@ class TransitFeedConfig:
     label: str
     zip_path: Path
     url: str | None = None
+    enabled: bool = True
+    priority: int = 0
+    use_for_transit: bool = True
 
 
 @dataclass(frozen=True)
@@ -758,20 +761,58 @@ def _store_extract_fingerprint_cache(
         return
 
 
-def transit_feed_configs() -> tuple[TransitFeedConfig, ...]:
+def gtfs_static_feed_configs() -> tuple[TransitFeedConfig, ...]:
+    default_cache_root = CACHE_DIR / "gtfs"
     return (
         TransitFeedConfig(
-            feed_id="nta",
-            label="National Transport Authority",
-            zip_path=Path(os.getenv("GTFS_NTA_ZIP_PATH", GTFS_DIR / "nta_gtfs.zip")),
-            url=(os.getenv("GTFS_NTA_URL") or "").strip() or None,
+            feed_id="tfi_gtfs_all",
+            label="Transport for Ireland GTFS All",
+            zip_path=Path(
+                os.getenv(
+                    "GTFS_TFI_ALL_ZIP_PATH",
+                    default_cache_root / "tfi_gtfs_all" / "current.zip",
+                )
+            ),
+            url=(
+                os.getenv("GTFS_TFI_ALL_URL")
+                or "https://www.transportforireland.ie/transitData/Data/GTFS_All.zip"
+            ).strip()
+            or None,
+            enabled=True,
+            priority=10,
+            use_for_transit=True,
         ),
         TransitFeedConfig(
-            feed_id="translink",
-            label="Translink",
-            zip_path=Path(os.getenv("GTFS_TRANSLINK_ZIP_PATH", GTFS_DIR / "translink_gtfs.zip")),
-            url=(os.getenv("GTFS_TRANSLINK_URL") or "").strip() or None,
+            feed_id="tfi_gtfs_realtime_static",
+            label="Transport for Ireland GTFS Realtime Static",
+            zip_path=Path(
+                os.getenv(
+                    "GTFS_TFI_REALTIME_STATIC_ZIP_PATH",
+                    default_cache_root / "tfi_gtfs_realtime_static" / "current.zip",
+                )
+            ),
+            url=(
+                os.getenv("GTFS_TFI_REALTIME_STATIC_URL")
+                or "https://www.transportforireland.ie/transitData/Data/GTFS_Realtime.zip"
+            ).strip()
+            or None,
+            enabled=True,
+            priority=20,
+            use_for_transit=False,
         ),
+    )
+
+
+def transit_feed_configs() -> tuple[TransitFeedConfig, ...]:
+    return tuple(
+        sorted(
+            (
+                feed
+                for feed in gtfs_static_feed_configs()
+                if feed.enabled and feed.use_for_transit
+            ),
+            key=lambda feed: int(feed.priority),
+        )
     )
 
 
@@ -825,16 +866,9 @@ def transit_config_hash() -> str:
 
 def transit_feed_fingerprint(path: Path) -> str:
     try:
-        meta = _file_meta(path)
         if not path.exists():
             raise FileNotFoundError(path)
-        return hash_dict(
-            {
-                "path": str(path),
-                "size": meta["size"],
-                "content_hash": _content_hash(path),
-            }
-        )
+        return _content_hash(path)
     except OSError as exc:
         raise RuntimeError(f"GTFS feed zip was not found at '{path}'.") from exc
 
@@ -861,12 +895,19 @@ def build_transit_reality_state(
         feed_state.feed_id: feed_state.feed_fingerprint
         for feed_state in feed_states
     }
+    combined_gtfs_feed_fingerprint = hash_dict(
+        {
+            "feeds": [
+                f"{feed_id}:{feed_fingerprints[feed_id]}"
+                for feed_id in sorted(feed_fingerprints)
+            ]
+        }
+    )
     transit_hash = transit_config_hash()
     reality_fingerprint = hash_dict(
         {
-            "analysis_date": resolved_analysis_date.isoformat(),
             "transit_config_hash": transit_hash,
-            "feed_fingerprints": feed_fingerprints,
+            "gtfs_feed_fingerprint": combined_gtfs_feed_fingerprint,
         }
     )
     return TransitRealityState(

@@ -1,74 +1,41 @@
 from __future__ import annotations
 
-import os
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 from config import TransitFeedConfig
 
+from .gtfs_download import (
+    FeedRefreshResult,
+    FeedRefreshStatus,
+    describe_gtfs_feed_status,
+    describe_gtfs_feeds,
+    ensure_transit_feed_available,
+    refresh_gtfs_feed,
+    refresh_gtfs_feeds,
+)
 
-def _emit_progress(progress_cb, detail: str) -> None:
-    if progress_cb is None:
-        print(detail, flush=True)
-        return
-    progress_cb("detail", detail=detail, force_log=True)
 
-
-def _download_feed(
-    url: str,
-    destination: Path,
+def ensure_feed_zip(
+    feed_config: TransitFeedConfig,
     *,
-    feed_id: str | None = None,
+    auto_refresh_gtfs: bool = False,
+    force_gtfs_refresh: bool = False,
     progress_cb=None,
-) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    request = urllib.request.Request(url)
-    tmp_path = destination.with_name(destination.name + ".tmp")
-    label = feed_id or destination.stem
-    _emit_progress(progress_cb, f"downloading GTFS raw feed {label}")
-    try:
-        with urllib.request.urlopen(request, timeout=600) as response, tmp_path.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-        os.replace(tmp_path, destination)
-        _emit_progress(progress_cb, f"downloaded GTFS raw feed {label} -> {destination.name}")
-    except BaseException:
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
-
-
-def ensure_feed_zip(feed_config: TransitFeedConfig, *, refresh_download: bool, progress_cb=None) -> Path:
-    if refresh_download and feed_config.url:
-        _download_feed(
-            feed_config.url,
-            feed_config.zip_path,
-            feed_id=feed_config.feed_id,
-            progress_cb=progress_cb,
-        )
-    if feed_config.zip_path.exists():
-        _emit_progress(progress_cb, f"using GTFS raw feed {feed_config.feed_id} -> {feed_config.zip_path.name}")
-        return feed_config.zip_path
-    if feed_config.url:
-        try:
-            _download_feed(
-                feed_config.url,
-                feed_config.zip_path,
-                feed_id=feed_config.feed_id,
-                progress_cb=progress_cb,
-            )
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                f"Unable to download GTFS feed '{feed_config.feed_id}' from {feed_config.url}: {exc}"
-            ) from exc
-        return feed_config.zip_path
-    raise RuntimeError(
-        f"GTFS feed zip for '{feed_config.feed_id}' was not found at '{feed_config.zip_path}'. "
-        "Configure a local zip path or feed URL first."
+) -> Path:
+    return ensure_transit_feed_available(
+        feed_config,
+        auto_refresh_gtfs=auto_refresh_gtfs,
+        force_gtfs_refresh=force_gtfs_refresh,
+        progress_cb=progress_cb,
     )
+
+
+__all__ = [
+    "FeedRefreshResult",
+    "FeedRefreshStatus",
+    "describe_gtfs_feed_status",
+    "describe_gtfs_feeds",
+    "ensure_feed_zip",
+    "refresh_gtfs_feed",
+    "refresh_gtfs_feeds",
+]

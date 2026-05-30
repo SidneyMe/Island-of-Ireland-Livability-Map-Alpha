@@ -268,6 +268,32 @@ class LocalServerEndpointTests(TestCase):
 
         self.assertEqual(payload, body)
 
+    def test_server_serves_existing_non_primary_profile_pmtiles_routes(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            static_dir, full_pmtiles_path = _make_fixture(tmp, pmtiles_bytes=b"FULL_BYTES")
+            dev_pmtiles_path = tmp / "livability-dev.pmtiles"
+            dev_pmtiles_path.write_bytes(b"DEV_BYTES")
+
+            def fake_pmtiles_output_path(profile: str | None = None) -> Path:
+                if profile == "dev":
+                    return dev_pmtiles_path
+                return full_pmtiles_path
+
+            with (
+                mock.patch.object(serve_from_db, "pmtiles_output_path", side_effect=fake_pmtiles_output_path),
+                _ServerHarness(
+                    _FakeService(),
+                    pmtiles_path=full_pmtiles_path,
+                    static_dir=static_dir,
+                    profile="full",
+                ) as base_url,
+            ):
+                with urlopen(base_url + "/tiles/livability-dev.pmtiles") as response:
+                    payload = response.read()
+
+        self.assertEqual(payload, b"DEV_BYTES")
+
     def test_pmtiles_range_request(self) -> None:
         body = bytes(range(256)) * 4  # 1024 bytes
         with TemporaryDirectory() as tmp_name:
@@ -811,6 +837,119 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["noise_metric_counts"], {"Lden": 1})
         self.assertEqual(payload["noise_proxy_metadata"]["metrics"], ["Lden"])
         self.assertEqual(payload["noise_proxy_metadata"]["default_metric"], "Lden")
+
+    def test_runtime_service_stale_manifest_fallback_prefers_transport_ready_manifest(self) -> None:
+        poor_manifest = {
+            "build_key": "build-fallback-poor",
+            "summary_json": {
+                "build_profile": "full",
+                "map_center": {"lat": 53.4, "lon": -7.7},
+                "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {"corner": 3},
+                    "transport": {},
+                    "healthcare": {},
+                    "parks": {},
+                },
+                "transport_reality_enabled": True,
+                "service_deserts_enabled": True,
+                "transport_reality_download_url": "/exports/transport-reality.zip",
+                "transit_analysis_date": "2026-04-22",
+            },
+        }
+        ready_manifest = {
+            "build_key": "build-fallback-ready",
+            "summary_json": {
+                "build_profile": "full",
+                "map_center": {"lat": 53.4, "lon": -7.7},
+                "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {"corner": 3},
+                    "transport": {},
+                    "healthcare": {},
+                    "parks": {},
+                },
+                "transport_reality_enabled": True,
+                "service_deserts_enabled": True,
+                "transport_subtier_counts": {"mon_sat": 8},
+                "transport_bus_frequency_counts": {"moderate": 3},
+                "transport_flag_counts": {"has_any_bus_service": 7},
+                "transport_mode_counts": {"rail": 2},
+                "transport_reality_download_url": "/exports/transport-reality.zip",
+                "transit_analysis_date": "2026-04-22",
+            },
+        }
+
+        with (
+            mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=None),
+            mock.patch.object(
+                serve_from_db.RuntimeService,
+                "_load_latest_completed_manifest_for_extract",
+                return_value=poor_manifest,
+            ),
+            mock.patch.object(
+                serve_from_db.RuntimeService,
+                "_transport_quality_row_count",
+                return_value=0,
+            ),
+            mock.patch.object(
+                serve_from_db.RuntimeService,
+                "_load_latest_transport_ready_manifest_for_extract",
+                return_value=ready_manifest,
+            ) as ready_mock,
+            mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
+            mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=False),
+            mock.patch.object(serve_from_db, "noise_pmtiles_output_path", return_value=Path(__file__)),
+            mock.patch.dict("os.environ", {serve_from_db.RUNTIME_STALE_FALLBACK_ENV: "1"}, clear=False),
+        ):
+            payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
+
+        ready_mock.assert_called_once()
+        self.assertEqual(payload["build_key"], "build-fallback-ready")
+        self.assertEqual(payload["runtime_mode"], "stale_manifest_fallback")
+        self.assertIn("transport-ready", payload["runtime_warning"])
+        self.assertEqual(payload["transport_subtier_counts"], {"mon_sat": 8})
+
+    def test_runtime_service_uses_manifest_profile_pmtiles_url_for_stale_fallback(self) -> None:
+        manifest = {
+            "build_key": "build-fallback-dev",
+            "summary_json": {
+                "build_profile": "dev",
+                "map_center": {"lat": 53.4, "lon": -7.7},
+                "amenity_counts": {"shops": 12, "transport": 4, "healthcare": 1, "parks": 3},
+                "amenity_tier_counts": {
+                    "shops": {"corner": 3},
+                    "transport": {},
+                    "healthcare": {},
+                    "parks": {},
+                },
+                "transport_reality_enabled": True,
+                "service_deserts_enabled": True,
+                "transport_subtier_counts": {"mon_sat": 8},
+                "transport_bus_frequency_counts": {"moderate": 3},
+                "transport_flag_counts": {"has_any_bus_service": 7},
+                "transport_mode_counts": {"rail": 2},
+                "transport_reality_download_url": "/exports/transport-reality.zip",
+                "transit_analysis_date": "2026-04-22",
+            },
+        }
+
+        with (
+            mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=None),
+            mock.patch.object(
+                serve_from_db.RuntimeService,
+                "_load_latest_completed_manifest_for_extract",
+                return_value=manifest,
+            ),
+            mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
+            mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=False),
+            mock.patch.object(serve_from_db, "noise_pmtiles_output_path", return_value=Path(__file__)),
+            mock.patch.dict("os.environ", {serve_from_db.RUNTIME_STALE_FALLBACK_ENV: "1"}, clear=False),
+        ):
+            payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
+
+        self.assertEqual(payload["build_profile"], "dev")
+        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-dev.pmtiles")
 
     def test_main_serve_flag_starts_local_app(self) -> None:
         with (

@@ -82,13 +82,19 @@ class DatabaseUrlTests(TestCase):
 
 
 class ConfigHashTests(TestCase):
-    def test_transit_feed_configs_only_include_nta_and_translink(self) -> None:
+    def test_gtfs_static_feed_configs_include_tfi_public_feeds(self) -> None:
         self.assertEqual(
-            [feed.feed_id for feed in config.transit_feed_configs()],
-            ["nta", "translink"],
+            [feed.feed_id for feed in config.gtfs_static_feed_configs()],
+            ["tfi_gtfs_all", "tfi_gtfs_realtime_static"],
         )
 
-    def test_transit_config_hash_inputs_exclude_locallink(self) -> None:
+    def test_transit_feed_configs_use_gtfs_all_only_by_default(self) -> None:
+        self.assertEqual(
+            [feed.feed_id for feed in config.transit_feed_configs()],
+            ["tfi_gtfs_all"],
+        )
+
+    def test_transit_config_hash_inputs_follow_transit_feed_configs(self) -> None:
         with mock.patch.object(config, "hash_dict", return_value="transit-hash-123") as hash_mock:
             transit_hash = config.transit_config_hash()
 
@@ -96,10 +102,10 @@ class ConfigHashTests(TestCase):
         payload = hash_mock.call_args.args[0]
         self.assertEqual(
             [feed["feed_id"] for feed in payload["feeds"]],
-            ["nta", "translink"],
+            ["tfi_gtfs_all"],
         )
 
-    def test_build_transit_reality_state_excludes_locallink_feed(self) -> None:
+    def test_build_transit_reality_state_uses_selected_transit_feed(self) -> None:
         def _fingerprint(path: Path) -> str:
             return f"fp-{path.name}"
 
@@ -108,13 +114,12 @@ class ConfigHashTests(TestCase):
 
         self.assertEqual(
             [feed.feed_id for feed in state.feed_states],
-            ["nta", "translink"],
+            ["tfi_gtfs_all"],
         )
         self.assertEqual(
             state.feed_fingerprints,
             {
-                "nta": "fp-nta_gtfs.zip",
-                "translink": "fp-translink_gtfs.zip",
+                "tfi_gtfs_all": "fp-current.zip",
             },
         )
 

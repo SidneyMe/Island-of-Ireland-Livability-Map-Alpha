@@ -38,14 +38,19 @@ def _emit(progress_cb: ProgressFn, detail: str) -> None:
 
 def prepare_transit_reality_state(
     *,
-    refresh_download: bool = False,
+    auto_refresh_gtfs: bool = False,
+    force_gtfs_refresh: bool = False,
+    refresh_download: bool | None = None,
     progress_cb: ProgressFn = None,
 ) -> TransitRealityState:
+    if refresh_download is not None:
+        auto_refresh_gtfs = bool(refresh_download)
     feed_configs = transit_feed_configs()
     for feed_config in feed_configs:
         ensure_feed_zip(
             feed_config,
-            refresh_download=refresh_download,
+            auto_refresh_gtfs=auto_refresh_gtfs,
+            force_gtfs_refresh=force_gtfs_refresh,
             progress_cb=progress_cb,
         )
     _emit(progress_cb, "building GTFS transit reality state")
@@ -56,14 +61,19 @@ def transit_reality_refresh_required(
     engine,
     *,
     import_fingerprint: str | None = None,
-    refresh_download: bool = False,
+    auto_refresh_gtfs: bool = False,
+    force_gtfs_refresh: bool = False,
+    refresh_download: bool | None = None,
     force_refresh: bool = False,
     reality_state: TransitRealityState | None = None,
     progress_cb: ProgressFn = None,
 ) -> tuple[TransitRealityState, bool]:
+    if refresh_download is not None:
+        auto_refresh_gtfs = bool(refresh_download)
     prepared_state = (
         prepare_transit_reality_state(
-            refresh_download=refresh_download,
+            auto_refresh_gtfs=auto_refresh_gtfs,
+            force_gtfs_refresh=force_gtfs_refresh,
             progress_cb=progress_cb,
         )
         if reality_state is None
@@ -80,14 +90,19 @@ def ensure_transit_reality(
     engine,
     *,
     import_fingerprint: str,
-    refresh_download: bool = False,
+    auto_refresh_gtfs: bool = False,
+    force_gtfs_refresh: bool = False,
+    refresh_download: bool | None = None,
     force_refresh: bool = False,
     progress_cb: ProgressFn = None,
     reality_state: TransitRealityState | None = None,
 ) -> TransitRealityState:
+    if refresh_download is not None:
+        auto_refresh_gtfs = bool(refresh_download)
     reality_state = (
         prepare_transit_reality_state(
-            refresh_download=refresh_download,
+            auto_refresh_gtfs=auto_refresh_gtfs,
+            force_gtfs_refresh=force_gtfs_refresh,
             progress_cb=progress_cb,
         )
         if reality_state is None
@@ -98,6 +113,7 @@ def ensure_transit_reality(
         engine,
         reality_state.reality_fingerprint,
     ):
+        _emit(progress_cb, "[gtfs] combined fingerprint unchanged; transit refresh skipped")
         _emit(progress_cb, f"reusing transit reality {reality_state.reality_fingerprint}")
         if not export_zip_path.exists():
             existing_rows = [
