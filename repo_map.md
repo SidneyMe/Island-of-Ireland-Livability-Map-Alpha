@@ -551,7 +551,6 @@ tests/test_server_behavior.py
 | `LIVABILITY_BAKE_WORKERS` | PMTiles bake worker count | `min(12, cpu_count())` |
 | `LIVABILITY_FINE_RASTER_SURFACE` | Enable inspect-backed fine surface caches and legacy PNG endpoint; main map rendering now uses vector PMTiles | `"1"` |
 | `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` | Skip opening step for very large coastal components | `1_000_000_000.0` |
-| `NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M` | Simplify study-area mask only for artifact-mode noise proxy publish intersections; main PMTiles/grid coast geometry remains exact | `250.0` |
 | `OSM2PGSQL_BIN` | osm2pgsql binary path | `"osm2pgsql"` |
 | `NOISE_ROAD_GDB_CANONICAL_CACHE` | Enable ROI Round 4 Road canonical FileGDB -> local GPKG extraction cache path | `"1"` |
 | `NOISE_REBUILD_ROAD_GDB_CACHE` | Force rebuild of canonical Road GDB GPKG cache before PG import | `"0"` |
@@ -618,7 +617,7 @@ tests/test_server_behavior.py
 - `overture/ireland_places.geoparquet`, `ireland_main_island_shp/*`, and `boundaries/*.geojson` are external inputs, not committed repo assets.
 - Transit reality is GTFS-first now. Do not assume an OSM-stop-to-GTFS matching workflow still drives scoring.
 - PMTiles bake writes to a sibling temp archive and only replaces the final `.pmtiles` after finalize succeeds; failed bakes clean the temp file and preserve the previous archive.
-- Artifact-mode noise publish intentionally clips proxy noise with a simplified study-area mask (`NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M`) so an exact high-vertex coastline does not make `ST_Intersection` over every 1000m proxy cell stall. This does not weaken the main grid/PMTiles coastline geometry.
+- The public noise overlay is intentionally not clipped to the walking/study-area land mask; noise can extend over water, while the walking grid and score PMTiles still use the exact coastline.
 - `db_postgis._dependencies` patches Windows `platform` calls before SQLAlchemy import. If startup hangs again before `Preparing livability precompute (...)`, check WMI/platform calls before assuming database or PMTiles work has started.
 - OSM import reuse is manifest/scope-aware: raw rows are only considered ready with a complete import manifest whose `normalization_scope_hash` matches the active profile. Raw rows without a matching manifest are dropped and rebuilt.
 - Both Python and Rust GTFS parsers accept `calendar.txt`-only and `calendar_dates.txt`-only feeds, but still require at least one service calendar file.

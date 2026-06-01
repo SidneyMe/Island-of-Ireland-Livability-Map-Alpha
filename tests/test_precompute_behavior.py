@@ -2250,6 +2250,15 @@ class TransitServiceDesertTests(TestCase):
 
 
 class WorkflowTests(TestCase):
+    def test_noise_study_area_for_profile_disables_noise_clipping(self) -> None:
+        study_area = box(0.0, 0.0, 1.0, 1.0)
+
+        for profile in ("full", "dev", "test"):
+            with self.subTest(profile=profile):
+                self.assertIsNone(
+                    precompute._workflow._noise_study_area_for_profile(profile, study_area)
+                )
+
     def test_precompute_runs_transit_preflight_before_geometry(self) -> None:
         kwargs = _workflow_kwargs(
             transit_preflight=mock.Mock(side_effect=RuntimeError("gtfs-refresh unavailable")),
@@ -2377,6 +2386,7 @@ class WorkflowTests(TestCase):
         self.assertEqual(publish_kwargs["service_desert_rows"], [])
         self.assertEqual(publish_kwargs["noise_rows"], noise_payload)
         self.assertEqual(publish_kwargs["study_area_wgs84"], box(0.0, 0.0, 1.0, 1.0))
+        self.assertIsNone(publish_kwargs["noise_study_area_wgs84"])
         self.assertIsNone(kwargs["summary_json"].call_args.kwargs["noise_rows"])
         self.assertNotIn("drive_rows", publish_kwargs)
         self.assertNotIn("hotspot_rows", publish_kwargs)
@@ -2522,6 +2532,7 @@ class WorkflowTests(TestCase):
         refresh_kwargs = refresh_mock.call_args.kwargs
         self.assertEqual(refresh_kwargs["summary_json"], {"summary": True})
         self.assertIs(refresh_kwargs["noise_rows"], noise_payload)
+        self.assertIsNone(refresh_kwargs["noise_study_area_wgs84"])
         self.assertEqual(refresh_kwargs["noise_processing_hash"], "res-new")
         self.assertEqual(refresh_kwargs["noise_artifact_hash"], "res-new")
 

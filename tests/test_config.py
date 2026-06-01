@@ -399,16 +399,6 @@ class SurfaceResolutionTests(TestCase):
         self.assertNotEqual(previous_hashes.render_hash, current_hashes.render_hash)
         self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
 
-    def test_noise_artifact_study_area_simplify_changes_render_hash(self) -> None:
-        with mock.patch.object(config, "NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M", 100.0):
-            previous_hashes = config.build_config_hashes()
-        with mock.patch.object(config, "NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M", 500.0):
-            current_hashes = config.build_config_hashes()
-
-        self.assertEqual(previous_hashes.geo_hash, current_hashes.geo_hash)
-        self.assertNotEqual(previous_hashes.render_hash, current_hashes.render_hash)
-        self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
-
     def test_main_island_shapefile_sidecar_metadata_changes_geo_hash(self) -> None:
         with TemporaryDirectory() as tmp_name:
             main_path = Path(tmp_name) / "main_island.shp"

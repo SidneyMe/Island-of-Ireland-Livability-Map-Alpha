@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
 
-from config import NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M, NOISE_PUBLISH_USE_COPY
+from config import NOISE_PUBLISH_USE_COPY
 
 from ._dependencies import (
     Column,
@@ -680,10 +680,7 @@ _INSERT_ROAD_PROXY_FROM_GRID_SQL = text(
             CASE
                 WHEN :has_study_area THEN
                     ST_MakeValid(
-                        ST_SimplifyPreserveTopology(
-                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157),
-                            :study_area_simplify_m
-                        )
+                        ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
                     )
                 ELSE NULL
             END AS geom
@@ -893,10 +890,7 @@ _INSERT_EXACT_FROM_RESOLVED_SQL = text(
             CASE
                 WHEN :has_study_area THEN
                     ST_MakeValid(
-                        ST_SimplifyPreserveTopology(
-                            ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157),
-                            :study_area_simplify_m
-                        )
+                        ST_Transform(ST_SetSRID(ST_GeomFromWKB(:study_wkb), 4326), 2157)
                     )
                 ELSE NULL
             END AS geom
@@ -1250,7 +1244,6 @@ def copy_noise_artifact_to_noise_polygons(
         "import_fingerprint": import_fingerprint,
         "has_study_area": has_study_area,
         "study_wkb": study_area_wgs84.wkb if has_study_area else None,
-        "study_area_simplify_m": float(NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M),
         "proxy_class": "unclassified",
     }
 

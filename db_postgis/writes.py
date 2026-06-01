@@ -434,8 +434,8 @@ def publish_precomputed_artifacts(
 ) -> None:
     # If noise_study_area_wgs84 is explicitly provided (even as None), use it for
     # noise polygon clipping; otherwise fall back to study_area_wgs84.
-    # Passing None disables clipping — correct for full-island profiles where the
-    # artifact already covers the whole island and ST_Intersection is wasted work.
+    # Passing None disables clipping, which is intentional for the public noise
+    # overlay because noise can extend over water.
     effective_noise_area = (
         study_area_wgs84 if noise_study_area_wgs84 is _UNSET else noise_study_area_wgs84
     )

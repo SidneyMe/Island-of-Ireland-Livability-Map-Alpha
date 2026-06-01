@@ -565,9 +565,6 @@ NOISE_TOPOLOGY_GRID_METRES: float = float(
 NOISE_QUERY_SIMPLIFY_METRES: float = float(
     os.getenv("NOISE_QUERY_SIMPLIFY_METRES") or "1.0"
 )
-NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M: float = _non_negative_float_env(
-    "NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M", 250.0
-)
 NOISE_TILE_SIMPLIFY_METRES_LZ: float = float(
     os.getenv("NOISE_TILE_SIMPLIFY_METRES_LOW_ZOOM") or "10.0"
 )
@@ -1130,7 +1127,6 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "category_colors": CATEGORY_COLORS,
         "pmtiles_schema_version": PMTILES_SCHEMA_VERSION,
         "noise_mode": NOISE_MODE,
-        "noise_artifact_study_area_simplify_m": NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M,
     }
     if NOISE_MODE == "legacy":
         render_params["noise_dataset_signature"] = noise_signature

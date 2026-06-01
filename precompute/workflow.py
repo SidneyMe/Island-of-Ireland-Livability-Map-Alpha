@@ -112,7 +112,9 @@ def _run_noise_pmtiles_bake(
 
 
 def _noise_study_area_for_profile(build_profile: str, study_area_wgs84):
-    return None if build_profile == "full" else study_area_wgs84
+    """Return None so public noise overlay publish stays unclipped."""
+    del build_profile, study_area_wgs84
+    return None
 
 
 def _load_stored_noise_state(engine, build_key: str) -> tuple[str | None, dict]:
@@ -705,9 +707,9 @@ def run_precompute_impl(
         if isinstance(noise_row_payload, _ArtifactNoiseReference)
         else None
     )
-    # Full-island profile: artifact already covers the whole island so clipping
-    # noise polygons to study_area_wgs84 with ST_Intersection is wasted work.
-    # Pass None to skip clipping; for county/bbox profiles keep the clip.
+    # Noise is not a walkability surface: it can extend over water, so keep the
+    # overlay geometry from the source/artifact instead of clipping to the land
+    # study area used by walking-grid cells.
     noise_study_area = _noise_study_area_for_profile(build_profile, study_area_wgs84)
     publish_precomputed_artifacts(
         engine,
