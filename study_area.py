@@ -26,6 +26,8 @@ from config import (
     COUNTY_BOUNDARY_PATH,
     M1_CORRIDOR_ANCHORS_WGS84,
     M1_CORRIDOR_BUFFER_M,
+    MAIN_ISLAND_BOUNDARY_LAYER,
+    MAIN_ISLAND_BOUNDARY_PATH,
     NI_BOUNDARY_LAYER,
     NI_BOUNDARY_PATH,
     ROI_BOUNDARY_LAYER,
@@ -51,6 +53,15 @@ def _file_fingerprint(path: Path) -> str:
         return f"{path.name}:{stat.st_size}:{stat.st_mtime_ns}"
     except FileNotFoundError:
         return f"{path.name}:missing"
+
+
+def _boundary_fingerprint(path: Path) -> str:
+    if path.suffix.lower() != ".shp":
+        return _file_fingerprint(path)
+    return "|".join(
+        _file_fingerprint(path.with_suffix(extension))
+        for extension in (".shp", ".shx", ".dbf", ".prj", ".cpg")
+    )
 
 
 def _geo_shared_key(*parts: Any) -> str:
@@ -654,7 +665,40 @@ def _load_merged_island_cached(
     return merged
 
 
+def _load_main_island_boundary_cached(*, progress_cb=None):
+    fp = _boundary_fingerprint(MAIN_ISLAND_BOUNDARY_PATH)
+    key = _geo_shared_key(
+        "main_island_boundary",
+        _GEO_SHARED_SCHEMA_VERSION,
+        fp,
+        TARGET_CRS,
+    )
+    cached = _geo_shared_load("main_island_boundary", key)
+    if cached is not None:
+        _emit_progress(progress_cb, "reusing cached main island boundary")
+        _emit_substep(progress_cb, "main_island_read", 0.0)
+        _emit_substep(progress_cb, "main_island_project", 0.0)
+        _emit_substep(progress_cb, "main_island_union", 0.0)
+        return cached
+
+    _emit_progress(progress_cb, "using main island boundary shapefile")
+    geom = load_boundary_geometry(
+        MAIN_ISLAND_BOUNDARY_PATH,
+        layer=MAIN_ISLAND_BOUNDARY_LAYER,
+        label="main_island",
+        progress_cb=progress_cb,
+    )
+    try:
+        _geo_shared_save("main_island_boundary", key, geom)
+    except OSError:
+        pass
+    return geom
+
+
 def load_island_geometry_metric(*, progress_cb=None):
+    if MAIN_ISLAND_BOUNDARY_PATH.exists():
+        return _load_main_island_boundary_cached(progress_cb=progress_cb)
+
     roi_fp = _file_fingerprint(ROI_BOUNDARY_PATH)
     ni_fp = _file_fingerprint(NI_BOUNDARY_PATH)
     roi_geom = _load_simplified_boundary_cached(

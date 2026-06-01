@@ -4,6 +4,25 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-05-31 - Exact main-island coastline for PMTiles geometry
+
+### Fixed
+
+- Preferred `ireland_main_island_shp/ireland_main_island.shp` as the island geometry source when present, replacing the older ROI+NI merge/coastal-cleanup path for the main Ireland study area.
+- Prevented coastal PMTiles/grid artifacts caused by noisy merged administrative coast boundaries by using the exact main-island polygon directly.
+- Added main-island shapefile sidecar metadata (`.shp`, `.shx`, `.dbf`, `.prj`, `.cpg`) to the geo hash so precompute and PMTiles caches invalidate when the coastline input changes.
+- Avoided artifact-mode noise publish stalls caused by intersecting the full-detail coastline against every 1000m noise proxy cell; noise publish now uses a simplified study-area mask plus bbox prefilter while the main grid/PMTiles geometry still uses the exact coastline.
+- Fixed Windows CLI startup appearing blank before precompute output by installing a DB dependency import shim that avoids a hanging WMI-backed `platform.system()` call during SQLAlchemy/GeoAlchemy startup.
+
+### Notes
+
+- Existing PMTiles archives need to be rebaked before the corrected coastline appears in the map.
+- If the main-island shapefile is absent, the pipeline falls back to the previous ROI+NI boundary merge and coastal cleanup.
+
+### Scoring logic
+
+- No scoring formula change, but boundary-cell effective areas can change along the coast because the study-area geometry is cleaner.
+
 ## 2026-05-31 - Transport selector PMTiles profile compatibility
 
 ### Fixed

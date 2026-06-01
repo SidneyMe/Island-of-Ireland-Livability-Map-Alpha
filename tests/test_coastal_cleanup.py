@@ -292,6 +292,11 @@ class CoastalArtifactCleanupTests(TestCase):
                 mock.patch("builtins.print") as print_mock,
                 mock.patch.object(study_area.gpd, "read_file", side_effect=[roi_gdf, ni_gdf]),
                 mock.patch.object(study_area, "_GEO_SHARED_CACHE_ENABLED", False),
+                mock.patch.object(
+                    study_area,
+                    "MAIN_ISLAND_BOUNDARY_PATH",
+                    Path("__missing_main_island_boundary__.shp"),
+                ),
             ):
                 tracker.start_phase("geometry", detail="loading study area geometry")
                 study_area_metric, study_area_wgs84 = study_area.load_study_area_geometries(
@@ -337,6 +342,35 @@ class CoastalArtifactCleanupTests(TestCase):
         ]
         positions = [output.index(detail) for detail in ordered_details]
         self.assertEqual(positions, sorted(positions))
+
+    def test_main_island_shapefile_overrides_merged_boundary_cleanup(self) -> None:
+        main_geom = _rect(700_000, 800_000, 701_000, 801_000)
+        with TemporaryDirectory() as tmp_name:
+            main_path = Path(tmp_name) / "main_island.shp"
+            main_path.write_bytes(b"shape")
+            with (
+                mock.patch.object(study_area, "MAIN_ISLAND_BOUNDARY_PATH", main_path),
+                mock.patch.object(study_area, "_GEO_SHARED_CACHE_ENABLED", False),
+                mock.patch.object(
+                    study_area,
+                    "load_boundary_geometry",
+                    return_value=main_geom,
+                ) as load_mock,
+                mock.patch.object(
+                    study_area,
+                    "clean_coastal_artifacts",
+                    side_effect=AssertionError("exact main island boundary should not be cleaned"),
+                ),
+            ):
+                returned = study_area.load_island_geometry_metric()
+
+        self.assertEqual(returned, main_geom)
+        load_mock.assert_called_once_with(
+            main_path,
+            layer=study_area.MAIN_ISLAND_BOUNDARY_LAYER,
+            label="main_island",
+            progress_cb=None,
+        )
 
 
 class GridCoastalClipTests(TestCase):
@@ -395,7 +429,8 @@ class CoastalConfigHashRegressionTests(TestCase):
 
 class IslandGeometrySmokeTests(TestCase):
     @unittest.skipUnless(
-        config.ROI_BOUNDARY_PATH.exists() and config.NI_BOUNDARY_PATH.exists(),
+        config.MAIN_ISLAND_BOUNDARY_PATH.exists()
+        or (config.ROI_BOUNDARY_PATH.exists() and config.NI_BOUNDARY_PATH.exists()),
         "requires local boundary files",
     )
     def test_load_island_geometry_metric_smoke(self) -> None:

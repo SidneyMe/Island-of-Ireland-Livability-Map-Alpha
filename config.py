@@ -43,6 +43,9 @@ COUNTY_BOUNDARY_NAME_FIELD = "ENG_NAME_VALUE"
 NI_BOUNDARY_PATH = BOUNDARIES_DIR / "osni_open_data_largescale_boundaries_ni_outline.geojson"
 NI_BOUNDARY_LAYER = None
 
+MAIN_ISLAND_BOUNDARY_PATH = BASE_DIR / "ireland_main_island_shp" / "ireland_main_island.shp"
+MAIN_ISLAND_BOUNDARY_LAYER = None
+
 
 OSM_EXTRACT_NAME = "ireland-and-northern-ireland-latest.osm.pbf"
 OSM_EXTRACT_PATH = OSM_DIR / OSM_EXTRACT_NAME
@@ -562,6 +565,9 @@ NOISE_TOPOLOGY_GRID_METRES: float = float(
 NOISE_QUERY_SIMPLIFY_METRES: float = float(
     os.getenv("NOISE_QUERY_SIMPLIFY_METRES") or "1.0"
 )
+NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M: float = _non_negative_float_env(
+    "NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M", 250.0
+)
 NOISE_TILE_SIMPLIFY_METRES_LZ: float = float(
     os.getenv("NOISE_TILE_SIMPLIFY_METRES_LOW_ZOOM") or "10.0"
 )
@@ -681,6 +687,18 @@ def _file_meta(path: Path) -> dict[str, int]:
         return {"mtime_ns": stat.st_mtime_ns, "size": stat.st_size}
     except OSError:
         return {"mtime_ns": 0, "size": 0}
+
+
+def _shapefile_sidecar_meta(path: Path) -> list[dict[str, Any]]:
+    if path.suffix.lower() != ".shp":
+        return []
+    return [
+        {
+            "path": str(path.with_suffix(extension)),
+            **_file_meta(path.with_suffix(extension)),
+        }
+        for extension in (".shp", ".shx", ".dbf", ".prj", ".cpg")
+    ]
 
 
 def _emit_progress_detail(progress_cb, detail: str) -> None:
@@ -977,6 +995,9 @@ class BuildHashes:
 def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     normalized_profile = normalize_build_profile(profile)
     profile_settings = build_profile_settings(normalized_profile)
+    main_island_available = MAIN_ISLAND_BOUNDARY_PATH.exists()
+    main_island_meta = _file_meta(MAIN_ISLAND_BOUNDARY_PATH)
+    main_island_sidecar_meta = _shapefile_sidecar_meta(MAIN_ISLAND_BOUNDARY_PATH)
     roi_meta = _file_meta(ROI_BOUNDARY_PATH)
     ni_meta = _file_meta(NI_BOUNDARY_PATH)
     county_meta = _file_meta(COUNTY_BOUNDARY_PATH)
@@ -991,14 +1012,15 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         noise_signature = noise_dataset_signature()
 
     geo_params = {
-        "roi_path": str(ROI_BOUNDARY_PATH),
-        "roi_layer": str(ROI_BOUNDARY_LAYER),
-        "roi_mtime_ns": roi_meta["mtime_ns"],
-        "roi_size": roi_meta["size"],
-        "ni_path": str(NI_BOUNDARY_PATH),
-        "ni_layer": str(NI_BOUNDARY_LAYER),
-        "ni_mtime_ns": ni_meta["mtime_ns"],
-        "ni_size": ni_meta["size"],
+        "island_boundary_source": (
+            "main_island_shapefile" if main_island_available else "roi_ni_merged_boundaries"
+        ),
+        "main_island_boundary_path": str(MAIN_ISLAND_BOUNDARY_PATH),
+        "main_island_boundary_layer": str(MAIN_ISLAND_BOUNDARY_LAYER),
+        "main_island_boundary_available": main_island_available,
+        "main_island_boundary_mtime_ns": main_island_meta["mtime_ns"],
+        "main_island_boundary_size": main_island_meta["size"],
+        "main_island_boundary_sidecars": main_island_sidecar_meta,
         "target_crs": TARGET_CRS,
         "display_crs": DISPLAY_CRS,
         "study_area_kind": profile_settings.study_area_kind,
@@ -1012,6 +1034,17 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "coastal_cleanup_skip_mainland_area_m2": COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
         "schema_version": CACHE_SCHEMA_VERSION,
     }
+    if not main_island_available:
+        geo_params.update({
+            "roi_path": str(ROI_BOUNDARY_PATH),
+            "roi_layer": str(ROI_BOUNDARY_LAYER),
+            "roi_mtime_ns": roi_meta["mtime_ns"],
+            "roi_size": roi_meta["size"],
+            "ni_path": str(NI_BOUNDARY_PATH),
+            "ni_layer": str(NI_BOUNDARY_LAYER),
+            "ni_mtime_ns": ni_meta["mtime_ns"],
+            "ni_size": ni_meta["size"],
+        })
     if profile_settings.study_area_kind == "m1_corridor":
         geo_params["m1_corridor_buffer_m"] = M1_CORRIDOR_BUFFER_M
         geo_params["m1_corridor_anchors_wgs84"] = list(M1_CORRIDOR_ANCHORS_WGS84)
@@ -1097,6 +1130,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "category_colors": CATEGORY_COLORS,
         "pmtiles_schema_version": PMTILES_SCHEMA_VERSION,
         "noise_mode": NOISE_MODE,
+        "noise_artifact_study_area_simplify_m": NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M,
     }
     if NOISE_MODE == "legacy":
         render_params["noise_dataset_signature"] = noise_signature

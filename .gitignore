@@ -46,6 +46,7 @@ osm/extract_manifest.json
 osm/flat-nodes.bin
 gtfs/*.zip
 boundaries/*.geojson
+ireland_main_island_shp/
 noise_datasets/*.zip
 overture/*.geoparquet
 overture/*.geoparquet.state

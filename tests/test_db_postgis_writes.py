@@ -7,6 +7,7 @@ from unittest import TestCase, mock
 
 from shapely.geometry import Point, box
 
+import config
 from db_postgis import amenity_merge as db_amenity_merge
 from db_postgis import schema as db_schema
 from db_postgis import tables as db_tables
@@ -227,6 +228,8 @@ class ArtifactCopyTests(TestCase):
         sql_src = str(noise_writes._INSERT_ROAD_PROXY_FROM_GRID_SQL)
         self.assertIn("_INSERT_ROAD_PROXY_FROM_GRID_SQL", fn_src)
         self.assertIn("ST_Intersection", sql_src)
+        self.assertIn("ST_SimplifyPreserveTopology", sql_src)
+        self.assertIn("g.geom && s.geom", sql_src)
 
     def test_copy_sql_uses_proxy_grid_when_available(self) -> None:
         import inspect
@@ -456,6 +459,7 @@ class ArtifactCopyTests(TestCase):
         params = connection.execute.call_args_list[3].args[1]
         self.assertTrue(params["has_study_area"])
         self.assertEqual(params["study_wkb"], study.wkb)
+        self.assertEqual(params["study_area_simplify_m"], config.NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M)
 
     def test_copy_sql_publishes_both_lden_and_lnight_metrics(self) -> None:
         from db_postgis import write_noise as noise_writes

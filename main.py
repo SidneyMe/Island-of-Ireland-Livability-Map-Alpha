@@ -285,10 +285,12 @@ def main() -> int:
                 flush=True,
             )
         if precompute_requested:
+            precompute_profile = "dev" if args.precompute_dev else "test" if args.precompute_test else "full"
+            print(f"Preparing livability precompute ({precompute_profile})...", flush=True)
             from precompute import run_precompute as _run_precompute
 
             _run_precompute(
-                profile="dev" if args.precompute_dev else "test" if args.precompute_test else "full",
+                profile=precompute_profile,
                 force_precompute=args.force_precompute,
                 auto_refresh_import=args.auto_refresh_import,
                 force_noise_artifact=args.force_noise_artifact,

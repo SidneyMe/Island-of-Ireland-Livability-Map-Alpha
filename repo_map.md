@@ -30,6 +30,7 @@
 - **Noise artifact source ingest modes**: `noise_artifacts/ingest.py`, `noise_artifacts/ogr_ingest.py`
 - **Amenity tier classifier**: `precompute/amenity_tiers.py`
 - **Amenity clustering for Phase 2 variety scoring**: `precompute/amenity_clusters.py`
+- **Study-area geometry / coast mask**: `study_area.py`
 - **Precompute pipeline orchestration**: `precompute/__init__.py`, `precompute/workflow.py`, `precompute/phases.py`
 - **Lightweight GTFS refresh CLI path**: `transit_refresh_runner.py`
 - **Pipeline ETA and timing history**: `progress_tracker.py`
@@ -108,6 +109,7 @@
    .livability_cache/gtfs/*/current.zip (or override zip paths via env)
    overture/ireland_places.geoparquet (optional)
    noise_datasets/*.zip (optional display overlay)
+   ireland_main_island_shp/ireland_main_island.shp (preferred exact main-island coast mask when present)
    boundaries/*.geojson
 
 2. Raw import
@@ -315,6 +317,13 @@ Notes:
 - The `grid` source-layer now carries both coarse and fine features, with fine rows padded with zero-valued popup numerics so metadata and popup consumers stay schema-stable. (Confirmed from code and tests)
 - LOC: 818
 
+### `study_area.py`
+
+- Purpose: loads and normalizes the metric study-area geometry used by grid generation, reachability, and PMTiles/fine-vector clipping. (Confirmed)
+- Why it matters: `load_island_geometry_metric()` now prefers `ireland_main_island_shp/ireland_main_island.shp` when present, reading it as the exact main-island coast boundary and skipping the older ROI+NI merge/coastal-cleanup path. If the shapefile is missing, it falls back to the ROI/NI boundary merge and `clean_coastal_artifacts()` cleanup. (Confirmed from code and tests)
+- The geo hash includes the main-island shapefile sidecar metadata (`.shp`, `.shx`, `.dbf`, `.prj`, `.cpg`) so PMTiles/precompute caches invalidate when the coastline input changes. (Confirmed from code and tests)
+- LOC: 880
+
 ### `noise_artifacts/bake.py`
 
 - Purpose: standalone noise PMTiles bake from published `noise_polygons` (proxy rows in artifact mode). (Confirmed)
@@ -371,6 +380,11 @@ Notes:
   - public `noise_polygons` stores build-scoped noise overlay geometry; in artifact mode this is currently Phase E transport/industry output (`source_type IN ('road','rail','airport','industry')`, `metric IN ('Lden','Lnight')`, unclassified class) encoded via compatibility columns and exported as `noise_proxy` layer properties
 - LOC: 497
 
+### `db_postgis/_dependencies.py`
+
+- Purpose: central import shim for SQLAlchemy, GeoAlchemy, and geometry helper symbols used by DB modules. (Confirmed)
+- Why it matters: on Windows, it installs a small `platform` shim before importing SQLAlchemy/GeoAlchemy so a broken WMI-backed `platform.system()`/`platform.uname()` call cannot freeze CLI startup before any precompute banner prints. (Confirmed from code and tests)
+
 ### `db_postgis/migrations/versions/`
 
 - Purpose: canonical schema history. (Confirmed)
@@ -420,7 +434,7 @@ config.py
 
 Things that clearly feed this chain:
 
-- geometry / coastal-cleanup params
+- geometry / coastal-cleanup params, including the preferred main-island shapefile sidecars when present
 - scoring caps
 - amenity tier-unit tables
 - Overture dataset signature
@@ -537,6 +551,7 @@ tests/test_server_behavior.py
 | `LIVABILITY_BAKE_WORKERS` | PMTiles bake worker count | `min(12, cpu_count())` |
 | `LIVABILITY_FINE_RASTER_SURFACE` | Enable inspect-backed fine surface caches and legacy PNG endpoint; main map rendering now uses vector PMTiles | `"1"` |
 | `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` | Skip opening step for very large coastal components | `1_000_000_000.0` |
+| `NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M` | Simplify study-area mask only for artifact-mode noise proxy publish intersections; main PMTiles/grid coast geometry remains exact | `250.0` |
 | `OSM2PGSQL_BIN` | osm2pgsql binary path | `"osm2pgsql"` |
 | `NOISE_ROAD_GDB_CANONICAL_CACHE` | Enable ROI Round 4 Road canonical FileGDB -> local GPKG extraction cache path | `"1"` |
 | `NOISE_REBUILD_ROAD_GDB_CACHE` | Force rebuild of canonical Road GDB GPKG cache before PG import | `"0"` |
@@ -582,7 +597,7 @@ tests/test_server_behavior.py
 | `--refresh-import` | local OSM PBF + `osm2pgsql` available |
 | `--refresh-gtfs` | network access to configured public static GTFS ZIP URLs (unless custom local-only URL/path config is used) |
 | `--refresh-transit` | cached GTFS ZIP(s) (or `--auto-refresh-gtfs`) + compiled `walkgraph` with `gtfs-refresh` support |
-| `--precompute` | managed schema ready, raw import ready or `--auto-refresh-import`, boundaries present, compiled `walkgraph` |
+| `--precompute` | managed schema ready, raw import ready or `--auto-refresh-import`, preferred `ireland_main_island_shp` coastline or fallback boundaries present, compiled `walkgraph` |
 | `--serve` | completed precompute build and main PMTiles archive for the chosen profile; noise PMTiles is optional and advertised only when available |
 | Overture merge | `overture/ireland_places.geoparquet` present; otherwise it degrades gracefully |
 | Noise overlay | `noise_datasets/*.zip` present for published contours; ROI Round 4 road requires `pyogrio`/GDAL FileGDB support |
@@ -600,9 +615,11 @@ tests/test_server_behavior.py
 - `_STATE = _BuildState.bootstrap()` also runs at import time and is invalid until activation.
 - `extract_fingerprint()` now caches the exact `.osm.pbf` content hash in `.livability_cache/osm_extract_fingerprint_cache.json`, keyed by resolved path + file size + `mtime_ns`. Deleting or corrupting that cache only affects startup time; the code falls back to a full re-hash.
 - `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` has a non-zero live default even though the nearby comment still talks about "default 0 = disabled". Trust the constant, not the stale comment.
-- `overture/ireland_places.geoparquet` and `boundaries/*.geojson` are external inputs, not committed repo assets.
+- `overture/ireland_places.geoparquet`, `ireland_main_island_shp/*`, and `boundaries/*.geojson` are external inputs, not committed repo assets.
 - Transit reality is GTFS-first now. Do not assume an OSM-stop-to-GTFS matching workflow still drives scoring.
 - PMTiles bake writes to a sibling temp archive and only replaces the final `.pmtiles` after finalize succeeds; failed bakes clean the temp file and preserve the previous archive.
+- Artifact-mode noise publish intentionally clips proxy noise with a simplified study-area mask (`NOISE_ARTIFACT_STUDY_AREA_SIMPLIFY_M`) so an exact high-vertex coastline does not make `ST_Intersection` over every 1000m proxy cell stall. This does not weaken the main grid/PMTiles coastline geometry.
+- `db_postgis._dependencies` patches Windows `platform` calls before SQLAlchemy import. If startup hangs again before `Preparing livability precompute (...)`, check WMI/platform calls before assuming database or PMTiles work has started.
 - OSM import reuse is manifest/scope-aware: raw rows are only considered ready with a complete import manifest whose `normalization_scope_hash` matches the active profile. Raw rows without a matching manifest are dropped and rebuilt.
 - Both Python and Rust GTFS parsers accept `calendar.txt`-only and `calendar_dates.txt`-only feeds, but still require at least one service calendar file.
 - Root `pytest -q` is constrained by `pytest.ini` to `tests/` and excludes generated/local cache directories.
