@@ -117,6 +117,20 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 - Emits a manifest with the extract date so the Phase 6 data-freshness indicator can pick it up.
 - Tolerates failures without clobbering the last good build.
 
+### ~~Profile-specific dev/test builds [independent]~~
+
+**What:** Keep full, dev, and compact test builds isolated so beta work can run without clobbering the island-wide artifacts.
+
+**Why:** The noise and fine-surface pipeline is expensive enough that local iteration needs smaller profiles, but the runtime must still know exactly which manifest, PMTiles archive, and fine-surface assets belong to the selected profile.
+
+**Done so far:**
+
+- `full`, `dev`, and `test` build profiles have separate build hashes and PMTiles filenames.
+- `dev` remains coarse-only for fast iteration.
+- `test` uses the full 20 km to 50 m resolution ladder but clips the study area to a compact Cork bbox.
+- Runtime serving supports profile-specific livability PMTiles and profile-specific noise PMTiles.
+- The runtime exposes `build_profile`, `pmtiles_url`, `runtime_mode`, and optional `runtime_warning` in `/api/runtime`.
+
 ---
 
 ## Phase 1 — Service reality check
@@ -363,6 +377,37 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 
 All items here subtract from a cell's score. They are what makes dense-but-quiet suburbs score above noisy city centres with the same amenity count — the core thesis of the livability map.
 
+The first merged noise slice is a display-only baseline, not a scoring penalty. It is intentionally published as context first so the data pipeline, artifact workflow, PMTiles delivery, and frontend caveats can stabilize before the model starts subtracting points from cells.
+
+### ~~Official-derived noise proxy overlay~~ [display-only]
+
+**What:** Publish a separate strategic-noise overlay for roads, rail, airports, and industry without feeding it into livability scoring yet.
+
+**Why:** Users need to see known noise context, but a defensible score penalty still needs calibration. Separating the overlay from scoring avoids pretending the proxy is a measured point-noise model.
+
+**How:**
+
+- Build a resolved noise artifact from local official-derived noise ZIP/SHP/GDB inputs.
+- Publish road and rail as grid-proxy rows, while airport and industry publish from resolved official-derived polygons.
+- Bake the result to a standalone `noise.pmtiles` archive with source-layer `noise_proxy`, separate from `livability.pmtiles`.
+- Surface runtime counts for metric, source type, and band availability so the UI only offers controls backed by rows in the current build.
+- Keep the layer hidden by default and label it as official-derived proxy data, not measured point noise.
+
+**Done so far:**
+
+- `main.py` exposes `--refresh-noise-artifact`, `--force-noise-artifact`, `--reimport-noise-source`, `--force-noise-all`, `--noise-accurate`, and `--require-active-noise-artifact`.
+- The default `NOISE_MODE=artifact` path reuses an active resolved artifact; `NOISE_MODE=legacy` remains the slow debug path.
+- Windows wrapper commands split strict reuse, cache-aware prepare, and full force rebuild workflows.
+- `noise_artifacts/bake.py` writes a standalone `noise_proxy` PMTiles archive.
+- `serve_from_db.py` exposes `noise_pmtiles_url`, noise counts, and `noise_proxy_metadata`.
+- The frontend adds a hidden-by-default noise overlay with metric/source controls and opacity, and states that road/rail use grid proxy while airport/industry use resolved official noise polygons.
+
+**Still future work:**
+
+- Convert the overlay into a calibrated score penalty.
+- Decide whether road/rail grid proxy should be refined with class-specific differentiation before scoring.
+- Decide how to combine official-derived noise bands with OSM proximity-based nuisance penalties without double-counting.
+
 ### Railway track proximity
 
 **What:** Penalty for cells directly adjacent to active railway tracks.
@@ -536,6 +581,39 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - `/api/inspect` returns the exact 50 m fine-surface breakdown for a clicked location, including component scores, raw counts, cluster counts, effective units, visible resolution, and land coverage.
 - The frontend now opens a click popup using coarse tile properties when that is enough and falls back to `/api/inspect` for exact fine-surface details.
 - This item is functionally done even though the UI is currently a popup rather than a dedicated side panel, and it does not yet list individual top amenity drivers.
+
+### ~~Operational overlay controls~~
+
+**What:** Let users turn on transport reality, service deserts, and the official-derived noise overlay independently from the base score grid.
+
+**Why:** These layers are explanatory context, not always-on scoring output. Keeping them as opt-in overlays makes the map readable while still exposing the beta diagnostics and caveats.
+
+**How:**
+
+- Keep the main livability grid as the default layer.
+- Add independent toggles for transport reality, service deserts, and noise.
+- Use runtime summary counts to disable or hide controls when a build does not contain the backing data.
+- Keep filters local to the MapLibre layer so toggles do not require server round trips.
+
+**Done so far:**
+
+- Transport reality controls live inside the `Amenities` -> `Transport` card, with nested schedule, frequency, and mode controls.
+- Service deserts have a dedicated overlay toggle.
+- Noise has a hidden-by-default overlay toggle, metric/source controls, mapped-count labels, and an opacity slider that updates fill and outline visibility.
+- Transport popups render colocated stop rows together instead of only showing the first rendered feature.
+
+### ~~Grid debug mode~~ [independent]
+
+**What:** A development-only debug card for checking vector-grid source state against rendered layer state.
+
+**Why:** PMTiles/source/layer bugs are hard to diagnose from the normal user-facing status pill. The debug card keeps operational diagnostics available without exposing them by default.
+
+**Done so far:**
+
+- `/?debug-grid=1` reveals the grid-debug card.
+- The card reports source-vs-rendered counts, source resolutions, active fill/outline layers, filter state, last source event, last map error, and a diagnosis line.
+- A copyable plain-text snapshot is available for bug reports.
+- The normal status pill is reserved for real runtime errors.
 
 ### Layer toggles
 

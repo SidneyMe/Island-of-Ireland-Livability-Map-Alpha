@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-05-26. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-06-02. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -204,7 +204,7 @@ Notes:
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` |
 | Progress / ETA behavior | `progress_tracker.py` | `precompute/workflow.py`, `precompute/__init__.py` | `.livability_cache/precompute_timing_stats.json` |
-| Product / methodology docs | `README.md`, `docs/*.md` | Humans only | None |
+| Product / methodology docs | `README.md`, `docs/PHASES.md`, `docs/*.md` | Humans only; README roadmap and phase notes distinguish display-only noise overlay from future scoring penalties | None |
 
 ---
 

@@ -459,6 +459,11 @@ Builds on the service reality layer above. Bus-only transport scoring now uses s
 
 ### Noise and nuisance penalty layer
 
+A display-only official-derived noise proxy overlay is now merged. It is intentionally not a scoring penalty yet: it gives users visibility into road, rail, airport, and industry noise context while the scoring penalty model remains a separate design/calibration problem.
+
+- [x] Build a separate `noise.pmtiles` overlay from official-derived strategic noise artifacts, with `road` / `rail` grid proxy rows plus resolved `airport` / `industry` polygons for `Lden` and `Lnight`.
+- [x] Expose noise runtime metadata and frontend controls: hidden-by-default overlay toggle, metric/source controls, mapped-count labels, opacity slider, and explicit caveat that the layer is not measured point noise.
+- [ ] Convert the official-derived noise proxy into a calibrated scoring penalty.
 - [ ] Railway track proximity (the tracks themselves, not stations).
 - [ ] Motorway and major-road noise.
 - [ ] Flight paths and airport proximity.
@@ -485,6 +490,8 @@ Builds on the service reality layer above. Bus-only transport scoring now uses s
 ### UI and features
 
 - [x] **Per-cell score breakdowns on click** - click popups now show total score plus per-category raw counts, cluster counts, effective units, and component scores; fine-surface clicks use `/api/inspect` for exact values.
+- [x] **Operational overlay controls** - transport reality, service deserts, and official-derived noise overlays are controlled independently; transport has nested schedule/frequency/mode filters, and noise has metric/source/opacity controls.
+- [x] **Grid debug mode** - `/?debug-grid=1` reveals source/rendered counts, active layer/filter state, diagnosis text, and a copyable debug snapshot without occupying the normal status pill.
 - [ ] **User-adjustable weight sliders** — let users score for their own priorities rather than the built-in defaults.
 - [ ] **Layer toggles** — view the map by a single category instead of only the combined score.
 - [ ] **Shortlist mode** — save multiple locations and view their breakdowns in one panel.
@@ -497,6 +504,8 @@ Builds on the service reality layer above. Bus-only transport scoring now uses s
 ### Infrastructure
 
 - [x] Clip grid cells to land so coastal cells aren't artificially sparse. Effective area stored per cell; amenity density and park scoring normalised by clipped land area.
+- [x] Profile-specific beta/dev runtime outputs: `full`, `dev`, and Cork-only `test` profiles have isolated build hashes plus profile-specific livability and noise PMTiles paths.
+- [x] Noise artifact workflow split: strict reuse commands fail fast when the active artifact is missing, prepare commands refresh stale artifacts, and force commands reimport source rows before rebuilding.
 - [x] Automated data refresh — scripted OSM re-import and precompute on a schedule.
 - [x] Remove Windows-specific assumptions from the code path (hardcoded `.exe` suffix, PowerShell-only setup commands) so the project can run on Linux/macOS in principle. Testing and documentation for those platforms is out of scope — PRs from Linux/macOS users welcome.
 - [x] Basic CI — run Python and Rust tests on push.
