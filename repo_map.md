@@ -30,6 +30,8 @@
 - **Noise artifact source ingest modes**: `noise_artifacts/ingest.py`, `noise_artifacts/ogr_ingest.py`
 - **Amenity tier classifier**: `precompute/amenity_tiers.py`
 - **Amenity clustering for Phase 2 variety scoring**: `precompute/amenity_clusters.py`
+- **Precompute cache helpers**: `precompute/cache.py`, `precompute/_cache_wrappers.py`
+- **Precompute tier helpers**: `precompute/tiers.py`, `precompute/_tier_wrappers.py`
 - **Study-area geometry / coast mask**: `study_area.py`
 - **Precompute pipeline orchestration**: `precompute/__init__.py`, `precompute/workflow.py`, `precompute/phases.py`
 - **Lightweight GTFS refresh CLI path**: `transit_refresh_runner.py`
@@ -170,7 +172,7 @@
    static/dist/app.js
   -> reads PMTiles through pmtiles://
   -> reads runtime JSON from /api/runtime with a longer cold-start timeout and one retry after abort so first-load DB/runtime warmup does not leave the app permanently stuck
-  -> renders one active vector grid fill+outline pair, recreates those layers when the zoom band changes, and overzooms z15 source tiles to z19
+  -> renders one active vector grid fill+outline pair with a client-side Combined/Shops/Transport/Healthcare/Parks color toggle, recreates those layers when the zoom band changes, and overzooms z15 source tiles to z19
   -> exposes a default-off Noise proxy panel backed by the separate `noise` vector source and its `noise_proxy` source-layer, with metric + kind filtering (`road`, `rail`, `airport`, `industry`), proxy score coloring, opacity control that now updates both fill and outline (`line-opacity = min(0.55, fillOpacity * 0.8)`), and an explicit caveat that road/rail are grid proxy while airport/industry are resolved official-derived polygons (not measured point noise)
   -> the fixed control panel now scrolls internally when its contents exceed the viewport height, so stacked debug + amenity controls stay reachable
   -> public transport tiers are rendered inside the `Amenities` -> `Transport` card: `Sub-tiers` now contains a `Bus` subgroup (with nested `Schedule` weekly bus-pattern + unscheduled/exception-only filters and nested `Frequency` headway tiers) plus a separate `Transport` mode group (`Bus` / `Rail` / `Tram` toggles), while the default all-mode state intentionally applies no vector filter so older PMTiles transport layers without the newer mode/subtier fields still show stops; narrowed filters require the newer transport fields so selectors visibly narrow when the matching profile PMTiles is served, tram/rail-only popups still show their mode tier, and popups expose bus headway, commute, Friday-evening, and score-unit frequency fields
@@ -654,13 +656,13 @@ Representative tests confirmed present:
 | `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier` exposure, bounded parallel scheduling, retry behavior, temp-output cleanup, and old-archive preservation on failure |
 | `tests/test_noise_loader.py` | ROI dB field normalization plus round-aware NI mapping (Round 1 class-code handling, Round 2/3 threshold mapping, unknown-code errors), and newest-round fallback geometry |
 | `tests/test_noise_artifacts.py` | manifest SQL safety checks (`CAST(:error_detail AS text)`), ingest pre-validation diagnostics, streaming ingest behavior, deterministic dev-fast grid cache identity, and non-mutating accurate simplification |
-| `tests/test_fine_vector_pmtiles_worker.py` | fine-grid shard aggregation, degenerate buffered-ring rejection, encoded per-zoom resolutions, mixed z15 resolutions, invalid-land skipping, buffered border-cell continuity, worker cache bounds/reset behavior |
+| `tests/test_fine_vector_pmtiles_worker.py` | fine-grid shard aggregation, degenerate buffered-ring rejection, encoded per-zoom resolutions, mixed z15 resolutions, invalid-land skipping, buffered border-cell continuity, bounded worker LRU cache behavior across chunks |
 | `tests/test_progress_tracker.py` | timing-history sanitization and persistence |
 | `tests/test_server_behavior.py` | runtime API shape, transport subtier/mode count exposure, noise count/PMTiles URL exposure, and range serving for main + noise PMTiles |
 | `tests/test_transit_phase1.py` | GTFS-first transit reality rows, weekly bus subtiers, bus daytime headway buckets, frequency departure windows, transport score units, exact local GTFS snapshot stop regressions for each bus-tier bucket plus strict exception-only / unscheduled examples, exports, school-only classification, `gtfs-refresh` artifact loading |
 | `tests/test_surface_runtime.py` | fine-surface runtime behavior |
 | `tests/test_sanity_check.py` | sanity fixture structure and runtime lookup mode selection |
-| `frontend/src/runtime_contract.test.js` | frontend runtime contract parsing, separate noise vector source wiring, active fill/outline grid layer definitions, lifecycle rebuild decisions, explicit visibility plans, the transport rail/tram styling priority, and the single active debug-grid filter path |
+| `frontend/src/runtime_contract.test.js` | frontend runtime contract parsing, score-layer label/expression mapping, separate noise vector source wiring, active fill/outline grid layer definitions, lifecycle rebuild decisions, explicit visibility plans, the transport rail/tram styling priority, and the single active debug-grid filter path |
 | `frontend/src/grid_debug.test.js` | persistent grid debug card rendering, diagnosis states, resolution display updates, and copyable snapshot formatting |
 | `frontend/src/transport_filters.test.js` | public transport filter logic including weekly bus tiers, exact rail/tram mode matching, and exception-only intersection logic |
 | `frontend/src/noise_filters.test.js` | noise metric/source/band options and MapLibre filter expression construction |

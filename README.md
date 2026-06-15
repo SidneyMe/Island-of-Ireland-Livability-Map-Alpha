@@ -493,7 +493,7 @@ A display-only official-derived noise proxy overlay is now merged. It is intenti
 - [x] **Operational overlay controls** - transport reality, service deserts, and official-derived noise overlays are controlled independently; transport has nested schedule/frequency/mode filters, and noise has metric/source/opacity controls.
 - [x] **Grid debug mode** - `/?debug-grid=1` reveals source/rendered counts, active layer/filter state, diagnosis text, and a copyable debug snapshot without occupying the normal status pill.
 - [ ] **User-adjustable weight sliders** — let users score for their own priorities rather than the built-in defaults.
-- [ ] **Layer toggles** — view the map by a single category instead of only the combined score.
+- [x] **Layer toggles** — view the map by a single category instead of only the combined score.
 - [ ] **Shortlist mode** — save multiple locations and view their breakdowns in one panel.
 - [ ] **Compare mode** — pin two locations side by side with their score breakdowns.
 - [ ] **Isochrone overlay** — click anywhere, draw the reachable polygon at 5 / 10 / 15 min on foot.

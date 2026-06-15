@@ -615,7 +615,7 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - A copyable plain-text snapshot is available for bug reports.
 - The normal status pill is reserved for real runtime errors.
 
-### Layer toggles
+### ~~Layer toggles~~
 
 **What:** Switch the map view between the combined score and any single category.
 
@@ -624,6 +624,11 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - Each category is stored as a separate component score (shared infrastructure with per-cell breakdowns above).
 - UI toggle group; swap the fill-color expression on the MapLibre layer.
 - Combined view stays the default.
+
+**Done so far:**
+
+- Client-side radio controls in the Grid section switch the active fill color between combined, shops, transport, healthcare, and parks.
+- The selected layer survives grid-resolution rebuilds and is stored session-locally for the current browser tab.
 
 ### Data freshness indicator
 
