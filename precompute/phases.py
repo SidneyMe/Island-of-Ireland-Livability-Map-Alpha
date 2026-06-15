@@ -588,24 +588,26 @@ def phase_reachability_impl(
         walk_effective_units_by_node = {}
         cache_reset_large_frames("walk_effective_units_by_origin_node", cache_dir)
 
-    missing_count_nodes = tuple(
-        node for node in requested_walk_origin_nodes if node not in walk_counts_by_node
-    )
-    missing_cluster_count_nodes = tuple(
-        node for node in requested_walk_origin_nodes if node not in walk_cluster_counts_by_node
-    )
-    missing_effective_nodes = tuple(
-        node for node in requested_walk_origin_nodes if node not in walk_effective_units_by_node
-    )
-    missing_origin_nodes = tuple(
-        node
-        for node in requested_walk_origin_nodes
-        if (
-            node not in walk_counts_by_node
-            or node not in walk_cluster_counts_by_node
-            or node not in walk_effective_units_by_node
-        )
-    )
+    missing_counts: list[int] = []
+    missing_clusters: list[int] = []
+    missing_effective: list[int] = []
+    missing_any: list[int] = []
+    for node in requested_walk_origin_nodes:
+        counts_missing = node not in walk_counts_by_node
+        clusters_missing = node not in walk_cluster_counts_by_node
+        effective_missing = node not in walk_effective_units_by_node
+        if counts_missing:
+            missing_counts.append(node)
+        if clusters_missing:
+            missing_clusters.append(node)
+        if effective_missing:
+            missing_effective.append(node)
+        if counts_missing or clusters_missing or effective_missing:
+            missing_any.append(node)
+    missing_count_nodes = tuple(missing_counts)
+    missing_cluster_count_nodes = tuple(missing_clusters)
+    missing_effective_nodes = tuple(missing_effective)
+    missing_origin_nodes = tuple(missing_any)
 
     if missing_origin_nodes:
         built_any = True

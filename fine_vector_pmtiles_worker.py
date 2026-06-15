@@ -673,23 +673,20 @@ def _bake_chunk_worker(
 ) -> list[tuple[int, bytes]]:
     engine = _worker_get_engine(db_url)
     out: list[tuple[int, bytes]] = []
-    try:
-        with engine.connect() as connection:
-            for z, x, y, layers in chunk:
-                payload = _tile_mvt_bytes_by_flags(
-                    connection,
-                    build_key=build_key,
-                    z=z,
-                    x=x,
-                    y=y,
-                    layers=layers,
-                    fine_grid_config=fine_grid_config,
-                )
-                if not payload:
-                    continue
-                out.append((zxy_to_tileid(z, x, y), gzip.compress(payload)))
-    finally:
-        _reset_fine_grid_worker_caches(fine_grid_config)
+    with engine.connect() as connection:
+        for z, x, y, layers in chunk:
+            payload = _tile_mvt_bytes_by_flags(
+                connection,
+                build_key=build_key,
+                z=z,
+                x=x,
+                y=y,
+                layers=layers,
+                fine_grid_config=fine_grid_config,
+            )
+            if not payload:
+                continue
+            out.append((zxy_to_tileid(z, x, y), gzip.compress(payload)))
     return out
 
 

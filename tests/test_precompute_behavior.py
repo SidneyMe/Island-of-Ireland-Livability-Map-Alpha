@@ -2147,6 +2147,32 @@ class PrecomputeReachabilityTests(TestCase):
 
         self.assertTrue(can_finalize)
 
+    def test_reach_tier_finalization_does_not_deserialize_large_caches(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            cache_dir = Path(temp_dir)
+            precompute.cache_save("walk_nodes_by_cat", _empty_amenity_data(), cache_dir)
+            precompute.cache_save("walk_cluster_nodes_by_cat", _empty_amenity_data(), cache_dir)
+            suffix = ".pkl.gz" if config.USE_COMPRESSED_CACHE else ".pkl"
+            for key in (
+                "walk_counts_by_origin_node",
+                "walk_cluster_counts_by_origin_node",
+                "walk_effective_units_by_origin_node",
+            ):
+                (cache_dir / f"{key}{suffix}").write_bytes(b"present but not a pickle")
+
+            with (
+                mock.patch.object(precompute._STATE, "reach_cache_dir", cache_dir),
+                mock.patch("builtins.print") as print_mock,
+            ):
+                can_finalize = precompute._can_finalize_reach_tier(_empty_amenity_data())
+
+            bad_files = list(cache_dir.glob("*.bad*"))
+            _clear_state_cache(cache_dir)
+
+        self.assertTrue(can_finalize)
+        self.assertEqual(bad_files, [])
+        print_mock.assert_not_called()
+
     def test_validate_tier_reuses_recoverable_building_reach_cache(self) -> None:
         with TemporaryDirectory() as temp_dir:
             cache_dir = Path(temp_dir)

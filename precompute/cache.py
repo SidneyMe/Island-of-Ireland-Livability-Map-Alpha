@@ -222,6 +222,20 @@ def cache_load_for_finalize(key: str, cache_dir: Path, *, force_recompute: bool)
     return _load_pickle_cache(_pkl_path(key, cache_dir), cache_dir)
 
 
+def cache_exists_large_for_finalize(
+    key: str,
+    cache_dir: Path,
+    *,
+    force_recompute: bool,
+    use_compressed_cache: bool,
+) -> bool:
+    if force_recompute:
+        return False
+    if use_compressed_cache:
+        return _gz_path(key, cache_dir).exists() or _chunks_gz_path(key, cache_dir).exists()
+    return _pkl_path(key, cache_dir).exists() or _chunks_pkl_path(key, cache_dir).exists()
+
+
 def cache_load_large_for_finalize(
     key: str,
     cache_dir: Path,

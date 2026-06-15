@@ -59,6 +59,15 @@ def _cache_load_for_finalize(key: str, cache_dir: Path):
     )
 
 
+def _cache_exists_large_for_finalize(key: str, cache_dir: Path) -> bool:
+    return _cache.cache_exists_large_for_finalize(
+        key,
+        cache_dir,
+        force_recompute=FORCE_RECOMPUTE,
+        use_compressed_cache=USE_COMPRESSED_CACHE,
+    )
+
+
 def _cache_load_large_for_finalize(key: str, cache_dir: Path):
     return _cache.cache_load_large_for_finalize(
         key,

@@ -148,17 +148,15 @@ def can_finalize_reach_tier(
     *,
     reach_cache_dir: Path,
     cache_load_for_finalize,
-    cache_load_large_for_finalize,
+    cache_exists_large_for_finalize,
 ) -> bool:
     return (
         amenity_data is not None
         and cache_load_for_finalize("walk_nodes_by_cat", reach_cache_dir) is not None
         and cache_load_for_finalize("walk_cluster_nodes_by_cat", reach_cache_dir) is not None
-        and cache_load_large_for_finalize("walk_counts_by_origin_node", reach_cache_dir) is not None
-        and cache_load_large_for_finalize("walk_cluster_counts_by_origin_node", reach_cache_dir)
-        is not None
-        and cache_load_large_for_finalize("walk_effective_units_by_origin_node", reach_cache_dir)
-        is not None
+        and cache_exists_large_for_finalize("walk_counts_by_origin_node", reach_cache_dir)
+        and cache_exists_large_for_finalize("walk_cluster_counts_by_origin_node", reach_cache_dir)
+        and cache_exists_large_for_finalize("walk_effective_units_by_origin_node", reach_cache_dir)
     )
 
 

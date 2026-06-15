@@ -691,7 +691,7 @@ class FineVectorPmtilesWorkerTests(TestCase):
         self.assertLessEqual(sizes["score"], fine_worker._RAW_SCORE_CACHE_LIMIT)
         self.assertLessEqual(sizes["aggregated"], fine_worker._AGGREGATED_CACHE_LIMIT)
 
-    def test_bake_chunk_worker_resets_large_caches_but_keeps_manifest_state(self) -> None:
+    def test_bake_chunk_worker_keeps_bounded_caches_and_manifest_state(self) -> None:
         class _FakeConnection:
             def __enter__(self):
                 return self
@@ -705,10 +705,9 @@ class FineVectorPmtilesWorkerTests(TestCase):
 
         with TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
-            shell_dir, score_dir, shard_ids = _build_surface_fixture(tmp, shard_count=1)
-            shard_id = shard_ids[0]
+            shell_dir, score_dir, shard_ids = _build_surface_fixture(tmp, shard_count=10)
             context = fine_worker.FineGridTileContext(shell_dir=shell_dir, score_dir=score_dir)
-            context.shard_wgs84_bbox(shard_id)
+            context.shard_wgs84_bbox(shard_ids[0])
             cache_key = (str(shell_dir), str(score_dir))
             fine_worker._FINE_GRID_CONTEXTS.clear()
             fine_worker._FINE_GRID_CONTEXTS[cache_key] = context
@@ -717,9 +716,12 @@ class FineVectorPmtilesWorkerTests(TestCase):
                 del connection, build_key, z, x, y, layers
                 cached_context = fine_worker._fine_grid_context(fine_grid_config)
                 self.assertIs(cached_context, context)
-                cached_context._load_shell_shard(shard_id)
-                cached_context._load_score_shard(shard_id)
-                cached_context.aggregated_shard_surface(shard_id, 50)
+                for shard_id in shard_ids:
+                    cached_context._load_shell_shard(shard_id)
+                    cached_context._load_score_shard(shard_id)
+                for shard_id in shard_ids:
+                    for resolution_m in (50, 100):
+                        cached_context.aggregated_shard_surface(shard_id, resolution_m)
                 return b"tile"
 
             with (
@@ -741,8 +743,11 @@ class FineVectorPmtilesWorkerTests(TestCase):
             fine_worker._FINE_GRID_CONTEXTS.clear()
 
         self.assertEqual(len(result), 1)
-        self.assertEqual(sizes["shell"], 0)
-        self.assertEqual(sizes["score"], 0)
-        self.assertEqual(sizes["aggregated"], 0)
+        self.assertLessEqual(sizes["shell"], fine_worker._RAW_SHELL_CACHE_LIMIT)
+        self.assertLessEqual(sizes["score"], fine_worker._RAW_SCORE_CACHE_LIMIT)
+        self.assertLessEqual(sizes["aggregated"], fine_worker._AGGREGATED_CACHE_LIMIT)
+        self.assertGreater(sizes["shell"], 0)
+        self.assertGreater(sizes["score"], 0)
+        self.assertGreater(sizes["aggregated"], 0)
         self.assertEqual(sizes["wgs84_bbox"], 1)
-        self.assertEqual(context.shard_count, 1)
+        self.assertEqual(context.shard_count, 10)

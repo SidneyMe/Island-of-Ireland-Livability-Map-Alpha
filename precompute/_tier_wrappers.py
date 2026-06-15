@@ -14,7 +14,11 @@ from config import (
 
 from . import surface as _surface
 from . import tiers as _tiers
-from ._cache_wrappers import _cache_load_for_finalize, _cache_load_large_for_finalize
+from ._cache_wrappers import (
+    _cache_exists_large_for_finalize,
+    _cache_load_for_finalize,
+    _cache_load_large_for_finalize,
+)
 from ._state import _STATE
 
 
@@ -78,7 +82,7 @@ def _can_finalize_reach_tier(
         amenity_data,
         reach_cache_dir=_STATE.reach_cache_dir,
         cache_load_for_finalize=_cache_load_for_finalize,
-        cache_load_large_for_finalize=_cache_load_large_for_finalize,
+        cache_exists_large_for_finalize=_cache_exists_large_for_finalize,
     )
 
 

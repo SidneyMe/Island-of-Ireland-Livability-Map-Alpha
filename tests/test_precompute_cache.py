@@ -169,6 +169,21 @@ class PrecomputeCacheTests(TestCase):
                 {**base_payload, **chunk_payload},
             )
 
+    def test_large_cache_finalize_exists_checks_presence_without_loading(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            cache_dir = Path(tmp_name)
+            (cache_dir / "walk.chunks.pkl.gz").write_bytes(b"present but not gzip")
+
+            self.assertTrue(
+                cache.cache_exists_large_for_finalize(
+                    "walk",
+                    cache_dir,
+                    force_recompute=False,
+                    use_compressed_cache=True,
+                )
+            )
+            self.assertFalse(list(cache_dir.glob("walk.chunks.pkl.gz.bad*")))
+
     def test_corrupted_chunk_cache_falls_back_to_base_blob(self) -> None:
         with TemporaryDirectory() as tmp_name:
             cache_dir = Path(tmp_name)
