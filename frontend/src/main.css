@@ -1,1 +1,21 @@
+#grid-layer-controls {
+    display: grid;
+    gap: 8px;
+    margin-top: 10px;
+}
+
+.grid-layer-note {
+    margin: 8px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.toggle-row input[type="checkbox"],
+.toggle-row input[type="radio"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--accent);
+}
+
 /* MapLibre styles are imported from JS in main.js. */

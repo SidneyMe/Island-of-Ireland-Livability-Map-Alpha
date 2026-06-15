@@ -4,7 +4,7 @@
   "version": "2.0.0",
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "vite build --configLoader native",
     "dev": "vite",
     "test": "node src/runtime_contract.test.js && node src/grid_debug.test.js && node src/amenity_filters.test.js && node src/transport_filters.test.js && node src/noise_filters.test.js && node src/noise_proxy_controls.test.js && node src/transport_reality_popup.test.js && node src/click_priority.test.js"
   },

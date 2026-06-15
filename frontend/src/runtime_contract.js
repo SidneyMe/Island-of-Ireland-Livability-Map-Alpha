@@ -8,6 +8,42 @@ const GRID_INSERT_BEFORE_LAYER_ID = "noise-proxy-fill";
 const DEFAULT_NOISE_OPACITY = 0.45;
 const NOISE_OUTLINE_OPACITY_MULTIPLIER = 0.8;
 const MAX_NOISE_OUTLINE_OPACITY = 0.55;
+const GRID_SCORE_LAYER_OPTIONS = [
+  { value: "combined", label: "Combined", field: "total_score" },
+  { value: "shops", label: "Shops", field: "score_shops" },
+  { value: "transport", label: "Transport", field: "score_transport" },
+  { value: "healthcare", label: "Healthcare", field: "score_healthcare" },
+  { value: "parks", label: "Parks", field: "score_parks" }
+];
+
+function normalizeGridScoreLayer(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return GRID_SCORE_LAYER_OPTIONS.some(function (entry) {
+    return entry.value === normalized;
+  }) ? normalized : "combined";
+}
+
+function gridScoreLayerOptions() {
+  return GRID_SCORE_LAYER_OPTIONS.map(function (entry) {
+    return { ...entry };
+  });
+}
+
+function gridScoreLayerLabel(value) {
+  const normalized = normalizeGridScoreLayer(value);
+  const entry = GRID_SCORE_LAYER_OPTIONS.find(function (option) {
+    return option.value === normalized;
+  });
+  return entry ? entry.label : "Combined";
+}
+
+function gridScoreLayerField(value) {
+  const normalized = normalizeGridScoreLayer(value);
+  const entry = GRID_SCORE_LAYER_OPTIONS.find(function (option) {
+    return option.value === normalized;
+  });
+  return entry ? entry.field : "total_score";
+}
 
 function noiseOutlineOpacity(fillOpacity) {
   const numericFillOpacity = Number(fillOpacity);
@@ -136,7 +172,7 @@ function gridZoomRange(runtime) {
   };
 }
 
-function buildActiveGridLayers(runtime, resolutionM) {
+function buildActiveGridLayers(runtime, resolutionM, scoreLayer = "combined") {
   const range = gridZoomRange(runtime);
   const filter = gridFilterForResolution(resolutionM);
   return [
@@ -150,7 +186,7 @@ function buildActiveGridLayers(runtime, resolutionM) {
       filter: filter,
       layout: { visibility: "none" },
       paint: {
-        "fill-color": gridFillColorExpression(),
+        "fill-color": gridFillColorExpression(scoreLayer),
         "fill-antialias": false,
         "fill-opacity": 0.52
       }
@@ -192,13 +228,13 @@ function buildActiveGridLayers(runtime, resolutionM) {
   ];
 }
 
-function activeGridLifecycle(runtime, previousResolutionM, zoom) {
+function activeGridLifecycle(runtime, previousResolutionM, zoom, scoreLayer = "combined") {
   const resolutionM = activeGridResolution(runtime, zoom);
   return {
     resolutionM: resolutionM,
     rebuild: Number(previousResolutionM) !== Number(resolutionM),
     filter: gridFilterForResolution(resolutionM),
-    layerDefinitions: buildActiveGridLayers(runtime, resolutionM)
+    layerDefinitions: buildActiveGridLayers(runtime, resolutionM, scoreLayer)
   };
 }
 
@@ -278,11 +314,12 @@ function zoomBoundsForResolution(runtime, resolutionM) {
   return { minZoom: 0, maxZoom: Number(runtime.max_zoom || 19) + 1 };
 }
 
-function gridFillColorExpression() {
+function gridFillColorExpression(scoreLayer = "combined") {
+  const field = gridScoreLayerField(scoreLayer);
   return [
     "interpolate",
     ["linear"],
-    ["coalesce", ["get", "total_score"], 0],
+    ["coalesce", ["get", field], 0],
     0, "#440154",
     25, "#3b528b",
     50, "#21908c",
@@ -400,6 +437,7 @@ function noiseFillColorExpression() {
 function buildStyle(runtime, options = {}) {
   const colors = runtime.category_colors || {};
   const origin = options.windowOrigin || "http://127.0.0.1:8000";
+  const selectedGridLayer = normalizeGridScoreLayer(options.selectedGridLayer || "combined");
   const pmtilesUrl = "pmtiles://" + origin + (runtime.pmtiles_url || "/tiles/livability.pmtiles");
   const noisePmtilesUrl = runtime.noise_pmtiles_url
     ? "pmtiles://" + origin + runtime.noise_pmtiles_url
@@ -452,7 +490,8 @@ function buildStyle(runtime, options = {}) {
   const layers = [{ id: "basemap", type: "raster", source: "basemap" }];
   buildActiveGridLayers(
     runtime,
-    activeGridResolution(runtime, Number(runtime.default_zoom || 0))
+    activeGridResolution(runtime, Number(runtime.default_zoom || 0)),
+    selectedGridLayer
   ).forEach(function (layer) {
     layers.push(layer);
   });
@@ -597,13 +636,18 @@ export {
   debugGridLayerIds,
   fineSurfaceEnabled,
   gridFilterForResolution,
+  gridFillColorExpression,
   gridFillLayerId,
   gridFillLayerIds,
   gridOutlineLayerId,
   gridOutlineLayerIds,
+  gridScoreLayerField,
+  gridScoreLayerLabel,
+  gridScoreLayerOptions,
   gridVisibilityPlan,
   gridLayerIds,
   noiseOutlineOpacity,
+  normalizeGridScoreLayer,
   resolutionForZoom,
   runtimeFineResolutions,
   runtimeZoomBreaks,

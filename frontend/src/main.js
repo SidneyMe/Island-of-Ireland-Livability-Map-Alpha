@@ -34,10 +34,14 @@ import {
   activeDebugGridLayerId as runtimeActiveDebugGridLayerId,
   activeGridLayerId as runtimeActiveGridLayerId,
   activeGridOutlineLayerId as runtimeActiveGridOutlineLayerId,
+  gridFillColorExpression as runtimeGridFillColorExpression,
   buildStyle as buildRuntimeStyle,
   buildActiveGridLayers as runtimeBuildActiveGridLayers,
   debugGridVisibilityPlan as runtimeDebugGridVisibilityPlan,
   fineSurfaceEnabled as runtimeFineSurfaceEnabled,
+  gridScoreLayerLabel as runtimeGridScoreLayerLabel,
+  gridScoreLayerOptions as runtimeGridScoreLayerOptions,
+  normalizeGridScoreLayer as runtimeNormalizeGridScoreLayer,
   gridVisibilityPlan as runtimeGridVisibilityPlan,
   resolutionForZoom as runtimeResolutionForZoom
 } from "./runtime_contract.js";
@@ -63,6 +67,7 @@ maplibregl.addProtocol("pmtiles", protocol.tile);
 
 const MIN_ZOOM = 5;
 const DEBUG_GRID_QUERY_PARAM = "debug-grid";
+const GRID_LAYER_STORAGE_KEY = "livability-grid-layer";
 const RUNTIME_FETCH_TIMEOUT_MS = 45000;
 const RUNTIME_FETCH_RETRY_DELAY_MS = 1200;
 const RUNTIME_FETCH_MAX_ATTEMPTS = 2;
@@ -84,6 +89,8 @@ const elements = {
   noiseControls: document.getElementById("noise-controls"),
   noiseNote: document.getElementById("noise-note"),
   gridToggle: document.getElementById("grid-toggle"),
+  gridLayerControls: document.getElementById("grid-layer-controls"),
+  gridLayerNote: document.getElementById("grid-layer-note"),
   map: document.getElementById("map"),
   mapStage: document.getElementById("map-stage"),
   gridDebug: {
@@ -117,6 +124,7 @@ const state = {
   map: null,
   popup: null,
   panelHidden: false,
+  selectedGridLayer: "combined",
   enabledAmenityCategories: new Set(),
   enabledAmenityTiers: new Map(),
   gridVisible: true,
@@ -171,7 +179,8 @@ function activeGridLifecycle() {
   return runtimeActiveGridLifecycle(
     state.runtime || {},
     state.activeGridResolutionM,
-    zoom
+    zoom,
+    state.selectedGridLayer
   );
 }
 
@@ -189,6 +198,85 @@ function updateAmenityNote() {
   elements.amenityNote.textContent = count
     ? count + " layer" + (count === 1 ? "" : "s") + " on"
     : "Off until enabled";
+}
+
+function readSavedGridLayer() {
+  try {
+    const value = window.sessionStorage.getItem(GRID_LAYER_STORAGE_KEY);
+    return runtimeNormalizeGridScoreLayer(value);
+  } catch (error) {
+    return "combined";
+  }
+}
+
+function saveGridLayerSelection(value) {
+  try {
+    window.sessionStorage.setItem(GRID_LAYER_STORAGE_KEY, runtimeNormalizeGridScoreLayer(value));
+  } catch (error) {
+    // Session storage is best-effort only.
+  }
+}
+
+function updateGridLayerNote() {
+  if (!elements.gridLayerNote) return;
+  elements.gridLayerNote.textContent = "Active layer: " + runtimeGridScoreLayerLabel(state.selectedGridLayer);
+}
+
+function applyGridLayerSelection() {
+  if (!state.map) {
+    updateGridLayerNote();
+    return;
+  }
+  const layerId = activeGridLayerId();
+  if (state.map.getLayer(layerId)) {
+    state.map.setPaintProperty(
+      layerId,
+      "fill-color",
+      runtimeGridFillColorExpression(state.selectedGridLayer)
+    );
+  }
+  updateGridLayerNote();
+}
+
+function buildGridLayerControls() {
+  if (!elements.gridLayerControls) return;
+  elements.gridLayerControls.replaceChildren();
+  const options = runtimeGridScoreLayerOptions();
+  options.forEach(function (option) {
+    const label = document.createElement("label");
+    label.className = "toggle-row grid-layer-row";
+    label.htmlFor = "grid-layer-" + option.value;
+
+    const textWrap = document.createElement("span");
+    textWrap.className = "toggle-label";
+
+    const title = document.createElement("strong");
+    title.textContent = option.label;
+
+    const subtitle = document.createElement("span");
+    subtitle.textContent = option.value === "combined"
+      ? "Total score"
+      : "Single-category view";
+
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "grid-layer";
+    input.id = "grid-layer-" + option.value;
+    input.checked = state.selectedGridLayer === option.value;
+    input.addEventListener("change", function () {
+      if (!input.checked) return;
+      state.selectedGridLayer = option.value;
+      saveGridLayerSelection(option.value);
+      applyGridLayerSelection();
+    });
+
+    textWrap.appendChild(title);
+    textWrap.appendChild(subtitle);
+    label.appendChild(textWrap);
+    label.appendChild(input);
+    elements.gridLayerControls.appendChild(label);
+  });
+  updateGridLayerNote();
 }
 
 function transportMappedCount(amenityCounts) {
@@ -388,7 +476,11 @@ function ensureActiveGridLayers() {
   const beforeLayerId = state.map.getLayer(runtimeGridInsertBeforeLayerId)
     ? runtimeGridInsertBeforeLayerId
     : undefined;
-  runtimeBuildActiveGridLayers(state.runtime || {}, lifecycle.resolutionM).forEach(function (layer) {
+  runtimeBuildActiveGridLayers(
+    state.runtime || {},
+    lifecycle.resolutionM,
+    state.selectedGridLayer
+  ).forEach(function (layer) {
     state.map.addLayer(layer, beforeLayerId);
   });
   state.activeGridResolutionM = lifecycle.resolutionM;
@@ -398,6 +490,7 @@ function ensureActiveGridLayers() {
 function applyGridVisibility() {
   const lifecycle = ensureActiveGridLayers();
   if (!state.map || !lifecycle) return;
+  applyGridLayerSelection();
   runtimeGridVisibilityPlan(state.runtime || {}, state.map.getZoom(), state.gridVisible).forEach(function (entry) {
     setLayerVisibility(entry.layerId, entry.visibility);
   });
@@ -1309,7 +1402,10 @@ function wireUi() {
 function initializeMap() {
   state.map = new maplibregl.Map({
     container: elements.map,
-    style: buildRuntimeStyle(state.runtime, { windowOrigin: window.location.origin }),
+    style: buildRuntimeStyle(state.runtime, {
+      windowOrigin: window.location.origin,
+      selectedGridLayer: state.selectedGridLayer
+    }),
     center: [state.runtime.map_center.lon, state.runtime.map_center.lat],
     zoom: state.runtime.default_zoom || 6,
     minZoom: MIN_ZOOM,
@@ -1491,6 +1587,7 @@ function initializeApp(runtime) {
   state.debugGridVisible = false;
   state.gridDebug = createGridDebugState(DEBUG_GRID_ENABLED);
   state.gridDebugSnapshotFallbackText = "";
+  state.selectedGridLayer = readSavedGridLayer();
   state.enabledAmenityCategories = new Set();
   state.enabledAmenityTiers = new Map(
     Object.entries(defaultAmenityTierSelections(runtime)).map(function (entry) {
@@ -1511,6 +1608,7 @@ function initializeApp(runtime) {
     state.selectedNoiseSources.delete("industry");
   }
   state.selectedNoiseBands = new Set(noiseDefaults.bands || []);
+  buildGridLayerControls();
   buildAmenityControls();
   buildNoiseControls();
   buildTransitControls();

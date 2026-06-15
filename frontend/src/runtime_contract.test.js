@@ -15,13 +15,18 @@ import {
   buildStyle,
   debugGridVisibilityPlan,
   debugGridStatusMessage,
+  gridFillColorExpression,
   gridFillLayerId,
   gridFillLayerIds,
   gridVisibilityPlan,
   gridLayerIds,
   gridOutlineLayerId,
   gridOutlineLayerIds,
+  gridScoreLayerField,
+  gridScoreLayerLabel,
+  gridScoreLayerOptions,
   noiseOutlineOpacity,
+  normalizeGridScoreLayer,
   resolutionForZoom,
   zoomBoundsForResolution
 } from "./runtime_contract.js";
@@ -85,6 +90,31 @@ const devRuntime = {
 };
 
 {
+  assert.deepEqual(
+    gridScoreLayerOptions().map(function (option) {
+      return option.value;
+    }),
+    ["combined", "shops", "transport", "healthcare", "parks"]
+  );
+  assert.equal(gridScoreLayerLabel("shops"), "Shops");
+  assert.equal(gridScoreLayerLabel("TRANSPORT"), "Transport");
+  assert.equal(gridScoreLayerLabel("not-a-layer"), "Combined");
+  assert.equal(gridScoreLayerField("parks"), "score_parks");
+  assert.equal(normalizeGridScoreLayer("healthcare"), "healthcare");
+  assert.equal(normalizeGridScoreLayer("not-a-layer"), "combined");
+  assert.deepEqual(gridFillColorExpression("healthcare"), [
+    "interpolate",
+    ["linear"],
+    ["coalesce", ["get", "score_healthcare"], 0],
+    0, "#440154",
+    25, "#3b528b",
+    50, "#21908c",
+    75, "#5dc863",
+    100, "#fde725"
+  ]);
+}
+
+{
   const style = buildStyle(devRuntime, { windowOrigin: "http://127.0.0.1:8000" });
   const gridFillLayers = style.layers.filter(function (layer) {
     return layer.id === "grid-fill-active";
@@ -109,6 +139,20 @@ const devRuntime = {
   assert.equal(
     style.sources.noise.url,
     "pmtiles://http://127.0.0.1:8000/tiles/noise-dev.pmtiles",
+  );
+}
+
+{
+  const style = buildStyle(fullRuntime, {
+    windowOrigin: "http://127.0.0.1:8000",
+    selectedGridLayer: "transport"
+  });
+  const gridFillLayer = style.layers.find(function (layer) {
+    return layer.id === "grid-fill-active";
+  });
+  assert.deepEqual(
+    gridFillLayer.paint["fill-color"],
+    gridFillColorExpression("transport")
   );
 }
 
@@ -166,7 +210,9 @@ const devRuntime = {
   const layers2500 = buildActiveGridLayers(fullRuntime, 2500);
   const layers500 = buildActiveGridLayers(fullRuntime, 500);
   const layers50 = buildActiveGridLayers(fullRuntime, 50);
+  const layersParks = buildActiveGridLayers(fullRuntime, 2500, "parks");
   const lifecycle2500 = activeGridLifecycle(fullRuntime, null, 12);
+  const lifecycleTransport = activeGridLifecycle(fullRuntime, null, 12, "transport");
   const lifecycle1000 = activeGridLifecycle(fullRuntime, 2500, 13);
   const lifecycle500 = activeGridLifecycle(fullRuntime, 1000, 14);
   const lifecycle1000Stable = activeGridLifecycle(fullRuntime, 1000, 13);
@@ -182,6 +228,7 @@ const devRuntime = {
   assert.deepEqual(layers500[0].filter, ["==", ["get", "resolution_m"], 500]);
   assert.deepEqual(layers500[1].filter, ["==", ["get", "resolution_m"], 500]);
   assert.deepEqual(layers500[2].filter, ["==", ["get", "resolution_m"], 500]);
+  assert.deepEqual(layersParks[0].paint["fill-color"], gridFillColorExpression("parks"));
   assert.equal(layers2500[0].paint["fill-antialias"], false);
   assert.equal(layers2500[0].paint["fill-opacity"], 0.52);
   assert.equal(layers50[1].paint["line-color"], "#334155");
@@ -190,6 +237,10 @@ const devRuntime = {
   assert.equal(lifecycle2500.resolutionM, 2500);
   assert.equal(lifecycle2500.rebuild, true);
   assert.deepEqual(lifecycle2500.filter, ["==", ["get", "resolution_m"], 2500]);
+  assert.deepEqual(
+    lifecycleTransport.layerDefinitions[0].paint["fill-color"],
+    gridFillColorExpression("transport")
+  );
   assert.equal(lifecycle1000.resolutionM, 1000);
   assert.equal(lifecycle1000.rebuild, true);
   assert.equal(lifecycle500.resolutionM, 500);
