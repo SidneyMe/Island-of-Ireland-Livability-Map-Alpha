@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections import Counter
+from copy import deepcopy
 import math
 import os
 import pickle
@@ -19,6 +21,7 @@ from shapely.ops import transform, unary_union
 from config import (
     CACHE_DIR,
     COASTAL_ARTIFACT_WIDTH_M,
+    COASTAL_CLEANUP_ALGORITHM_VERSION,
     COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2,
     COASTAL_COMPONENT_PRESERVE_AREA_M2,
     COUNTY_BOUNDARY_LAYER,
@@ -45,6 +48,23 @@ _GEO_SHARED_CACHE_ENABLED = (
     os.getenv("LIVABILITY_GEO_SHARED_CACHE", "1").strip().lower()
     not in {"0", "false", "no", "off"}
 )
+_LAST_COASTAL_CLEANUP_SUMMARY: dict[str, Any] | None = None
+
+
+def _clear_last_coastal_cleanup_summary() -> None:
+    global _LAST_COASTAL_CLEANUP_SUMMARY
+    _LAST_COASTAL_CLEANUP_SUMMARY = None
+
+
+def _set_last_coastal_cleanup_summary(summary: dict[str, Any] | None) -> None:
+    global _LAST_COASTAL_CLEANUP_SUMMARY
+    _LAST_COASTAL_CLEANUP_SUMMARY = deepcopy(summary) if summary is not None else None
+
+
+def get_last_coastal_cleanup_summary() -> dict[str, Any] | None:
+    if _LAST_COASTAL_CLEANUP_SUMMARY is None:
+        return None
+    return deepcopy(_LAST_COASTAL_CLEANUP_SUMMARY)
 
 
 def _file_fingerprint(path: Path) -> str:
@@ -442,6 +462,81 @@ def _report_coastal_cleanup_fallbacks(fallback_diagnostics: list[dict[str, Any]]
         )
 
 
+def _coastal_cleanup_summary(
+    *,
+    total_components: int,
+    results: list[tuple[int, str, Any, Any]],
+    parts: list[Any],
+    fallback_diagnostics: list[dict[str, Any]],
+    artifact_width_m: float,
+    preserve_area_m2: float,
+    skip_area_threshold_m2: float,
+    output_area_m2: float,
+) -> dict[str, Any]:
+    cleanup_mode_counts = Counter()
+    fallback_mode_counts = Counter()
+    warnings: list[dict[str, Any]] = []
+    cleaned_component_count = 0
+    preserved_component_count = 0
+    dropped_component_count = 0
+    input_area_m2 = sum(float(part.area) for part in parts)
+    retained_area_m2 = 0.0
+
+    for component_index, cleanup_mode, cleaned, diagnostic in results:
+        part = parts[component_index]
+        cleanup_mode_counts[str(cleanup_mode)] += 1
+        if diagnostic is not None:
+            fallback_mode_counts[str(diagnostic["cleanup_mode"])] += 1
+            if len(warnings) < 10:
+                warnings.append(deepcopy(diagnostic))
+
+        if cleanup_mode in ("original", "skipped_large"):
+            preserved_component_count += 1
+            retained_area_m2 += float(part.area)
+            continue
+
+        if cleaned is None or cleaned.is_empty:
+            if float(part.area) >= float(preserve_area_m2):
+                preserved_component_count += 1
+                retained_area_m2 += float(part.area)
+            else:
+                dropped_component_count += 1
+            continue
+
+        cleaned_component_count += 1
+        retained_area_m2 += float(cleaned.area)
+
+    summary = {
+        "enabled": True,
+        "component_count": int(total_components),
+        "cleaned_component_count": int(cleaned_component_count),
+        "preserved_component_count": int(preserved_component_count),
+        "dropped_component_count": int(dropped_component_count),
+        "output_component_count": int(cleaned_component_count + preserved_component_count),
+        "cleanup_mode_counts": dict(cleanup_mode_counts),
+        "fallback_count": len(fallback_diagnostics),
+        "geos_exception_count": len(fallback_diagnostics),
+        "fallback_modes": dict(fallback_mode_counts),
+        "warning_count": len(fallback_diagnostics),
+        "warnings": warnings,
+        "parameters": {
+            "artifact_width_m": float(artifact_width_m),
+            "preserve_area_m2": float(preserve_area_m2),
+            "skip_area_threshold_m2": float(skip_area_threshold_m2),
+            "algorithm_version": int(COASTAL_CLEANUP_ALGORITHM_VERSION),
+        },
+        "area_m2_before": float(input_area_m2),
+        "area_m2_after": float(output_area_m2),
+        "retained_area_m2": float(retained_area_m2),
+        "area_ratio_after": (
+            None if input_area_m2 <= 0.0 else float(output_area_m2) / float(input_area_m2)
+        ),
+    }
+    if warnings:
+        summary["warnings_truncated"] = len(fallback_diagnostics) > len(warnings)
+    return summary
+
+
 def _clean_coastal_artifact_components(
     geometry,
     *,
@@ -522,12 +617,22 @@ def _clean_coastal_artifact_components(
             ),
         )
 
-    _emit_substep(
-        progress_cb,
-        "coastal_cleanup_components",
-        time.perf_counter() - components_started_at,
+        _emit_substep(
+            progress_cb,
+            "coastal_cleanup_components",
+            time.perf_counter() - components_started_at,
+        )
+    cleanup_summary = _coastal_cleanup_summary(
+        total_components=total_components,
+        results=results,
+        parts=parts,
+        fallback_diagnostics=fallback_diagnostics,
+        artifact_width_m=artifact_width_m,
+        preserve_area_m2=preserve_area_m2,
+        skip_area_threshold_m2=skip_area_threshold_m2,
+        output_area_m2=sum(float(part.area) for part in cleaned_parts),
     )
-    return cleaned_parts, fallback_diagnostics
+    return cleaned_parts, fallback_diagnostics, cleanup_summary
 
 
 def clean_coastal_artifacts(
@@ -550,7 +655,8 @@ def clean_coastal_artifacts(
     (default 0.0 disables the gate; use it to avoid ~100s spent opening the mainland,
     which has no narrow coastal spurs that would be caught by erode/dilate).
     """
-    cleaned_parts, fallback_diagnostics = _clean_coastal_artifact_components(
+    _clear_last_coastal_cleanup_summary()
+    cleaned_parts, fallback_diagnostics, cleanup_summary = _clean_coastal_artifact_components(
         geometry,
         artifact_width_m=artifact_width_m,
         preserve_area_m2=preserve_area_m2,
@@ -567,6 +673,13 @@ def clean_coastal_artifacts(
     union_started_at = time.perf_counter()
     result = _union_cleaned_geometries(cleaned_parts)
     _emit_substep(progress_cb, "coastal_cleanup_union", time.perf_counter() - union_started_at)
+    cleanup_summary["area_m2_after"] = float(result.area)
+    cleanup_summary["area_ratio_after"] = (
+        None
+        if cleanup_summary["area_m2_before"] <= 0.0
+        else float(cleanup_summary["area_m2_after"]) / float(cleanup_summary["area_m2_before"])
+    )
+    _set_last_coastal_cleanup_summary(cleanup_summary)
     return result
 
 
@@ -696,6 +809,7 @@ def _load_main_island_boundary_cached(*, progress_cb=None):
 
 
 def load_island_geometry_metric(*, progress_cb=None):
+    _clear_last_coastal_cleanup_summary()
     if MAIN_ISLAND_BOUNDARY_PATH.exists():
         return _load_main_island_boundary_cached(progress_cb=progress_cb)
 
@@ -827,6 +941,7 @@ def load_bbox_geometry_metric(
 
 
 def load_study_area_metric(*, profile: str | None = None, progress_cb=None):
+    _clear_last_coastal_cleanup_summary()
     settings = build_profile_settings(profile)
     if settings.study_area_kind == "county":
         _emit_progress(

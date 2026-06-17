@@ -347,6 +347,7 @@ def summary_json_impl(
     amenity_source_rows: list[dict[str, Any]] | None = None,
     transport_reality_rows: list[dict[str, Any]] | None = None,
     noise_rows: list[dict[str, Any]] | None = None,
+    coastal_cleanup: dict[str, Any] | None = None,
     *,
     hashes,
     build_profile: str,
@@ -393,6 +394,8 @@ def summary_json_impl(
         "zoom_breaks": zoom_breaks,
         "surface_zoom_breaks": zoom_breaks,
     }
+    if coastal_cleanup is not None:
+        payload["coastal_cleanup"] = coastal_cleanup
     if transit_reality_state is not None:
         _tc = _transport_summary_counts(transport_reality_rows)
         payload.update(

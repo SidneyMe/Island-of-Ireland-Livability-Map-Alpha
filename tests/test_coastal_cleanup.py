@@ -75,6 +75,15 @@ class CoastalArtifactCleanupTests(TestCase):
         )
 
         self.assertGreater(cleaned.area, 0.80 * 1_000_000)
+        summary = study_area.get_last_coastal_cleanup_summary()
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        self.assertEqual(summary["component_count"], 1)
+        self.assertEqual(summary["cleaned_component_count"], 1)
+        self.assertEqual(summary["preserved_component_count"], 0)
+        self.assertEqual(summary["fallback_count"], 0)
+        self.assertEqual(summary["parameters"]["algorithm_version"], config.COASTAL_CLEANUP_ALGORITHM_VERSION)
+        json.dumps(summary)
 
     def test_cleanup_preserves_surviving_shore_vertices_instead_of_rounding_the_corner(self) -> None:
         geom = _spike_polygon(0, 0, 1000, 1000, spike_width_m=10, spike_length_m=500)
@@ -144,6 +153,16 @@ class CoastalArtifactCleanupTests(TestCase):
         self.assertIn("mode=original", log_line)
         self.assertIn("rep=", log_line)
         self.assertIn("bounds_wgs84=", log_line)
+        summary = study_area.get_last_coastal_cleanup_summary()
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        self.assertEqual(summary["component_count"], 1)
+        self.assertEqual(summary["fallback_count"], 1)
+        self.assertEqual(summary["geos_exception_count"], 1)
+        self.assertEqual(summary["fallback_modes"], {"original": 1})
+        self.assertEqual(len(summary["warnings"]), 1)
+        self.assertEqual(summary["warnings"][0]["cleanup_mode"], "original")
+        json.dumps(summary)
 
     def test_large_island_preserved_when_cleanup_would_erase_it(self) -> None:
         """A component whose cleaned form is empty is kept if area >= preserve_area_m2."""

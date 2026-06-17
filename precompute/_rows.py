@@ -20,6 +20,7 @@ from db_postgis import (
 )
 import noise.loader as _noise_loader
 import overture.loader as _overture
+import study_area as _study_area
 
 from . import grid as _grid
 from . import publish as _publish
@@ -398,6 +399,7 @@ def _summary_json(
     transport_reality_rows: list[dict[str, Any]] | None = None,
     noise_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    coastal_cleanup = _study_area.get_last_coastal_cleanup_summary()
     return _publish.summary_json_impl(
         study_area_wgs84,
         walk_grids,
@@ -405,6 +407,7 @@ def _summary_json(
         amenity_source_rows,
         transport_reality_rows=transport_reality_rows,
         noise_rows=noise_rows,
+        coastal_cleanup=coastal_cleanup,
         hashes=_STATE.hashes,
         build_profile=_STATE.profile,
         source_state=_STATE.source_state,

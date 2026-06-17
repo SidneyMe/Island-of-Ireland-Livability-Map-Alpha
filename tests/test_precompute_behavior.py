@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import io
 from contextlib import redirect_stdout
 from datetime import date, datetime, timezone
@@ -1092,6 +1093,96 @@ class AmenityPhaseIntegrationTests(TestCase):
         self.assertEqual(summary["noise_source_counts"], {"road": 2, "rail": 1})
         self.assertEqual(summary["noise_metric_counts"], {"Lden": 2, "Lnight": 1})
         self.assertEqual(summary["noise_band_counts"], {"55-59": 2, "50-54": 1})
+
+    def test_summary_json_includes_coastal_cleanup_summary(self) -> None:
+        coastal_cleanup_summary = {
+            "enabled": True,
+            "component_count": 1,
+            "cleaned_component_count": 1,
+            "preserved_component_count": 0,
+            "dropped_component_count": 0,
+            "output_component_count": 1,
+            "cleanup_mode_counts": {"primary": 1},
+            "fallback_count": 0,
+            "geos_exception_count": 0,
+            "fallback_modes": {},
+            "warning_count": 0,
+            "warnings": [],
+            "parameters": {
+                "artifact_width_m": 75.0,
+                "preserve_area_m2": 100_000.0,
+                "skip_area_threshold_m2": 1_000_000_000.0,
+                "algorithm_version": config.COASTAL_CLEANUP_ALGORITHM_VERSION,
+            },
+            "area_m2_before": 1_000_000.0,
+            "area_m2_after": 990_000.0,
+            "retained_area_m2": 990_000.0,
+            "area_ratio_after": 0.99,
+        }
+        summary = precompute._publish.summary_json_impl(
+            box(-10.0, 50.0, -5.0, 55.0),
+            {20_000: [_grid_cell("coarse-cell")]},
+            _empty_amenity_data(),
+            [],
+            coastal_cleanup=coastal_cleanup_summary,
+            hashes=SimpleNamespace(
+                build_key="build-key-dev",
+                config_hash="config-hash-dev",
+                import_fingerprint="import-fingerprint-dev",
+            ),
+            build_profile="dev",
+            source_state=SimpleNamespace(extract_path=Path("extract.osm.pbf")),
+            osm_extract_path=Path("extract.osm.pbf"),
+            grid_sizes_m=[20_000],
+            fine_resolutions_m=[],
+            output_html="index.html",
+            zoom_breaks=[(0, 20_000)],
+        )
+
+        self.assertEqual(summary["coastal_cleanup"], coastal_cleanup_summary)
+        json.dumps(summary)
+
+    def test_summary_json_wrapper_threads_coastal_cleanup_summary(self) -> None:
+        coastal_cleanup_summary = {
+            "enabled": True,
+            "component_count": 1,
+            "cleaned_component_count": 1,
+            "preserved_component_count": 0,
+            "dropped_component_count": 0,
+            "output_component_count": 1,
+            "cleanup_mode_counts": {"primary": 1},
+            "fallback_count": 0,
+            "geos_exception_count": 0,
+            "fallback_modes": {},
+            "warning_count": 0,
+            "warnings": [],
+            "parameters": {
+                "artifact_width_m": 75.0,
+                "preserve_area_m2": 100_000.0,
+                "skip_area_threshold_m2": 1_000_000_000.0,
+                "algorithm_version": config.COASTAL_CLEANUP_ALGORITHM_VERSION,
+            },
+            "area_m2_before": 1_000_000.0,
+            "area_m2_after": 990_000.0,
+            "retained_area_m2": 990_000.0,
+            "area_ratio_after": 0.99,
+        }
+
+        with (
+            mock.patch.object(study_area, "get_last_coastal_cleanup_summary", return_value=coastal_cleanup_summary),
+            mock.patch.object(precompute._rows._publish, "summary_json_impl", return_value={"summary": True}) as impl_mock,
+        ):
+            summary = precompute._rows._summary_json(
+                box(-10.0, 50.0, -5.0, 55.0),
+                {20_000: [_grid_cell("coarse-cell")]},
+                _empty_amenity_data(),
+                [],
+                noise_rows=[],
+            )
+
+        self.assertEqual(summary, {"summary": True})
+        self.assertEqual(impl_mock.call_args.kwargs["coastal_cleanup"], coastal_cleanup_summary)
+        json.dumps(coastal_cleanup_summary)
 
 
 class PrecomputeReachabilityTests(TestCase):

@@ -213,6 +213,7 @@ Notes:
 | Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB canonical pipeline (FileGDB -> local GPKG cache -> one PG stage import -> batch normalize), SQL timeouts, disk preflight (cache + PostgreSQL `data_directory`) | `NOISE_ROAD_GDB_CANONICAL_CACHE`, `NOISE_REBUILD_ROAD_GDB_CACHE`, `NOISE_ROAD_NORMALIZE_BATCH_SIZE`, `NOISE_SQL_*`, `NOISE_MIN_FREE_DISK_GB` |
 | Precompute orchestration | `precompute/_planning.py`, `precompute/workflow.py` | `precompute/__init__.py` | `precompute/workflow.py` now also has an explain-mode short-circuit that prints the pure planner output without running geometry, reachability, publish, or schema-migration setup phases. |
 | Managed schema validation | `db_postgis/schema.py` | `db_postgis.ensure_database_ready()` and startup validation | PK-equivalent coverage for `grid_walk_build_resolution_cell_idx` and `service_deserts_build_resolution_cell_idx` is accepted after the candidate-key migration, so startup no longer demands those exact index names when the primary key is present. |
+| Coastal cleanup observability | `study_area.py`, `precompute/_rows.py`, `precompute/publish.py` | `clean_coastal_artifacts()` -> `_summary_json()` -> `build_manifest.summary_json` | `summary_json["coastal_cleanup"]` persists counts, fallback modes, thresholds, and sample warning metadata without storing geometries. |
 | PMTiles layer metadata | `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` |
@@ -343,6 +344,7 @@ Notes:
 
 - Purpose: loads and normalizes the metric study-area geometry used by grid generation, reachability, and PMTiles/fine-vector clipping. (Confirmed)
 - Why it matters: `load_island_geometry_metric()` now prefers `ireland_main_island_shp/ireland_main_island.shp` when present, reading it as the exact main-island coast boundary and skipping the older ROI+NI merge/coastal-cleanup path. If the shapefile is missing, it falls back to the ROI/NI boundary merge and `clean_coastal_artifacts()` cleanup. (Confirmed from code and tests)
+- Coastal cleanup fallback diagnostics are captured in a compact summary and persisted into `build_manifest.summary_json["coastal_cleanup"]` after precompute, so fallback modes, counts, and representative locations are inspectable after the build. (Confirmed from code and tests)
 - The geo hash includes the main-island shapefile sidecar metadata (`.shp`, `.shx`, `.dbf`, `.prj`, `.cpg`) so PMTiles/precompute caches invalidate when the coastline input changes. (Confirmed from code and tests)
 - LOC: 880
 
