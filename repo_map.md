@@ -85,6 +85,9 @@
 
 - Push / PR validation workflow. (Confirmed)
 - Runs:
+  - `npm ci` in `frontend/` using `frontend/package-lock.json`
+  - `npm test` and `npm run build` in `frontend/`
+  - `git diff --exit-code -- static/dist` to catch stale checked-in frontend bundles
   - `python -m unittest discover -s tests -t . -p "test_*.py"`
   - `cargo test --manifest-path walkgraph/Cargo.toml`
   - `python scripts/sanity_check.py --validate-only`
