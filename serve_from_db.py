@@ -114,6 +114,9 @@ def _stream_file_response(
         raise FileNotFoundError(str(resolved))
 
     file_size = resolved.stat().st_size
+    record_response = getattr(handler, "_record_response", None)
+    if callable(record_response):
+        record_response(status, 0 if head_only else file_size)
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
     for header_name, header_value in (extra_headers or {}).items():

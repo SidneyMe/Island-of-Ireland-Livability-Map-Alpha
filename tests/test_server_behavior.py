@@ -599,6 +599,26 @@ class LocalServerEndpointTests(TestCase):
             any(line.startswith("[server] GET /api/walk-grid route=unknown status=404") for line in lines)
         )
 
+    def test_static_request_logs_streamed_response_status_and_bytes(self) -> None:
+        service = _FakeService()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            static_path = static_dir / "dist" / "app.js"
+            static_size = static_path.stat().st_size
+            handler = _make_request_handler(
+                service,
+                path="/static/dist/app.js",
+                pmtiles_path=pmtiles_path,
+                static_dir=static_dir,
+            )
+            with mock.patch.object(serve_from_db, "print", create=True) as print_mock:
+                handler.do_GET()
+
+        lines = _printed_lines(print_mock)
+        expected_prefix = "[server] GET /static/dist/app.js route=static status=200"
+        self.assertTrue(any(line.startswith(expected_prefix) for line in lines))
+        self.assertTrue(any(f"bytes={static_size}" in line for line in lines))
+
     def test_surface_tile_endpoint_returns_404_when_fine_surface_disabled(self) -> None:
         service = _DisabledFineService()
         with TemporaryDirectory() as tmp_name:
