@@ -40,6 +40,7 @@
 - **Rust walkgraph binary**: `walkgraph/`
 - **PMTiles bake**: `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py`, `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py`
 - **Runtime HTTP server**: `serve_from_db.py`
+- **Alembic schema-hardening migration**: `db_postgis/migrations/versions/20260617_000021_add_candidate_key_constraints.py`
 - **Frontend source**: `frontend/src/`
 - **Frontend grid diagnostics helper**: `frontend/src/grid_debug.js`
 - **Served frontend bundle**: `static/dist/`
@@ -681,6 +682,7 @@ Representative tests confirmed present:
 | `tests/test_transit_phase1.py` | GTFS-first transit reality rows, weekly bus subtiers, bus daytime headway buckets, frequency departure windows, transport score units, exact local GTFS snapshot stop regressions for each bus-tier bucket plus strict exception-only / unscheduled examples, exports, school-only classification, `gtfs-refresh` artifact loading |
 | `tests/test_surface_runtime.py` | fine-surface runtime behavior |
 | `tests/test_sanity_check.py` | sanity fixture structure and runtime lookup mode selection |
+| `tests/test_db_constraint_migration.py` | read-only preflight, primary-key / foreign-key application, missing-table handling, and downgrade drop safety for the new constraint migration |
 | `tests/test_db_integrity_check.py` | duplicate detection, NULL key validation, missing-table handling, and ambiguous-key skipping for future constraint preflight |
 | `frontend/src/runtime_contract.test.js` | frontend runtime contract parsing, score-layer label/expression mapping, separate noise vector source wiring, active fill/outline grid layer definitions, lifecycle rebuild decisions, explicit visibility plans, the transport rail/tram styling priority, and the single active debug-grid filter path |
 | `frontend/src/grid_debug.test.js` | persistent grid debug card rendering, diagnosis states, resolution display updates, and copyable snapshot formatting |
