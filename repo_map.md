@@ -43,6 +43,7 @@
 - **PMTiles bake**: `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py`, `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py`
 - **Runtime HTTP server**: `serve_from_db.py`
 - **Runtime route helper**: `serve_routes.py`
+- **Runtime request logging**: `serve_from_db.py` emits compact route-aware GET/HEAD logs with status, duration, response size, and disconnect hints.
 - **Alembic schema-hardening migration**: `db_postgis/migrations/versions/20260617_000021_add_candidate_key_constraints.py`
 - **Frontend source**: `frontend/src/`
 - **Frontend grid diagnostics helper**: `frontend/src/grid_debug.js`
@@ -218,6 +219,7 @@ Notes:
 | Coastal cleanup observability | `study_area.py`, `precompute/_rows.py`, `precompute/publish.py` | `clean_coastal_artifacts()` -> `_summary_json()` -> `build_manifest.summary_json` | `summary_json["coastal_cleanup"]` persists counts, fallback modes, thresholds, and sample warning metadata without storing geometries. |
 | PMTiles layer metadata | `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
+| Runtime request logging | `serve_from_db.py`, `serve_routes.py` | `LivabilityRequestHandler.do_GET()` / `do_HEAD()` | Route-aware log lines include method, path, route name, status, duration, bytes, and disconnect hints without changing HTTP responses. |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` |
 | Progress / ETA behavior | `progress_tracker.py` | `precompute/workflow.py`, `precompute/__init__.py` | `.livability_cache/precompute_timing_stats.json` |
 | Product / methodology docs | `README.md`, `docs/PHASES.md`, `docs/*.md` | Humans only; README roadmap and phase notes distinguish display-only noise overlay from future scoring penalties | None |

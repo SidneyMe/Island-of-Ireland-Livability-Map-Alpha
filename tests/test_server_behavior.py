@@ -7,6 +7,7 @@ import threading
 from http import HTTPStatus
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from unittest import TestCase, mock
@@ -160,6 +161,48 @@ def _make_validating_runtime_service() -> tuple[serve_from_db.RuntimeService, mo
     service.state = mock.Mock(return_value=state)
     service.surface_runtime = mock.Mock(return_value=runtime)
     return service, runtime, state
+
+
+def _make_request_handler(
+    service: _FakeService,
+    *,
+    path: str,
+    pmtiles_path: Path,
+    static_dir: Path,
+    noise_pmtiles_path: Path | None = None,
+) -> serve_from_db.LivabilityRequestHandler:
+    handler = serve_from_db.LivabilityRequestHandler.__new__(serve_from_db.LivabilityRequestHandler)
+    handler.server = SimpleNamespace(
+        service=service,
+        static_dir=static_dir.resolve(),
+        index_html=b"<!doctype html><title>livability</title>",
+        pmtiles_path=pmtiles_path,
+        pmtiles_url_path="/tiles/livability.pmtiles",
+        pmtiles_paths_by_url_path={"/tiles/livability.pmtiles": pmtiles_path},
+        noise_pmtiles_path=noise_pmtiles_path,
+        noise_pmtiles_url_path=None,
+        pmtiles_path_for_url=lambda url_path: {
+            "/tiles/livability.pmtiles": pmtiles_path,
+        }.get(str(url_path)),
+    )
+    handler.path = path
+    handler.headers = {"Accept-Encoding": ""}
+    handler.wfile = io.BytesIO()
+    handler.rfile = io.BytesIO()
+    handler.request_version = "HTTP/1.1"
+    handler.command = "GET"
+    handler.send_response = mock.Mock()
+    handler.send_header = mock.Mock()
+    handler.end_headers = mock.Mock()
+    return handler
+
+
+def _printed_lines(print_mock: mock.Mock) -> list[str]:
+    lines: list[str] = []
+    for call in print_mock.call_args_list:
+        if call.args:
+            lines.append(" ".join(str(arg) for arg in call.args))
+    return lines
 
 
 class LocalServerEndpointTests(TestCase):
@@ -501,6 +544,60 @@ class LocalServerEndpointTests(TestCase):
                         self.assertEqual(ctx.exception.code, 400)
 
         runtime.inspect.assert_not_called()
+
+    def test_runtime_request_logs_route_and_status(self) -> None:
+        service = _FakeService()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            handler = _make_request_handler(
+                service,
+                path="/api/runtime",
+                pmtiles_path=pmtiles_path,
+                static_dir=static_dir,
+            )
+            with mock.patch.object(serve_from_db, "print", create=True) as print_mock:
+                handler.do_GET()
+
+        lines = _printed_lines(print_mock)
+        self.assertTrue(
+            any(line.startswith("[server] GET /api/runtime route=api_runtime status=200") for line in lines)
+        )
+
+    def test_inspect_request_logs_route_and_400(self) -> None:
+        service, _runtime, _state = _make_validating_runtime_service()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            handler = _make_request_handler(
+                service,
+                path="/api/inspect?lat=nan&lon=-6.2",
+                pmtiles_path=pmtiles_path,
+                static_dir=static_dir,
+            )
+            with mock.patch.object(serve_from_db, "print", create=True) as print_mock:
+                handler.do_GET()
+
+        lines = _printed_lines(print_mock)
+        self.assertTrue(
+            any(line.startswith("[server] GET /api/inspect route=api_inspect status=400") for line in lines)
+        )
+
+    def test_unknown_route_logs_unknown_and_404(self) -> None:
+        service = _FakeService()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            handler = _make_request_handler(
+                service,
+                path="/api/walk-grid?resolution_m=5000&bbox=-6,53,-5,54",
+                pmtiles_path=pmtiles_path,
+                static_dir=static_dir,
+            )
+            with mock.patch.object(serve_from_db, "print", create=True) as print_mock:
+                handler.do_GET()
+
+        lines = _printed_lines(print_mock)
+        self.assertTrue(
+            any(line.startswith("[server] GET /api/walk-grid route=unknown status=404") for line in lines)
+        )
 
     def test_surface_tile_endpoint_returns_404_when_fine_surface_disabled(self) -> None:
         service = _DisabledFineService()

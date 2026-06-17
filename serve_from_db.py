@@ -6,6 +6,7 @@ import math
 import mimetypes
 import os
 import re
+import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -805,8 +806,21 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
+        route = resolve_get_route(
+            parsed.path,
+            static_dir=self.livability_server.static_dir,
+            export_path=EXPORTS_DIR / ZIP_FILENAME,
+            pmtiles_path_for_url=self.livability_server.pmtiles_path_for_url,
+            noise_pmtiles_url_path=self.livability_server.noise_pmtiles_url_path,
+            noise_pmtiles_path=self.livability_server.noise_pmtiles_path,
+        )
+        self._begin_request_log(
+            method="GET",
+            path=parsed.path,
+            route_name=(route.kind if route is not None else "unknown"),
+        )
         try:
-            self._dispatch_request(parsed)
+            self._dispatch_request(parsed, route=route)
         except CLIENT_DISCONNECT_ERRORS as exc:
             self._log_client_disconnect(parsed.path, exc)
         except ValueError as exc:
@@ -818,6 +832,8 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # pragma: no cover - defensive
             print(f"Request failed for {parsed.path}: {exc}")
             self._try_write_json(parsed.path, HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "internal server error"})
+        finally:
+            self._log_request_summary()
 
     def do_HEAD(self) -> None:  # noqa: N802
         # MapLibre/PMTiles will send HEAD for the archive on some flows.
@@ -828,27 +844,26 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             noise_pmtiles_url_path=self.livability_server.noise_pmtiles_url_path,
             noise_pmtiles_path=self.livability_server.noise_pmtiles_path,
         )
+        self._begin_request_log(
+            method="HEAD",
+            path=parsed.path,
+            route_name="pmtiles" if pmtiles_path is not None else "unknown",
+        )
         if pmtiles_path is not None:
             try:
                 self._serve_pmtiles(pmtiles_path, head_only=True)
             except CLIENT_DISCONNECT_ERRORS as exc:
                 self._log_client_disconnect(parsed.path, exc)
-            return
-        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
-        self.end_headers()
+        else:
+            self._record_response(HTTPStatus.METHOD_NOT_ALLOWED, 0)
+            self.send_response(HTTPStatus.METHOD_NOT_ALLOWED)
+            self.end_headers()
+        self._log_request_summary()
 
     def log_message(self, format: str, *args) -> None:  # noqa: A003
         del format, args
 
-    def _dispatch_request(self, parsed) -> None:
-        route = resolve_get_route(
-            parsed.path,
-            static_dir=self.livability_server.static_dir,
-            export_path=EXPORTS_DIR / ZIP_FILENAME,
-            pmtiles_path_for_url=self.livability_server.pmtiles_path_for_url,
-            noise_pmtiles_url_path=self.livability_server.noise_pmtiles_url_path,
-            noise_pmtiles_path=self.livability_server.noise_pmtiles_path,
-        )
+    def _dispatch_request(self, parsed, *, route) -> None:
         if route is None:
             self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
             return
@@ -887,6 +902,43 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             return
         self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
+    def _begin_request_log(self, *, method: str, path: str, route_name: str) -> None:
+        self._request_method = method
+        self._request_path = path
+        self._request_route_name = route_name
+        self._request_started_at = time.perf_counter()
+        self._request_status = None
+        self._request_response_bytes = None
+        self._request_client_disconnected = False
+
+    def _record_response(self, status: HTTPStatus, response_bytes: int | None = None) -> None:
+        self._request_status = status
+        if response_bytes is not None:
+            self._request_response_bytes = int(response_bytes)
+
+    def _log_request_summary(self) -> None:
+        started_at = getattr(self, "_request_started_at", None)
+        duration_ms = 0.0
+        if started_at is not None:
+            duration_ms = max(time.perf_counter() - float(started_at), 0.0) * 1000.0
+        status = getattr(self, "_request_status", None)
+        status_value = int(status) if status is not None else HTTPStatus.INTERNAL_SERVER_ERROR
+        route_name = getattr(self, "_request_route_name", "unknown")
+        response_bytes = getattr(self, "_request_response_bytes", None)
+        parts = [
+            "[server]",
+            f"{getattr(self, '_request_method', 'GET')}",
+            f"{getattr(self, '_request_path', self.path)}",
+            f"route={route_name}",
+            f"status={status_value}",
+            f"duration_ms={duration_ms:.1f}",
+        ]
+        if response_bytes is not None:
+            parts.append(f"bytes={int(response_bytes)}")
+        if getattr(self, "_request_client_disconnected", False):
+            parts.append("disconnected=true")
+        print(" ".join(parts))
+
     def _serve_pmtiles(self, pmtiles_path: Path | None, *, head_only: bool = False) -> None:
         if pmtiles_path is None or not pmtiles_path.exists():
             raise FileNotFoundError(str(pmtiles_path))
@@ -896,6 +948,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         if range_header:
             match = RANGE_RE.match(range_header.strip())
             if not match:
+                self._record_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, 0)
                 self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                 self.send_header("Content-Range", f"bytes */{file_size}")
                 self.end_headers()
@@ -904,12 +957,14 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             end_text = match.group(2)
             end = int(end_text) if end_text else file_size - 1
             if start >= file_size:
+                self._record_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, 0)
                 self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                 self.send_header("Content-Range", f"bytes */{file_size}")
                 self.end_headers()
                 return
             end = min(end, file_size - 1)
             length = end - start + 1
+            self._record_response(HTTPStatus.PARTIAL_CONTENT, 0 if head_only else length)
             self.send_response(HTTPStatus.PARTIAL_CONTENT)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(length))
@@ -930,6 +985,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
             return
 
+        self._record_response(HTTPStatus.OK, 0 if head_only else file_size)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(file_size))
@@ -976,6 +1032,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             x=x,
             y=y,
         )
+        self._record_response(HTTPStatus.OK, len(payload))
         self._write_bytes(
             HTTPStatus.OK,
             payload,
@@ -1020,6 +1077,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         use_gzip = "gzip" in (self.headers.get("Accept-Encoding", "") or "").lower()
         if use_gzip:
             body = gzip.compress(body)
+        self._record_response(status, len(body))
         self._write_bytes(
             status,
             body,
@@ -1038,6 +1096,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         *,
         extra_headers: dict[str, str] | None = None,
     ) -> None:
+        self._record_response(status, len(body))
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         for header_name, header_value in (extra_headers or {}).items():
@@ -1047,6 +1106,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _log_client_disconnect(self, path: str, exc: BaseException) -> None:
+        self._request_client_disconnected = True
         if path.startswith("/tiles/") or path.startswith("/api/inspect"):
             return
         print(f"Client disconnected during {path}: {exc}")
