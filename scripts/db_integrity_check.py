@@ -10,6 +10,7 @@ from typing import Any, Iterable, Sequence
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from sqlalchemy import or_
 from sqlalchemy.exc import SQLAlchemyError
 
 from db_postgis import build_engine, table_exists
@@ -40,6 +41,28 @@ class DuplicateCheckSpec:
     @property
     def display_name(self) -> str:
         return self.label
+
+
+@dataclass(frozen=True)
+class NullKeyIssue:
+    column_name: str
+    null_row_count: int
+
+
+@dataclass(frozen=True)
+class IntegrityCheckResult:
+    duplicate_group_count: int
+    duplicate_sample_rows: tuple[dict[str, Any], ...]
+    null_issues: tuple[NullKeyIssue, ...]
+    null_sample_rows: tuple[dict[str, Any], ...]
+
+    @property
+    def has_duplicate_issues(self) -> bool:
+        return self.duplicate_group_count > 0
+
+    @property
+    def has_null_issues(self) -> bool:
+        return bool(self.null_issues)
 
 
 def build_duplicate_check_specs() -> tuple[DuplicateCheckSpec, ...]:
@@ -121,6 +144,25 @@ def build_duplicate_sample_query(spec: DuplicateCheckSpec, *, sample_limit: int 
     )
 
 
+def build_null_count_query(spec: DuplicateCheckSpec, column_name: str):
+    return (
+        select(func.count())
+        .select_from(spec.table)
+        .where(spec.table.c[column_name].is_(None))
+    )
+
+
+def build_null_sample_query(spec: DuplicateCheckSpec, *, sample_limit: int = DEFAULT_SAMPLE_LIMIT):
+    columns = _column_exprs(spec)
+    return (
+        select(*columns)
+        .select_from(spec.table)
+        .where(or_(*[spec.table.c[column_name].is_(None) for column_name in spec.key_columns]))
+        .order_by(*columns)
+        .limit(sample_limit)
+    )
+
+
 def _format_key_row(spec: DuplicateCheckSpec, row: dict[str, Any]) -> str:
     parts = [f"{column}={row[column]!r}" for column in spec.key_columns]
     duplicate_rows = row.get("duplicate_rows")
@@ -128,27 +170,70 @@ def _format_key_row(spec: DuplicateCheckSpec, row: dict[str, Any]) -> str:
     return "  - " + ", ".join(parts) + suffix
 
 
+def _format_null_key_row(spec: DuplicateCheckSpec, row: dict[str, Any]) -> str:
+    parts = [f"{column}={row[column]!r}" for column in spec.key_columns]
+    null_columns = [column for column in spec.key_columns if row.get(column) is None]
+    suffix = ""
+    if null_columns:
+        suffix = f" (NULL columns: {', '.join(null_columns)})"
+    return "  - " + ", ".join(parts) + suffix
+
+
+def _format_row_count(count: int) -> str:
+    return "row" if count == 1 else "rows"
+
+
+def _format_null_issue(issue: NullKeyIssue) -> str:
+    return f"  - {issue.column_name}: {issue.null_row_count} {_format_row_count(issue.null_row_count)} with NULL"
+
+
 def _evaluate_spec(
     connection,
     spec: DuplicateCheckSpec,
     *,
     sample_limit: int = DEFAULT_SAMPLE_LIMIT,
-) -> tuple[str, int, list[dict[str, Any]], str | None]:
+) -> IntegrityCheckResult:
     if spec.ambiguous:
-        return "skipped", 0, [], spec.ambiguity_reason
+        return IntegrityCheckResult(0, (), (), ())
 
     duplicate_group_count = int(connection.execute(build_duplicate_group_count_query(spec)).scalar_one())
-    if duplicate_group_count == 0:
-        return "ok", 0, [], None
+    null_issues: list[NullKeyIssue] = []
+    for column_name in spec.key_columns:
+        null_row_count = int(connection.execute(build_null_count_query(spec, column_name)).scalar_one())
+        if null_row_count > 0:
+            null_issues.append(NullKeyIssue(column_name=column_name, null_row_count=null_row_count))
 
-    sample_rows = [
-        dict(row)
-        for row in connection.execute(build_duplicate_sample_query(spec, sample_limit=sample_limit)).mappings().all()
-    ]
-    return "fail", duplicate_group_count, sample_rows, None
+    duplicate_sample_rows: tuple[dict[str, Any], ...] = ()
+    if duplicate_group_count > 0:
+        duplicate_sample_rows = tuple(
+            dict(row)
+            for row in connection.execute(
+                build_duplicate_sample_query(spec, sample_limit=sample_limit)
+            ).mappings().all()
+        )
+
+    null_sample_rows: tuple[dict[str, Any], ...] = ()
+    if null_issues:
+        null_sample_rows = tuple(
+            dict(row)
+            for row in connection.execute(build_null_sample_query(spec, sample_limit=sample_limit))
+            .mappings()
+            .all()
+        )
+
+    return IntegrityCheckResult(
+        duplicate_group_count=duplicate_group_count,
+        duplicate_sample_rows=duplicate_sample_rows,
+        null_issues=tuple(null_issues),
+        null_sample_rows=null_sample_rows,
+    )
 
 
 def _build_engine(database_url: str | None) -> Engine:
+    if database_url is not None and not database_url.strip():
+        raise ValueError(
+            "--database-url was provided but empty. Omit the flag to use the configured database settings."
+        )
     if database_url is None:
         return build_engine()
 
@@ -171,7 +256,7 @@ def run_integrity_check(
 ) -> int:
     try:
         engine = _build_engine(database_url)
-    except (OSError, RuntimeError, SQLAlchemyError) as exc:
+    except (OSError, RuntimeError, SQLAlchemyError, ValueError) as exc:
         print(f"Error: {exc}")
         return 1
 
@@ -192,30 +277,36 @@ def run_integrity_check(
                 continue
 
             with engine.connect() as connection:
-                status, duplicate_group_count, sample_rows, note = _evaluate_spec(
+                result = _evaluate_spec(
                     connection,
                     spec,
                     sample_limit=sample_limit,
                 )
 
-            if status == "ok":
+            if not result.has_duplicate_issues and not result.has_null_issues:
                 columns = ", ".join(spec.key_columns)
-                print(f"OK {spec.display_name}: no duplicates for ({columns})")
-            elif status == "fail":
-                columns = ", ".join(spec.key_columns)
+                print(f"OK {spec.display_name}: no duplicates and no NULL key values for ({columns})")
+                continue
+
+            failures += 1
+            columns = ", ".join(spec.key_columns)
+            if result.has_duplicate_issues:
                 print(
-                    f"FAIL {spec.display_name}: {duplicate_group_count} duplicate groups for ({columns})"
+                    f"FAIL {spec.display_name}: duplicate groups found for ({columns}) "
+                    f"({result.duplicate_group_count} duplicate groups)"
                 )
-                if sample_rows:
-                    print("Sample keys:")
-                    for row in sample_rows:
+                if result.duplicate_sample_rows:
+                    print("Sample duplicate keys:")
+                    for row in result.duplicate_sample_rows:
                         print(_format_key_row(spec, row))
-                failures += 1
-            elif status == "skipped":
-                print(f"SKIP {spec.display_name}: {note}")
-            else:
-                print(f"ERROR {spec.display_name}: unexpected status {status!r}")
-                failures += 1
+            if result.has_null_issues:
+                print(f"FAIL {spec.display_name}: NULL key values found for ({columns})")
+                for issue in result.null_issues:
+                    print(_format_null_issue(issue))
+                if result.null_sample_rows:
+                    print("Sample NULL rows:")
+                    for row in result.null_sample_rows:
+                        print(_format_null_key_row(spec, row))
         except (OSError, RuntimeError, SQLAlchemyError) as exc:
             print(f"ERROR {spec.display_name}: {exc}")
             failures += 1
@@ -243,6 +334,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.database_url is not None and not args.database_url.strip():
+        print(
+            "Error: --database-url was provided but empty. Omit the flag to use the configured database settings."
+        )
+        return 1
     return run_integrity_check(database_url=args.database_url)
 
 
