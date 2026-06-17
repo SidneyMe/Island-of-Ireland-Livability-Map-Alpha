@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import json
 import sys
 import threading
+from http import HTTPStatus
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.error import HTTPError
@@ -208,14 +210,32 @@ class LocalServerEndpointTests(TestCase):
         with TemporaryDirectory() as tmp_name:
             static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
             with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
-                with urlopen(base_url + "/static/dist/app.js") as response:
-                    body = response.read()
-                    content_type = response.headers.get_content_type()
-                    cache_control = response.headers.get("Cache-Control")
+                with mock.patch.object(
+                    serve_from_db.Path,
+                    "read_bytes",
+                    side_effect=AssertionError("read_bytes should not be used for static responses"),
+                ) as read_bytes_mock:
+                    with urlopen(base_url + "/static/dist/app.js") as response:
+                        body = response.read()
+                        content_type = response.headers.get_content_type()
+                        cache_control = response.headers.get("Cache-Control")
+                        content_length = response.headers.get("Content-Length")
 
         self.assertIn("javascript", content_type)
         self.assertIn(b"livability", body)
         self.assertEqual(cache_control, "no-store")
+        self.assertEqual(content_length, str(len(body)))
+        read_bytes_mock.assert_not_called()
+
+    def test_missing_static_asset_still_returns_404(self) -> None:
+        service = _FakeService()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                with self.assertRaises(HTTPError) as ctx:
+                    urlopen(base_url + "/static/dist/missing.js")
+
+        self.assertEqual(ctx.exception.code, 404)
 
     def test_export_endpoint_serves_transport_reality_zip(self) -> None:
         service = _FakeService()
@@ -227,12 +247,82 @@ class LocalServerEndpointTests(TestCase):
             export_path.write_bytes(b"zip-bytes")
             with mock.patch.object(serve_from_db, "EXPORTS_DIR", export_dir):
                 with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
-                    with urlopen(base_url + "/exports/transport-reality.zip") as response:
-                        payload = response.read()
-                        content_type = response.headers.get_content_type()
+                    with mock.patch.object(
+                        serve_from_db.Path,
+                        "read_bytes",
+                        side_effect=AssertionError("read_bytes should not be used for export responses"),
+                    ) as read_bytes_mock:
+                        with urlopen(base_url + "/exports/transport-reality.zip") as response:
+                            payload = response.read()
+                            content_type = response.headers.get_content_type()
+                            content_disposition = response.headers.get("Content-Disposition")
+                            content_length = response.headers.get("Content-Length")
 
         self.assertEqual(content_type, "application/zip")
         self.assertEqual(payload, b"zip-bytes")
+        self.assertEqual(content_disposition, 'attachment; filename="transport-reality.zip"')
+        self.assertEqual(content_length, str(len(payload)))
+        read_bytes_mock.assert_not_called()
+
+    def test_missing_export_still_returns_404(self) -> None:
+        service = _FakeService()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            export_dir = Path(tmp_name) / "exports"
+            export_dir.mkdir()
+            with mock.patch.object(serve_from_db, "EXPORTS_DIR", export_dir):
+                with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                    with self.assertRaises(HTTPError) as ctx:
+                        urlopen(base_url + "/exports/transport-reality.zip")
+
+        self.assertEqual(ctx.exception.code, 404)
+
+    def test_stream_file_response_reads_in_chunks(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            file_path = Path(tmp_name) / "chunked.bin"
+            file_path.write_bytes(b"x" * (serve_from_db.FILE_STREAM_CHUNK_SIZE + 3))
+            file_size = file_path.stat().st_size
+
+            class _ChunkReader:
+                def __init__(self, chunks: list[bytes]) -> None:
+                    self.chunks = list(chunks)
+                    self.read_sizes: list[int] = []
+
+                def read(self, size: int = -1) -> bytes:
+                    self.read_sizes.append(size)
+                    if self.chunks:
+                        return self.chunks.pop(0)
+                    return b""
+
+                def __enter__(self) -> "_ChunkReader":
+                    return self
+
+                def __exit__(self, exc_type, exc, tb) -> bool:
+                    del exc_type, exc, tb
+                    return False
+
+            reader = _ChunkReader([b"a" * serve_from_db.FILE_STREAM_CHUNK_SIZE, b"b" * 3])
+            handler = serve_from_db.LivabilityRequestHandler.__new__(serve_from_db.LivabilityRequestHandler)
+            handler.send_response = mock.Mock()
+            handler.send_header = mock.Mock()
+            handler.end_headers = mock.Mock()
+            handler.wfile = io.BytesIO()
+
+            with mock.patch.object(serve_from_db.Path, "open", return_value=reader) as open_mock:
+                serve_from_db._stream_file_response(
+                    handler,
+                    file_path,
+                    content_type="application/octet-stream",
+                    extra_headers={"Cache-Control": "no-store"},
+                )
+
+        self.assertEqual(handler.wfile.getvalue(), b"a" * serve_from_db.FILE_STREAM_CHUNK_SIZE + b"b" * 3)
+        self.assertEqual(reader.read_sizes, [serve_from_db.FILE_STREAM_CHUNK_SIZE] * 3)
+        open_mock.assert_called_once()
+        handler.send_response.assert_called_once_with(HTTPStatus.OK)
+        handler.send_header.assert_any_call("Content-Type", "application/octet-stream")
+        handler.send_header.assert_any_call("Cache-Control", "no-store")
+        handler.send_header.assert_any_call("Content-Length", str(file_size))
 
     def test_pmtiles_full_get(self) -> None:
         body = b"PMTILES_BODY_BYTES" * 100

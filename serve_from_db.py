@@ -48,6 +48,7 @@ CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionR
 RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
 SURFACE_TILE_RE = re.compile(r"^/tiles/surface/([^/]+)/([^/]+)/([^/]+)/([^/]+)\.png$")
 RUNTIME_STALE_FALLBACK_ENV = "LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME"
+FILE_STREAM_CHUNK_SIZE = 64 * 1024
 
 
 def _require_finite_float(raw_value: Any, *, field_name: str) -> float:
@@ -96,6 +97,37 @@ def _require_tile_coordinates(z: Any, x: Any, y: Any) -> tuple[int, int, int]:
     if tile_y < 0 or tile_y > max_tile_coord:
         raise ValueError(f"tile y must be between 0 and {max_tile_coord} for zoom {tile_z}")
     return tile_z, tile_x, tile_y
+
+
+def _stream_file_response(
+    handler: BaseHTTPRequestHandler,
+    file_path: Path,
+    *,
+    content_type: str,
+    status: HTTPStatus = HTTPStatus.OK,
+    extra_headers: dict[str, str] | None = None,
+    head_only: bool = False,
+) -> None:
+    resolved = file_path.resolve()
+    if not resolved.exists() or not resolved.is_file():
+        raise FileNotFoundError(str(resolved))
+
+    file_size = resolved.stat().st_size
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    for header_name, header_value in (extra_headers or {}).items():
+        handler.send_header(header_name, header_value)
+    handler.send_header("Content-Length", str(file_size))
+    handler.end_headers()
+    if head_only:
+        return
+
+    with resolved.open("rb") as handle:
+        while True:
+            chunk = handle.read(FILE_STREAM_CHUNK_SIZE)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
 
 
 def _env_truthy(name: str) -> bool:
@@ -915,28 +947,21 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         resolved = target_path.resolve()
         if safe_root not in resolved.parents and resolved != safe_root:
             raise FileNotFoundError
-        if not resolved.exists() or not resolved.is_file():
-            raise FileNotFoundError
         content_type = mimetypes.guess_type(str(resolved))[0] or "application/octet-stream"
-        content = resolved.read_bytes()
-        self.send_response(HTTPStatus.OK)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(content)))
-        self.end_headers()
-        self.wfile.write(content)
+        _stream_file_response(
+            self,
+            resolved,
+            content_type=content_type,
+            extra_headers={"Cache-Control": "no-store"},
+        )
 
     def _serve_export(self, export_path: Path) -> None:
-        resolved = export_path.resolve()
-        if not resolved.exists() or not resolved.is_file():
-            raise FileNotFoundError(str(resolved))
-        content = resolved.read_bytes()
-        self._write_bytes(
-            HTTPStatus.OK,
-            content,
-            "application/zip",
+        _stream_file_response(
+            self,
+            export_path,
+            content_type="application/zip",
             extra_headers={
-                "Content-Disposition": f'attachment; filename="{resolved.name}"',
+                "Content-Disposition": f'attachment; filename="{export_path.name}"',
                 "Cache-Control": "public, max-age=3600",
             },
         )
