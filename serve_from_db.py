@@ -38,6 +38,7 @@ from db_postgis import (
     load_runtime_manifest,
 )
 from precompute import surface as _surface
+from serve_routes import resolve_get_route, resolve_head_route
 from transit.export import EXPORTS_DIR, ZIP_FILENAME
 
 
@@ -46,7 +47,6 @@ INDEX_HTML_PATH = STATIC_DIR / "index.html"
 MISSING_PRECOMPUTE_MESSAGE = "No PostGIS precompute found for current config"
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
-SURFACE_TILE_RE = re.compile(r"^/tiles/surface/([^/]+)/([^/]+)/([^/]+)/([^/]+)\.png$")
 RUNTIME_STALE_FALLBACK_ENV = "LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME"
 FILE_STREAM_CHUNK_SIZE = 64 * 1024
 
@@ -822,19 +822,15 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802
         # MapLibre/PMTiles will send HEAD for the archive on some flows.
         parsed = urlsplit(self.path)
-        pmtiles_path = self.livability_server.pmtiles_path_for_url(parsed.path)
+        pmtiles_path = resolve_head_route(
+            parsed.path,
+            pmtiles_path_for_url=self.livability_server.pmtiles_path_for_url,
+            noise_pmtiles_url_path=self.livability_server.noise_pmtiles_url_path,
+            noise_pmtiles_path=self.livability_server.noise_pmtiles_path,
+        )
         if pmtiles_path is not None:
             try:
                 self._serve_pmtiles(pmtiles_path, head_only=True)
-            except CLIENT_DISCONNECT_ERRORS as exc:
-                self._log_client_disconnect(parsed.path, exc)
-            return
-        if parsed.path == self.livability_server.noise_pmtiles_url_path:
-            try:
-                self._serve_pmtiles(
-                    self.livability_server.noise_pmtiles_path,
-                    head_only=True,
-                )
             except CLIENT_DISCONNECT_ERRORS as exc:
                 self._log_client_disconnect(parsed.path, exc)
             return
@@ -845,7 +841,19 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         del format, args
 
     def _dispatch_request(self, parsed) -> None:
-        if parsed.path == "/":
+        route = resolve_get_route(
+            parsed.path,
+            static_dir=self.livability_server.static_dir,
+            export_path=EXPORTS_DIR / ZIP_FILENAME,
+            pmtiles_path_for_url=self.livability_server.pmtiles_path_for_url,
+            noise_pmtiles_url_path=self.livability_server.noise_pmtiles_url_path,
+            noise_pmtiles_path=self.livability_server.noise_pmtiles_path,
+        )
+        if route is None:
+            self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
+            return
+
+        if route.kind == "root":
             self._write_bytes(
                 HTTPStatus.OK,
                 self.livability_server.index_html,
@@ -853,19 +861,14 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
                 extra_headers={"Cache-Control": "no-store"},
             )
             return
-        if parsed.path == "/exports/transport-reality.zip":
-            self._serve_export(EXPORTS_DIR / ZIP_FILENAME)
+        if route.kind == "export":
+            self._serve_export(route.target_path)
             return
-        pmtiles_path = self.livability_server.pmtiles_path_for_url(parsed.path)
-        if pmtiles_path is not None:
-            self._serve_pmtiles(pmtiles_path)
+        if route.kind == "pmtiles":
+            self._serve_pmtiles(route.target_path)
             return
-        if parsed.path == self.livability_server.noise_pmtiles_url_path:
-            self._serve_pmtiles(self.livability_server.noise_pmtiles_path)
-            return
-        surface_match = SURFACE_TILE_RE.match(parsed.path)
-        if surface_match:
-            resolution_m, z, x, y = (int(value) for value in surface_match.groups())
+        if route.kind == "surface_tile":
+            resolution_m, z, x, y = (int(value) for value in route.groups)
             self._serve_surface_tile(
                 resolution_m=resolution_m,
                 z=z,
@@ -873,13 +876,13 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
                 y=y,
             )
             return
-        if parsed.path.startswith("/static/"):
-            self._serve_static(self.livability_server.static_dir / parsed.path.removeprefix("/static/"))
+        if route.kind == "static":
+            self._serve_static(route.target_path)
             return
-        if parsed.path == "/api/runtime":
+        if route.kind == "api_runtime":
             self._write_json(HTTPStatus.OK, self.livability_server.service.get_runtime())
             return
-        if parsed.path == "/api/inspect":
+        if route.kind == "api_inspect":
             self._serve_inspect(parsed.query)
             return
         self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
