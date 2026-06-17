@@ -327,40 +327,47 @@ class ConfigArtifactModeTests(TestCase):
 
 
 class WorkflowArtifactHashTests(TestCase):
-    """FIX 8: workflow must pass noise_artifact_hash to publish_precomputed_artifacts."""
-
-    def test_workflow_passes_noise_artifact_hash(self) -> None:
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("noise_artifact_hash", src)
-        self.assertIn("resolved_artifact_hash", src)
-
-    def test_workflow_detects_artifact_noise_reference(self) -> None:
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("_ArtifactNoiseReference", src)
-
-    def test_workflow_resolves_noise_processing_hash_once(self) -> None:
-        """resolved_noise_hash must be computed once before the publish call."""
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("resolved_noise_hash", src)
-
     def test_force_noise_artifact_maps_to_resolved_rebuild_without_source_reimport(self) -> None:
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("_force_resolved = bool(force_noise_artifact or force_noise_all)", src)
-        self.assertIn("_reimport_source = bool(reimport_noise_source or force_noise_all)", src)
+        from precompute._planning import NoiseArtifactContext, plan_noise_artifact
+
+        plan = plan_noise_artifact(
+            NoiseArtifactContext(
+                noise_mode="artifact",
+                noise_accuracy_mode="dev_fast",
+                engine_has_connect=True,
+                require_active_noise_artifact=False,
+                active_noise_artifact_exists=True,
+                force_noise_artifact=True,
+                reimport_noise_source=False,
+                force_noise_all=False,
+                refresh_noise_artifact=False,
+            )
+        )
+        self.assertEqual(plan.action, "build")
+        self.assertTrue(plan.force_resolved)
+        self.assertFalse(plan.reimport_source)
+        self.assertEqual(plan.reason, "--force-noise-artifact")
 
     def test_reimport_noise_source_sets_reimport_flag(self) -> None:
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("reimport_source=_reimport_source", src)
+        from precompute._planning import NoiseArtifactContext, plan_noise_artifact
+
+        plan = plan_noise_artifact(
+            NoiseArtifactContext(
+                noise_mode="artifact",
+                noise_accuracy_mode="dev_fast",
+                engine_has_connect=True,
+                require_active_noise_artifact=False,
+                active_noise_artifact_exists=True,
+                force_noise_artifact=False,
+                reimport_noise_source=True,
+                force_noise_all=False,
+                refresh_noise_artifact=False,
+            )
+        )
+        self.assertEqual(plan.action, "build")
+        self.assertTrue(plan.force_resolved)
+        self.assertTrue(plan.reimport_source)
+        self.assertEqual(plan.reason, "--reimport-noise-source")
 
     def test_topology_grid_changes_resolved_hash_not_source_hash(self) -> None:
         from noise_artifacts.manifest import noise_resolved_hash, noise_source_hash

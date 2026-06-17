@@ -4,6 +4,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ._planning import BuildContext, ImportContext, NoiseArtifactContext, plan_build, plan_import, plan_noise_artifact
+
 
 def _bootstrap_workflow_context(
     *,
@@ -294,7 +296,13 @@ def run_precompute_impl(
         source_state.import_fingerprint,
         normalization_scope_hash,
     )
-    if not import_was_ready and not auto_refresh_import:
+    import_plan = plan_import(
+        ImportContext(
+            import_was_ready=import_was_ready,
+            auto_refresh_import=auto_refresh_import,
+        )
+    )
+    if import_plan.action == "fail":
         raise _import_not_ready_error(source_state)
 
     # Noise artifact preflight — run early so a missing/broken artifact fails
@@ -308,6 +316,19 @@ def run_precompute_impl(
         pass
     if _config.NOISE_MODE == "artifact":
         if not hasattr(engine, "connect"):
+            noise_artifact_plan = plan_noise_artifact(
+                NoiseArtifactContext(
+                    noise_mode=_config.NOISE_MODE,
+                    noise_accuracy_mode=noise_accuracy_mode,
+                    engine_has_connect=False,
+                    require_active_noise_artifact=require_active_noise_artifact,
+                    active_noise_artifact_exists=False,
+                    force_noise_artifact=force_noise_artifact,
+                    reimport_noise_source=reimport_noise_source,
+                    force_noise_all=force_noise_all,
+                    refresh_noise_artifact=refresh_noise_artifact,
+                )
+            )
             if require_active_noise_artifact:
                 raise RuntimeError(
                     "BUG: --require-active-noise-artifact requires an engine with DB connectivity."
@@ -325,8 +346,21 @@ def run_precompute_impl(
             )
             from precompute._rows import set_selected_noise_artifact as _set_selected_noise_artifact
 
-            if require_active_noise_artifact:
-                _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
+            _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
+            noise_artifact_plan = plan_noise_artifact(
+                NoiseArtifactContext(
+                    noise_mode=_config.NOISE_MODE,
+                    noise_accuracy_mode=noise_accuracy_mode,
+                    engine_has_connect=True,
+                    require_active_noise_artifact=require_active_noise_artifact,
+                    active_noise_artifact_exists=_active_artifact is not None,
+                    force_noise_artifact=force_noise_artifact,
+                    reimport_noise_source=reimport_noise_source,
+                    force_noise_all=force_noise_all,
+                    refresh_noise_artifact=refresh_noise_artifact,
+                )
+            )
+            if noise_artifact_plan.action == "require_active":
                 if _active_artifact is None:
                     if noise_accuracy_mode == "accurate":
                         raise RuntimeError(
@@ -345,57 +379,44 @@ def run_precompute_impl(
                     flush=True,
                 )
                 _set_selected_noise_artifact(_active_artifact)
-            else:
-                _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
-
-                _force_resolved = bool(force_noise_artifact or force_noise_all)
-                _reimport_source = bool(reimport_noise_source or force_noise_all)
-                if _reimport_source:
-                    _force_resolved = True
-
-                _need_build = (
-                    _active_artifact is None
-                    or refresh_noise_artifact
-                    or _force_resolved
-                    or _reimport_source
-                )
-                if _need_build:
-                    if _active_artifact is None:
-                        _build_reason = "no active resolved artifact"
-                    elif force_noise_all:
-                        _build_reason = "--force-noise-all"
-                    elif reimport_noise_source:
-                        _build_reason = "--reimport-noise-source"
-                    elif force_noise_artifact:
-                        _build_reason = "--force-noise-artifact"
-                    else:
-                        _build_reason = "--refresh-noise-artifact"
-                    print(f"[noise] {_build_reason}; building noise artifact...", flush=True)
-                    from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
-
-                    def _noise_progress_cb(action, *, detail="", force_log=False):
-                        if detail:
-                            print(f"[noise] {detail}", flush=True)
-
-                    _build_result = _build_artifact(
-                        engine,
-                        force_resolved=_force_resolved,
-                        reimport_source=_reimport_source,
-                        noise_accuracy_mode=noise_accuracy_mode,
-                        progress_cb=_noise_progress_cb,
+            elif noise_artifact_plan.action == "reuse":
+                if _active_artifact is None:
+                    raise RuntimeError(
+                        "BUG: noise artifact planner selected reuse but no active resolved artifact exists."
                     )
-                    if _build_result["status"] == "built":
-                        print(
-                            f"[noise] artifact built: {_build_result['artifact_hash']} "
-                            f"rows={_build_result.get('row_count', 0)}",
-                            flush=True,
-                        )
-                    elif _build_result["status"] == "up_to_date":
-                        print(
-                            f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
-                            flush=True,
-                        )
-                    _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
+                _set_selected_noise_artifact(_active_artifact)
+                print(
+                    f"[noise] active resolved artifact: {_active_artifact.artifact_hash} "
+                    f"(mode={noise_accuracy_mode})",
+                    flush=True,
+                )
+            elif noise_artifact_plan.action == "build":
+                print(f"[noise] {noise_artifact_plan.reason}; building noise artifact...", flush=True)
+                from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
+
+                def _noise_progress_cb(action, *, detail="", force_log=False):
+                    if detail:
+                        print(f"[noise] {detail}", flush=True)
+
+                _build_result = _build_artifact(
+                    engine,
+                    force_resolved=noise_artifact_plan.force_resolved,
+                    reimport_source=noise_artifact_plan.reimport_source,
+                    noise_accuracy_mode=noise_accuracy_mode,
+                    progress_cb=_noise_progress_cb,
+                )
+                if _build_result["status"] == "built":
+                    print(
+                        f"[noise] artifact built: {_build_result['artifact_hash']} "
+                        f"rows={_build_result.get('row_count', 0)}",
+                        flush=True,
+                    )
+                elif _build_result["status"] == "up_to_date":
+                    print(
+                        f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
+                        flush=True,
+                    )
+                _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
 
                 if _active_artifact is None:
                     raise RuntimeError(
@@ -408,6 +429,8 @@ def run_precompute_impl(
                     f"(mode={noise_accuracy_mode})",
                     flush=True,
                 )
+            else:
+                raise RuntimeError(f"BUG: unsupported noise artifact plan action {noise_artifact_plan.action!r}")
     elif _config.NOISE_MODE == "legacy":
         print(
             "[noise] WARNING: NOISE_MODE=legacy is the slow debug path. "
@@ -433,7 +456,7 @@ def run_precompute_impl(
         except Exception as exc:  # noqa: BLE001 - background dispatch must not block main pipeline
             print(f"[noise] background dispatch failed: {exc}; falling back to inline load")
 
-    if not import_was_ready:
+    if import_plan.action == "refresh":
         tracker.start_phase("import", detail="refreshing raw OSM import")
         ensure_local_osm_import(
             engine,
@@ -500,16 +523,23 @@ def run_precompute_impl(
             and (not surface_missing)
             and ((not _noise_hash_matches) or noise_refresh_requested)
         )
-
-        if can_refresh_noise_only:
-            reason = (
-                "refresh flags were used"
-                if noise_refresh_requested
-                else "selected noise artifact changed"
+        build_plan = plan_build(
+            BuildContext(
+                force_precompute=force_precompute,
+                has_complete_build=True,
+                noise_hash_matches=_noise_hash_matches,
+                noise_refresh_requested=noise_refresh_requested,
+                can_refresh_noise_only=can_refresh_noise_only,
+                pmtiles_missing=pmtiles_missing,
+                noise_pmtiles_missing=noise_pmtiles_missing,
+                surface_missing=surface_missing,
             )
+        )
+
+        if build_plan.action == "refresh_noise_overlay_only":
             print(
                 f"Complete build exists for build_key={hashes.build_key}; "
-                f"{reason}. Refreshing noise overlay only."
+                f"{build_plan.reason}. Refreshing noise overlay only."
             )
             publish_started_at = datetime.now(timezone.utc)
             publish_progress_cb = tracker.phase_callback("publish")
@@ -539,7 +569,7 @@ def run_precompute_impl(
                 progress_cb=publish_progress_cb,
             )
             tracker.finish_phase("publish", "completed", detail="noise overlay refreshed")
-            if bake_configured and pmtiles_missing:
+            if build_plan.rebake_pmtiles_if_missing and bake_configured and pmtiles_missing:
                 bake_seconds = _run_pmtiles_bake(
                     bake_pmtiles=bake_pmtiles,
                     engine=engine,
@@ -550,7 +580,7 @@ def run_precompute_impl(
                 print(
                     f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
                 )
-            if noise_bake_configured:
+            if build_plan.rebake_noise_pmtiles_always and noise_bake_configured:
                 noise_bake_seconds = _run_noise_pmtiles_bake(
                     bake_noise_pmtiles=bake_noise_pmtiles,
                     engine=engine,
@@ -569,53 +599,55 @@ def run_precompute_impl(
             print(f"Total wall time: {time.perf_counter() - total_started_at:.1f}s")
             return hashes.build_key
 
-        if not _noise_hash_matches or noise_refresh_requested:
+        if build_plan.action == "skip":
+            print(
+                f"Complete PostGIS precompute already exists for build_key={hashes.build_key}. "
+                "Skipping. Use --force-precompute to rebuild."
+            )
+            return hashes.build_key
+
+        if build_plan.action == "rebake_missing_assets":
+            if build_plan.rebake_pmtiles_if_missing:
+                print(
+                    f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
+                    f"but PMTiles archive is missing at {pmtiles_output_path}. "
+                    "Re-baking PMTiles only."
+                )
+                bake_seconds = _run_pmtiles_bake(
+                    bake_pmtiles=bake_pmtiles,
+                    engine=engine,
+                    build_key=hashes.build_key,
+                    pmtiles_output_path=pmtiles_output_path,
+                    noise_max_zoom=noise_max_zoom,
+                )
+                print(
+                    f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
+                )
+            if build_plan.rebake_noise_pmtiles_if_missing:
+                print(
+                    f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
+                    f"but noise PMTiles archive is missing at {noise_pmtiles_output_path}. "
+                    "Re-baking noise PMTiles only."
+                )
+                noise_bake_seconds = _run_noise_pmtiles_bake(
+                    bake_noise_pmtiles=bake_noise_pmtiles,
+                    engine=engine,
+                    build_key=hashes.build_key,
+                    noise_pmtiles_output_path=noise_pmtiles_output_path,
+                    noise_max_zoom=noise_max_zoom,
+                )
+                print(
+                    "Noise PMTiles bake completed in "
+                    f"{noise_bake_seconds:.1f}s -> {noise_pmtiles_output_path}"
+                )
+            return hashes.build_key
+
+        if build_plan.action == "rebuild_full_pipeline":
             print(
                 f"Complete build exists for build_key={hashes.build_key}, "
-                "but noise refresh cannot be isolated; rebuilding full pipeline."
+                f"but {build_plan.reason}"
             )
-        else:
-            if not pmtiles_missing and not noise_pmtiles_missing and not surface_missing:
-                print(
-                    f"Complete PostGIS precompute already exists for build_key={hashes.build_key}. "
-                    "Skipping. Use --force-precompute to rebuild."
-                )
-                return hashes.build_key
-            if not surface_missing:
-                if pmtiles_missing:
-                    print(
-                        f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
-                        f"but PMTiles archive is missing at {pmtiles_output_path}. "
-                        "Re-baking PMTiles only."
-                    )
-                    bake_seconds = _run_pmtiles_bake(
-                        bake_pmtiles=bake_pmtiles,
-                        engine=engine,
-                        build_key=hashes.build_key,
-                        pmtiles_output_path=pmtiles_output_path,
-                        noise_max_zoom=noise_max_zoom,
-                    )
-                    print(
-                        f"PMTiles bake completed in {bake_seconds:.1f}s -> {pmtiles_output_path}"
-                    )
-                if noise_pmtiles_missing:
-                    print(
-                        f"Complete PostGIS precompute exists for build_key={hashes.build_key}, "
-                        f"but noise PMTiles archive is missing at {noise_pmtiles_output_path}. "
-                        "Re-baking noise PMTiles only."
-                    )
-                    noise_bake_seconds = _run_noise_pmtiles_bake(
-                        bake_noise_pmtiles=bake_noise_pmtiles,
-                        engine=engine,
-                        build_key=hashes.build_key,
-                        noise_pmtiles_output_path=noise_pmtiles_output_path,
-                        noise_max_zoom=noise_max_zoom,
-                    )
-                    print(
-                        "Noise PMTiles bake completed in "
-                        f"{noise_bake_seconds:.1f}s -> {noise_pmtiles_output_path}"
-                    )
-                return hashes.build_key
+        elif build_plan.action == "rebuild_fine_surface":
             print(
                 f"Complete coarse PostGIS build exists for build_key={hashes.build_key}, "
                 "but the fine surface cache is missing. Rebuilding fine raster artifacts."

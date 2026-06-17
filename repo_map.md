@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-06-02. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-06-17. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -33,8 +33,9 @@
 - **Precompute cache helpers**: `precompute/cache.py`, `precompute/_cache_wrappers.py`
 - **Array-native reachability cache helpers**: `precompute/reachability_arrays.py`
 - **Precompute tier helpers**: `precompute/tiers.py`, `precompute/_tier_wrappers.py`
+- **Precompute planning layer**: `precompute/_planning.py`
 - **Study-area geometry / coast mask**: `study_area.py`
-- **Precompute pipeline orchestration**: `precompute/__init__.py`, `precompute/workflow.py`, `precompute/phases.py`
+- **Precompute pipeline orchestration**: `precompute/__init__.py`, `precompute/_planning.py`, `precompute/workflow.py`, `precompute/phases.py`
 - **Lightweight GTFS refresh CLI path**: `transit_refresh_runner.py`
 - **Pipeline ETA and timing history**: `progress_tracker.py`
 - **Rust walkgraph binary**: `walkgraph/`
@@ -208,7 +209,7 @@ Notes:
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
 | Noise overlay source handling | `noise/loader.py`, `noise_artifacts/*` | `noise_polygons`, separate `noise` PMTiles archive, `/api/runtime` noise counts + `noise_pmtiles_url` | `noise_datasets/*.zip` local inputs |
 | Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB canonical pipeline (FileGDB -> local GPKG cache -> one PG stage import -> batch normalize), SQL timeouts, disk preflight (cache + PostgreSQL `data_directory`) | `NOISE_ROAD_GDB_CANONICAL_CACHE`, `NOISE_REBUILD_ROAD_GDB_CACHE`, `NOISE_ROAD_NORMALIZE_BATCH_SIZE`, `NOISE_SQL_*`, `NOISE_MIN_FREE_DISK_GB` |
-| Precompute orchestration | `precompute/workflow.py` | `precompute/__init__.py` | None |
+| Precompute orchestration | `precompute/_planning.py`, `precompute/workflow.py` | `precompute/__init__.py` | None |
 | PMTiles layer metadata | `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` |
@@ -672,6 +673,7 @@ Representative tests confirmed present:
 | `tests/test_overture_loader.py` | Overture category filtering and park handling |
 | `tests/test_osm_import_handling.py` | osm2pgsql wrapper and import manifest behavior |
 | `tests/test_precompute_behavior.py` | phase sequencing, cache / hash behavior, service-desert publish summaries |
+| `tests/test_precompute_planner.py` | pure precompute import / noise-artifact / build planning decisions |
 | `tests/test_precompute_cache.py` | tier cache read / write / invalidation helpers |
 | `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier` exposure, bounded parallel scheduling, retry behavior, temp-output cleanup, and old-archive preservation on failure |
 | `tests/test_noise_loader.py` | ROI dB field normalization plus round-aware NI mapping (Round 1 class-code handling, Round 2/3 threshold mapping, unknown-code errors), and newest-round fallback geometry |
@@ -748,24 +750,26 @@ Areas still relatively fragile:
 2. `main.py`
 3. `db_postgis/tables.py`
 4. `precompute/workflow.py`
-5. `precompute/__init__.py`
-6. `progress_tracker.py`
-7. `precompute/phases.py`
-8. `precompute/amenity_tiers.py`
-9. `pmtiles_bake_worker.py`
-10. `precompute/bake_pmtiles.py`
-11. `noise/loader.py`
-12. `serve_from_db.py`
-13. `frontend/src/runtime_contract.js`
-14. `frontend/src/main.js`
-15. `frontend/src/noise_filters.js`
-16. `overture/loader.py`
-17. `overture/merge.py`
-18. `scripts/sanity_check.py`
-19. `tests/test_precompute_behavior.py`
-20. `tests/test_pmtiles_bake.py`
-21. `tests/test_noise_loader.py`
-22. `tests/test_amenity_tiers.py`
+5. `precompute/_planning.py`
+6. `precompute/__init__.py`
+7. `progress_tracker.py`
+8. `precompute/phases.py`
+9. `precompute/amenity_tiers.py`
+10. `pmtiles_bake_worker.py`
+11. `precompute/bake_pmtiles.py`
+12. `noise/loader.py`
+13. `serve_from_db.py`
+14. `frontend/src/runtime_contract.js`
+15. `frontend/src/main.js`
+16. `frontend/src/noise_filters.js`
+17. `overture/loader.py`
+18. `overture/merge.py`
+19. `scripts/sanity_check.py`
+20. `tests/test_precompute_behavior.py`
+21. `tests/test_precompute_planner.py`
+22. `tests/test_pmtiles_bake.py`
+23. `tests/test_noise_loader.py`
+24. `tests/test_amenity_tiers.py`
 23. `README.md` and `docs/*.md` if you need product / methodology context
 ### `noise_artifacts/ingest.py`
 

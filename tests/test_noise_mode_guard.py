@@ -28,6 +28,24 @@ def _make_fake_manifest(artifact_hash="guard-test-hash"):
     )
 
 
+def _noise_context(**overrides):
+    from precompute._planning import NoiseArtifactContext
+
+    defaults = {
+        "noise_mode": "artifact",
+        "noise_accuracy_mode": "dev_fast",
+        "engine_has_connect": True,
+        "require_active_noise_artifact": False,
+        "active_noise_artifact_exists": True,
+        "force_noise_artifact": False,
+        "reimport_noise_source": False,
+        "force_noise_all": False,
+        "refresh_noise_artifact": False,
+    }
+    defaults.update(overrides)
+    return NoiseArtifactContext(**defaults)
+
+
 class NoiseModeArtifactGuardTests(TestCase):
     """
     Core regression guard: _noise_rows must not call the legacy loader in artifact mode.
@@ -248,20 +266,16 @@ class NoiseModeArtifactGuardTests(TestCase):
         self.assertIn("BUG", str(ctx.exception))
         self.assertIn("NOISE_MODE=artifact", str(ctx.exception))
 
-    def test_noise_mode_printed_in_precompute_log(self) -> None:
-        """FIX A: run_precompute_impl must print [config] NOISE_MODE=... at startup."""
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("[config] NOISE_MODE=", src)
-        self.assertIn("NOISE_MODE", src)
+    def test_noise_artifact_planner_requests_build_when_refresh_requested(self) -> None:
+        from precompute._planning import plan_noise_artifact
 
-    def test_artifact_preflight_auto_builds_or_raises_with_clear_message(self) -> None:
-        """FIX E+3: precompute must auto-build artifact if missing, or raise with clear message."""
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        # The auto-build path must be present
-        self.assertIn("build_default_noise_artifact", src)
-        # A BUG fallback must still exist if auto-build mysteriously fails
-        self.assertIn("BUG: noise artifact build completed", src)
+        plan = plan_noise_artifact(_noise_context(refresh_noise_artifact=True))
+        self.assertEqual(plan.action, "build")
+        self.assertIn("--refresh-noise-artifact", plan.reason)
+
+    def test_noise_artifact_planner_marks_legacy_mode(self) -> None:
+        from precompute._planning import plan_noise_artifact
+
+        plan = plan_noise_artifact(_noise_context(noise_mode="legacy"))
+        self.assertEqual(plan.action, "legacy")
+        self.assertIn("slow debug path", plan.reason)

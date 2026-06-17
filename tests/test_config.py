@@ -816,6 +816,23 @@ class MainCliNoiseFlagsTests(TestCase):
 class WorkflowNoiseAutoBuildsTests(TestCase):
     """FIX 3+4: precompute auto-builds artifact in workflow."""
 
+    def _noise_context(self, **overrides):
+        from precompute._planning import NoiseArtifactContext
+
+        defaults = {
+            "noise_mode": "artifact",
+            "noise_accuracy_mode": "dev_fast",
+            "engine_has_connect": True,
+            "require_active_noise_artifact": False,
+            "active_noise_artifact_exists": True,
+            "force_noise_artifact": False,
+            "reimport_noise_source": False,
+            "force_noise_all": False,
+            "refresh_noise_artifact": False,
+        }
+        defaults.update(overrides)
+        return NoiseArtifactContext(**defaults)
+
     def test_workflow_has_force_noise_artifact_param(self) -> None:
         import inspect
         from precompute import workflow
@@ -852,15 +869,18 @@ class WorkflowNoiseAutoBuildsTests(TestCase):
         sig = inspect.signature(workflow.run_precompute_impl)
         self.assertIn("require_active_noise_artifact", sig.parameters)
 
-    def test_workflow_calls_build_default_noise_artifact(self) -> None:
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("build_default_noise_artifact", src)
+    def test_workflow_planner_requests_noise_artifact_build_when_forced(self) -> None:
+        from precompute._planning import plan_noise_artifact
 
-    def test_workflow_emits_legacy_warning(self) -> None:
-        import inspect
-        from precompute import workflow
-        src = inspect.getsource(workflow.run_precompute_impl)
-        self.assertIn("NOISE_MODE=legacy", src)
-        self.assertIn("slow debug path", src)
+        plan = plan_noise_artifact(
+            self._noise_context(force_noise_artifact=True, active_noise_artifact_exists=True)
+        )
+        self.assertEqual(plan.action, "build")
+        self.assertIn("--force-noise-artifact", plan.reason)
+
+    def test_workflow_planner_marks_legacy_noise_mode(self) -> None:
+        from precompute._planning import plan_noise_artifact
+
+        plan = plan_noise_artifact(self._noise_context(noise_mode="legacy"))
+        self.assertEqual(plan.action, "legacy")
+        self.assertIn("slow debug path", plan.reason)
