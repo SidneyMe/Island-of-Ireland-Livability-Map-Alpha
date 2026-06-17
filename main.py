@@ -61,6 +61,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the Cork-only test precompute profile with the full 20km to 50m resolution ladder.",
     )
     parser.add_argument(
+        "--explain",
+        "--precompute-explain",
+        dest="precompute_explain",
+        action="store_true",
+        help="Print the precompute planner decision without running the expensive execution phases.",
+    )
+    parser.add_argument(
         "--render",
         action="store_true",
         help="Start the local MapLibre web app (legacy alias for --serve).",
@@ -190,6 +197,8 @@ def main() -> int:
         )
     if args.force_precompute and not precompute_requested:
         parser.error("--force-precompute requires --precompute, --precompute-dev, or --precompute-test")
+    if args.precompute_explain and not precompute_requested:
+        parser.error("--explain requires --precompute, --precompute-dev, or --precompute-test")
     if args.refresh_noise_artifact and not precompute_requested:
         parser.error("--refresh-noise-artifact requires --precompute, --precompute-dev, or --precompute-test")
     if args.force_noise_artifact and not precompute_requested:
@@ -289,7 +298,7 @@ def main() -> int:
             print(f"Preparing livability precompute ({precompute_profile})...", flush=True)
             from precompute import run_precompute as _run_precompute
 
-            _run_precompute(
+            precompute_kwargs = dict(
                 profile=precompute_profile,
                 force_precompute=args.force_precompute,
                 auto_refresh_import=args.auto_refresh_import,
@@ -305,6 +314,9 @@ def main() -> int:
                     or args.force_noise_all
                 ),
             )
+            if args.precompute_explain:
+                precompute_kwargs["explain"] = True
+            _run_precompute(**precompute_kwargs)
         if run_render:
             from render_from_db import run_render_from_db as _run_render_from_db
 

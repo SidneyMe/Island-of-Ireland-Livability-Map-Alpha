@@ -63,7 +63,8 @@
   - `--force-gtfs-refresh` -> only valid with `--refresh-gtfs` / `--refresh-transit`; forces GTFS ZIP re-download
   - `--refresh-transit` -> `transit_refresh_runner.refresh_transit()`
   - `--force-transit-refresh` -> same path, but only valid with `--refresh-transit`
-  - `--precompute` / `--precompute-dev` / `--precompute-test` -> `precompute.run_precompute(profile="full"|"dev"|"test")`
+- `--precompute` / `--precompute-dev` / `--precompute-test` -> `precompute.run_precompute(profile="full"|"dev"|"test")`
+  - `--explain` / `--precompute-explain` with a precompute profile -> prints the planner decision tree without entering the expensive execution phases
   - `--force-precompute` -> only valid with `--precompute` / `--precompute-dev` / `--precompute-test`
   - `--refresh-noise-artifact` -> refresh artifact during precompute when missing/stale
   - `--force-noise-artifact` -> force resolved artifact rebuild while reusing existing source rows
@@ -209,7 +210,8 @@ Notes:
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
 | Noise overlay source handling | `noise/loader.py`, `noise_artifacts/*` | `noise_polygons`, separate `noise` PMTiles archive, `/api/runtime` noise counts + `noise_pmtiles_url` | `noise_datasets/*.zip` local inputs |
 | Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB canonical pipeline (FileGDB -> local GPKG cache -> one PG stage import -> batch normalize), SQL timeouts, disk preflight (cache + PostgreSQL `data_directory`) | `NOISE_ROAD_GDB_CANONICAL_CACHE`, `NOISE_REBUILD_ROAD_GDB_CACHE`, `NOISE_ROAD_NORMALIZE_BATCH_SIZE`, `NOISE_SQL_*`, `NOISE_MIN_FREE_DISK_GB` |
-| Precompute orchestration | `precompute/_planning.py`, `precompute/workflow.py` | `precompute/__init__.py` | None |
+| Precompute orchestration | `precompute/_planning.py`, `precompute/workflow.py` | `precompute/__init__.py` | `precompute/workflow.py` now also has an explain-mode short-circuit that prints the pure planner output without running geometry, reachability, publish, or schema-migration setup phases. |
+| Managed schema validation | `db_postgis/schema.py` | `db_postgis.ensure_database_ready()` and startup validation | PK-equivalent coverage for `grid_walk_build_resolution_cell_idx` and `service_deserts_build_resolution_cell_idx` is accepted after the candidate-key migration, so startup no longer demands those exact index names when the primary key is present. |
 | PMTiles layer metadata | `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` |

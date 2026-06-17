@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+from contextlib import redirect_stdout
 from datetime import date, datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -2634,6 +2636,49 @@ class WorkflowTests(TestCase):
         kwargs["tracker_factory"].assert_called_once()
         kwargs["print_cache_status"].assert_called_once()
         kwargs["validate_all_tiers"].assert_called_once()
+
+    def test_precompute_explain_prints_plan_without_executor_phases(self) -> None:
+        engine = self._workflow_db_engine_with_manifest_noise(stored_noise_hash=None)
+        artifact = SimpleNamespace(artifact_hash="artifact-123")
+        kwargs = _workflow_kwargs(
+            build_engine=mock.Mock(return_value=engine),
+            has_complete_build=mock.Mock(return_value=True),
+            fine_surface_ready=mock.Mock(return_value=True),
+            transit_preflight=mock.Mock(),
+        )
+
+        with (
+            mock.patch("config.NOISE_MODE", "artifact"),
+            mock.patch(
+                "noise_artifacts.manifest.get_resolved_artifact_for_mode",
+                return_value=artifact,
+            ),
+            mock.patch.object(precompute._rows, "set_selected_noise_artifact"),
+            mock.patch("noise_artifacts.runner.build_default_noise_artifact") as build_artifact_mock,
+            io.StringIO() as stdout,
+            redirect_stdout(stdout),
+        ):
+            build_key = precompute._workflow.run_precompute_impl(explain=True, **kwargs)
+            output = stdout.getvalue()
+
+        self.assertEqual(build_key, "build-key-123")
+        self.assertIn("Precompute plan", output)
+        self.assertIn("* import:", output)
+        self.assertIn("* noise artifact:", output)
+        self.assertIn("* build:", output)
+        self.assertIn("* surface:", output)
+        self.assertIn("* pmtiles:", output)
+        self.assertIn("* publish:", output)
+        kwargs["ensure_database_ready"].assert_not_called()
+        kwargs["transit_preflight"].assert_not_called()
+        kwargs["tracker_factory"].assert_not_called()
+        kwargs["phase_geometry"].assert_not_called()
+        kwargs["phase_amenities"].assert_not_called()
+        kwargs["phase_grids"].assert_not_called()
+        kwargs["compute_service_deserts"].assert_not_called()
+        kwargs["publish_precomputed_artifacts"].assert_not_called()
+        kwargs["ensure_local_osm_import"].assert_not_called()
+        build_artifact_mock.assert_not_called()
 
     def test_precompute_skips_when_complete_build_and_pmtiles_present(self) -> None:
         with TemporaryDirectory() as tmp_name:

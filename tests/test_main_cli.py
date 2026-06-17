@@ -79,6 +79,20 @@ class MainCliTests(TestCase):
             stderr.getvalue(),
         )
 
+    def test_explain_requires_precompute(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--explain"]),
+            mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            self.assertRaises(SystemExit) as ctx,
+        ):
+            main.main()
+
+        self.assertEqual(ctx.exception.code, 2)
+        self.assertIn(
+            "--explain requires --precompute, --precompute-dev, or --precompute-test",
+            stderr.getvalue(),
+        )
+
     def test_auto_refresh_import_requires_precompute(self) -> None:
         with (
             mock.patch.object(sys, "argv", ["main.py", "--auto-refresh-import"]),
@@ -185,6 +199,30 @@ class MainCliTests(TestCase):
             noise_accurate=False,
             require_active_noise_artifact=False,
             refresh_noise_artifact=False,
+        )
+
+    def test_precompute_dev_explain_dispatches_explain_flag(self) -> None:
+        precompute_mock = mock.Mock(return_value="build-key-dev")
+        fake_precompute_module = SimpleNamespace(run_precompute=precompute_mock)
+
+        with (
+            mock.patch.object(sys, "argv", ["main.py", "--precompute-dev", "--explain"]),
+            mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}),
+        ):
+            exit_code = main.main()
+
+        self.assertEqual(exit_code, 0)
+        precompute_mock.assert_called_once_with(
+            profile="dev",
+            force_precompute=False,
+            auto_refresh_import=False,
+            force_noise_artifact=False,
+            reimport_noise_source=False,
+            force_noise_all=False,
+            noise_accurate=False,
+            require_active_noise_artifact=False,
+            refresh_noise_artifact=False,
+            explain=True,
         )
 
     def test_precompute_dev_passes_force_and_auto_refresh_flags(self) -> None:

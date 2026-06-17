@@ -58,6 +58,7 @@ class _ManagedIndexSpec:
     table_name: str
     schema: str = "public"
     columns: tuple[str, ...] | None = None
+    equivalent_constraint_columns: tuple[str, ...] | None = None
 
 
 _MANAGED_TABLES = (
@@ -90,7 +91,11 @@ _MANAGED_TABLES = (
 )
 
 _MANAGED_INDEX_SPECS = (
-    _ManagedIndexSpec("grid_walk_build_resolution_cell_idx", "grid_walk"),
+    _ManagedIndexSpec(
+        "grid_walk_build_resolution_cell_idx",
+        "grid_walk",
+        equivalent_constraint_columns=("build_key", "resolution_m", "cell_id"),
+    ),
     _ManagedIndexSpec("grid_walk_build_resolution_idx", "grid_walk"),
     _ManagedIndexSpec("grid_walk_config_resolution_idx", "grid_walk"),
     _ManagedIndexSpec("grid_walk_centre_geom_gist", "grid_walk"),
@@ -101,7 +106,11 @@ _MANAGED_INDEX_SPECS = (
     _ManagedIndexSpec("transport_reality_build_source_idx", "transport_reality"),
     _ManagedIndexSpec("transport_reality_status_idx", "transport_reality"),
     _ManagedIndexSpec("transport_reality_geom_gist", "transport_reality"),
-    _ManagedIndexSpec("service_deserts_build_resolution_cell_idx", "service_deserts"),
+    _ManagedIndexSpec(
+        "service_deserts_build_resolution_cell_idx",
+        "service_deserts",
+        equivalent_constraint_columns=("build_key", "resolution_m", "cell_id"),
+    ),
     _ManagedIndexSpec("service_deserts_geom_gist", "service_deserts"),
     _ManagedIndexSpec("noise_polygons_build_metric_idx", "noise_polygons"),
     _ManagedIndexSpec("noise_polygons_source_metric_idx", "noise_polygons"),
@@ -282,6 +291,20 @@ def _present_indexes(inspector, table_name: str, *, schema: str) -> dict[str, tu
     return present
 
 
+def _constraint_covers_columns(inspector, table_name: str, *, schema: str, columns: tuple[str, ...]) -> bool:
+    pk = inspector.get_pk_constraint(table_name, schema=None if schema == "public" else schema) or {}
+    if tuple(pk.get("constrained_columns") or ()) == columns:
+        return True
+    unique_constraints = inspector.get_unique_constraints(
+        table_name,
+        schema=None if schema == "public" else schema,
+    ) or []
+    for unique_constraint in unique_constraints:
+        if tuple(unique_constraint.get("column_names") or ()) == columns:
+            return True
+    return False
+
+
 def _managed_schema_mismatches(inspector) -> list[str]:
     mismatches: list[str] = []
     tables_by_schema = _table_names_by_schema(inspector)
@@ -320,6 +343,16 @@ def _managed_schema_mismatches(inspector) -> list[str]:
         )
         present_cols = present_indexes.get(index_spec.index_name)
         if present_cols is None and index_spec.index_name not in present_indexes:
+            if (
+                index_spec.equivalent_constraint_columns is not None
+                and _constraint_covers_columns(
+                    inspector,
+                    index_spec.table_name,
+                    schema=index_spec.schema,
+                    columns=index_spec.equivalent_constraint_columns,
+                )
+            ):
+                continue
             mismatches.append(
                 f"missing index {index_spec.schema}.{index_spec.index_name}"
             )
@@ -522,19 +555,31 @@ def ensure_database_ready(engine: Engine) -> None:
 
 
 def find_missing_serve_indexes(engine: Engine) -> list[str]:
-    with engine.connect() as connection:
-        rows = connection.execute(
-            text(
-                """
-                SELECT indexname
-                FROM pg_indexes
-                WHERE schemaname = 'public'
-                  AND tablename IN ('grid_walk', 'amenities')
-                """
+    inspector = inspect(engine)
+    present_indexes: set[str] = set()
+    for table_name in ("grid_walk", "amenities"):
+        present_indexes.update(
+            str(name)
+            for name in (
+                index.get("name")
+                for index in inspector.get_indexes(table_name, schema=None)
+                if index.get("name")
             )
-        ).all()
-    present = {str(row[0]) for row in rows}
-    return [name for name in _EXPECTED_SERVE_INDEXES if name not in present]
+        )
+
+    missing: list[str] = []
+    for index_name in _EXPECTED_SERVE_INDEXES:
+        if index_name in present_indexes:
+            continue
+        if index_name == "grid_walk_build_resolution_cell_idx" and _constraint_covers_columns(
+            inspector,
+            "grid_walk",
+            schema="public",
+            columns=("build_key", "resolution_m", "cell_id"),
+        ):
+            continue
+        missing.append(index_name)
+    return missing
 
 
 def import_payload_ready(engine: Engine, import_fingerprint: str, normalization_scope_hash: str) -> bool:

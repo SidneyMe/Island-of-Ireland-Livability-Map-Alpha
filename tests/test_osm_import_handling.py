@@ -98,10 +98,12 @@ def _managed_schema_inspector(
     missing_tables: set[tuple[str, str]] | None = None,
     missing_columns: dict[tuple[str, str], set[str]] | None = None,
     missing_indexes: set[str] | None = None,
+    pk_constraints: dict[tuple[str, str], dict[str, object]] | None = None,
 ):
     missing_tables = missing_tables or set()
     missing_columns = missing_columns or {}
     missing_indexes = missing_indexes or set()
+    pk_constraints = pk_constraints or {}
 
     public_tables = []
     raw_tables = []
@@ -162,9 +164,22 @@ def _managed_schema_inspector(
         ]
         return [{"name": name} for name in names]
 
+    def _get_pk_constraint(table_name, schema=None):
+        return dict(
+            pk_constraints.get(
+                (str(schema or "public"), str(table_name)),
+                {"constrained_columns": [], "name": None},
+            )
+        )
+
+    def _get_unique_constraints(table_name, schema=None):
+        return []
+
     inspector.get_table_names.side_effect = _get_table_names
     inspector.get_columns.side_effect = _get_columns
     inspector.get_indexes.side_effect = _get_indexes
+    inspector.get_pk_constraint.side_effect = _get_pk_constraint
+    inspector.get_unique_constraints.side_effect = _get_unique_constraints
     return inspector
 
 
@@ -624,6 +639,46 @@ class DbPostgisImportStateTests(TestCase):
             stamp_mock.call_args.args[1],
             db_schema.ALEMBIC_INITIAL_REVISION,
         )
+        upgrade_mock.assert_called_once()
+
+    def test_ensure_database_ready_accepts_primary_key_equivalent_lookup_indexes(self) -> None:
+        engine = mock.MagicMock()
+        begin_connection = _db_ready_connection()
+        connect_connection = mock.MagicMock()
+        engine.begin.return_value.__enter__.return_value = begin_connection
+        engine.connect.return_value.__enter__.return_value = connect_connection
+        final_pk_constraints = {
+            ("public", "grid_walk"): {
+                "constrained_columns": ["build_key", "resolution_m", "cell_id"],
+                "name": "grid_walk_build_resolution_cell_pkey",
+            },
+            ("public", "service_deserts"): {
+                "constrained_columns": ["build_key", "resolution_m", "cell_id"],
+                "name": "service_deserts_build_resolution_cell_pkey",
+            },
+        }
+        legacy_inspector = _managed_schema_inspector()
+        final_inspector = _managed_schema_inspector(
+            include_alembic_version=True,
+            missing_indexes={
+                "grid_walk_build_resolution_cell_idx",
+                "service_deserts_build_resolution_cell_idx",
+            },
+            pk_constraints=final_pk_constraints,
+        )
+
+        with (
+            mock.patch.object(
+                db_schema,
+                "inspect",
+                side_effect=[legacy_inspector, final_inspector],
+            ),
+            mock.patch.object(db_schema.command, "stamp") as stamp_mock,
+            mock.patch.object(db_schema.command, "upgrade") as upgrade_mock,
+        ):
+            db_postgis.ensure_database_ready(engine)
+
+        stamp_mock.assert_called_once()
         upgrade_mock.assert_called_once()
 
     def test_ensure_database_ready_rejects_legacy_schema_drift_without_alembic_version(self) -> None:

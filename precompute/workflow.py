@@ -4,7 +4,17 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ._planning import BuildContext, ImportContext, NoiseArtifactContext, plan_build, plan_import, plan_noise_artifact
+from ._planning import (
+    BuildContext,
+    BuildPlan,
+    ImportContext,
+    NoiseArtifactContext,
+    PrecomputePlan,
+    format_precompute_plan,
+    plan_build,
+    plan_import,
+    plan_noise_artifact,
+)
 
 
 def _bootstrap_workflow_context(
@@ -15,9 +25,11 @@ def _bootstrap_workflow_context(
     activate_build_hashes,
     get_hashes,
     set_source_state,
+    explain: bool = False,
 ):
     engine = build_engine()
-    ensure_database_ready(engine)
+    if not explain:
+        ensure_database_ready(engine)
     source_state = resolve_source_state()
     set_source_state(source_state)
     activate_build_hashes(source_state.import_fingerprint)
@@ -119,6 +131,79 @@ def _noise_study_area_for_profile(build_profile: str, study_area_wgs84):
     return None
 
 
+def _plan_precompute_build(
+    *,
+    engine,
+    hashes,
+    has_complete_build,
+    force_precompute: bool,
+    noise_processing_hash,
+    bake_pmtiles,
+    pmtiles_output_path: Path | None,
+    bake_noise_pmtiles,
+    noise_pmtiles_output_path: Path | None,
+    fine_surface_ready,
+    refresh_noise_artifact: bool,
+    force_noise_artifact: bool,
+    reimport_noise_source: bool,
+    force_noise_all: bool,
+    refresh_noise_overlay_for_build,
+) -> BuildPlan:
+    has_complete_build_now = bool(has_complete_build(engine, hashes.build_key))
+    noise_hash_matches = False
+    pmtiles_missing = False
+    noise_pmtiles_missing = False
+    surface_missing = False
+    noise_refresh_requested = _noise_refresh_flags_used(
+        refresh_noise_artifact=refresh_noise_artifact,
+        force_noise_artifact=force_noise_artifact,
+        reimport_noise_source=reimport_noise_source,
+        force_noise_all=force_noise_all,
+    )
+    can_refresh_noise_only = False
+    if has_complete_build_now and not force_precompute:
+        current_noise_hash = _resolve_noise_processing_hash(noise_processing_hash, engine)
+        try:
+            stored_noise_hash, _stored_summary_json = _load_stored_noise_state(
+                engine,
+                hashes.build_key,
+            )
+            noise_hash_matches = True if current_noise_hash is None else stored_noise_hash == current_noise_hash
+        except Exception:
+            noise_hash_matches = True
+
+        bake_configured = _pmtiles_bake_configured(bake_pmtiles, pmtiles_output_path)
+        noise_bake_configured = _noise_pmtiles_bake_configured(
+            bake_noise_pmtiles,
+            noise_pmtiles_output_path,
+        )
+        pmtiles_missing = bool(bake_configured and pmtiles_output_path is not None and not pmtiles_output_path.exists())
+        noise_pmtiles_missing = bool(
+            noise_bake_configured
+            and noise_pmtiles_output_path is not None
+            and not noise_pmtiles_output_path.exists()
+        )
+        surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
+        can_refresh_noise_only = (
+            refresh_noise_overlay_for_build is not None
+            and (not surface_missing)
+            and ((not noise_hash_matches) or noise_refresh_requested)
+        )
+
+    return plan_build(
+        BuildContext(
+            force_precompute=force_precompute,
+            has_complete_build=has_complete_build_now,
+            noise_hash_matches=noise_hash_matches,
+            noise_refresh_requested=noise_refresh_requested,
+            can_refresh_noise_only=can_refresh_noise_only,
+            pmtiles_missing=pmtiles_missing,
+            noise_pmtiles_missing=noise_pmtiles_missing,
+            surface_missing=surface_missing,
+        )
+    )
+
+
 def _load_stored_noise_state(engine, build_key: str) -> tuple[str | None, dict]:
     from sqlalchemy import text as _text
 
@@ -176,6 +261,7 @@ def run_import_refresh_impl(
         activate_build_hashes=activate_build_hashes,
         get_hashes=get_hashes,
         set_source_state=set_source_state,
+        explain=False,
     )
     _print_build_context(source_state, hashes)
 
@@ -228,6 +314,7 @@ def run_precompute_impl(
     noise_accurate: bool = False,
     require_active_noise_artifact: bool = False,
     refresh_noise_artifact: bool = False,
+    explain: bool = False,
     *,
     build_profile: str = "full",
     cache_dir: Path,
@@ -287,6 +374,7 @@ def run_precompute_impl(
         activate_build_hashes=activate_build_hashes,
         get_hashes=get_hashes,
         set_source_state=set_source_state,
+        explain=explain,
     )
     _print_build_context(source_state, hashes)
 
@@ -302,7 +390,7 @@ def run_precompute_impl(
             auto_refresh_import=auto_refresh_import,
         )
     )
-    if import_plan.action == "fail":
+    if import_plan.action == "fail" and not explain:
         raise _import_not_ready_error(source_state)
 
     # Noise artifact preflight — run early so a missing/broken artifact fails
@@ -314,32 +402,33 @@ def run_precompute_impl(
         _reset_selected_noise_artifact(None)
     except Exception:
         pass
+    noise_artifact_plan = plan_noise_artifact(
+        NoiseArtifactContext(
+            noise_mode=_config.NOISE_MODE,
+            noise_accuracy_mode=noise_accuracy_mode,
+            engine_has_connect=hasattr(engine, "connect"),
+            require_active_noise_artifact=require_active_noise_artifact,
+            active_noise_artifact_exists=False,
+            force_noise_artifact=force_noise_artifact,
+            reimport_noise_source=reimport_noise_source,
+            force_noise_all=force_noise_all,
+            refresh_noise_artifact=refresh_noise_artifact,
+        )
+    )
+    _active_artifact = None
     if _config.NOISE_MODE == "artifact":
         if not hasattr(engine, "connect"):
-            noise_artifact_plan = plan_noise_artifact(
-                NoiseArtifactContext(
-                    noise_mode=_config.NOISE_MODE,
-                    noise_accuracy_mode=noise_accuracy_mode,
-                    engine_has_connect=False,
-                    require_active_noise_artifact=require_active_noise_artifact,
-                    active_noise_artifact_exists=False,
-                    force_noise_artifact=force_noise_artifact,
-                    reimport_noise_source=reimport_noise_source,
-                    force_noise_all=force_noise_all,
-                    refresh_noise_artifact=refresh_noise_artifact,
-                )
-            )
-            if require_active_noise_artifact:
+            if not explain and require_active_noise_artifact:
                 raise RuntimeError(
                     "BUG: --require-active-noise-artifact requires an engine with DB connectivity."
                 )
-            # Unit tests often pass sentinel/mock engines that intentionally do
-            # not implement DB connectivity; skip artifact DB preflight there.
-            print(
-                "[noise] skipping artifact preflight: engine does not expose connect()",
-                flush=True,
-            )
-            _active_artifact = None
+            if not explain:
+                # Unit tests often pass sentinel/mock engines that intentionally do
+                # not implement DB connectivity; skip artifact DB preflight there.
+                print(
+                    "[noise] skipping artifact preflight: engine does not expose connect()",
+                    flush=True,
+                )
         else:
             from noise_artifacts.manifest import (
                 get_resolved_artifact_for_mode as _get_resolved_artifact_for_mode,
@@ -360,84 +449,116 @@ def run_precompute_impl(
                     refresh_noise_artifact=refresh_noise_artifact,
                 )
             )
-            if noise_artifact_plan.action == "require_active":
-                if _active_artifact is None:
-                    if noise_accuracy_mode == "accurate":
+            if not explain:
+                if noise_artifact_plan.action == "require_active":
+                    if _active_artifact is None:
+                        if noise_accuracy_mode == "accurate":
+                            raise RuntimeError(
+                                "Noise artifact missing for mode=accurate. "
+                                "DevReuse never builds noise artifacts. "
+                                "Run scripts\\win\\prepare_noise_artifact_accurate.cmd first."
+                            )
                         raise RuntimeError(
-                            "Noise artifact missing for mode=accurate. "
+                            "Noise artifact missing for mode=dev_fast. "
                             "DevReuse never builds noise artifacts. "
-                            "Run scripts\\win\\prepare_noise_artifact_accurate.cmd first."
+                            "Run scripts\\win\\prepare_noise_artifact_dev.cmd first."
                         )
-                    raise RuntimeError(
-                        "Noise artifact missing for mode=dev_fast. "
-                        "DevReuse never builds noise artifacts. "
-                        "Run scripts\\win\\prepare_noise_artifact_dev.cmd first."
-                    )
-                print(
-                    "[noise] active resolved artifact required and found: "
-                    f"{_active_artifact.artifact_hash} (mode={noise_accuracy_mode})",
-                    flush=True,
-                )
-                _set_selected_noise_artifact(_active_artifact)
-            elif noise_artifact_plan.action == "reuse":
-                if _active_artifact is None:
-                    raise RuntimeError(
-                        "BUG: noise artifact planner selected reuse but no active resolved artifact exists."
-                    )
-                _set_selected_noise_artifact(_active_artifact)
-                print(
-                    f"[noise] active resolved artifact: {_active_artifact.artifact_hash} "
-                    f"(mode={noise_accuracy_mode})",
-                    flush=True,
-                )
-            elif noise_artifact_plan.action == "build":
-                print(f"[noise] {noise_artifact_plan.reason}; building noise artifact...", flush=True)
-                from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
-
-                def _noise_progress_cb(action, *, detail="", force_log=False):
-                    if detail:
-                        print(f"[noise] {detail}", flush=True)
-
-                _build_result = _build_artifact(
-                    engine,
-                    force_resolved=noise_artifact_plan.force_resolved,
-                    reimport_source=noise_artifact_plan.reimport_source,
-                    noise_accuracy_mode=noise_accuracy_mode,
-                    progress_cb=_noise_progress_cb,
-                )
-                if _build_result["status"] == "built":
                     print(
-                        f"[noise] artifact built: {_build_result['artifact_hash']} "
-                        f"rows={_build_result.get('row_count', 0)}",
+                        "[noise] active resolved artifact required and found: "
+                        f"{_active_artifact.artifact_hash} (mode={noise_accuracy_mode})",
                         flush=True,
                     )
-                elif _build_result["status"] == "up_to_date":
+                    _set_selected_noise_artifact(_active_artifact)
+                elif noise_artifact_plan.action == "reuse":
+                    if _active_artifact is None:
+                        raise RuntimeError(
+                            "BUG: noise artifact planner selected reuse but no active resolved artifact exists."
+                        )
+                    _set_selected_noise_artifact(_active_artifact)
                     print(
-                        f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
+                        f"[noise] active resolved artifact: {_active_artifact.artifact_hash} "
+                        f"(mode={noise_accuracy_mode})",
                         flush=True,
                     )
-                _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
+                elif noise_artifact_plan.action == "build":
+                    print(f"[noise] {noise_artifact_plan.reason}; building noise artifact...", flush=True)
+                    from noise_artifacts.runner import build_default_noise_artifact as _build_artifact
 
-                if _active_artifact is None:
-                    raise RuntimeError(
-                        "BUG: noise artifact build completed but no active resolved artifact exists. "
-                        "Check noise_artifact_manifest for errors."
+                    def _noise_progress_cb(action, *, detail="", force_log=False):
+                        if detail:
+                            print(f"[noise] {detail}", flush=True)
+
+                    _build_result = _build_artifact(
+                        engine,
+                        force_resolved=noise_artifact_plan.force_resolved,
+                        reimport_source=noise_artifact_plan.reimport_source,
+                        noise_accuracy_mode=noise_accuracy_mode,
+                        progress_cb=_noise_progress_cb,
                     )
-                _set_selected_noise_artifact(_active_artifact)
-                print(
-                    f"[noise] active resolved artifact: {_active_artifact.artifact_hash} "
-                    f"(mode={noise_accuracy_mode})",
-                    flush=True,
-                )
-            else:
-                raise RuntimeError(f"BUG: unsupported noise artifact plan action {noise_artifact_plan.action!r}")
+                    if _build_result["status"] == "built":
+                        print(
+                            f"[noise] artifact built: {_build_result['artifact_hash']} "
+                            f"rows={_build_result.get('row_count', 0)}",
+                            flush=True,
+                        )
+                    elif _build_result["status"] == "up_to_date":
+                        print(
+                            f"[noise] artifact already up to date: {_build_result['artifact_hash']}",
+                            flush=True,
+                        )
+                    _active_artifact = _get_resolved_artifact_for_mode(engine, noise_accuracy_mode)
+
+                    if _active_artifact is None:
+                        raise RuntimeError(
+                            "BUG: noise artifact build completed but no active resolved artifact exists. "
+                            "Check noise_artifact_manifest for errors."
+                        )
+                    _set_selected_noise_artifact(_active_artifact)
+                    print(
+                        f"[noise] active resolved artifact: {_active_artifact.artifact_hash} "
+                        f"(mode={noise_accuracy_mode})",
+                        flush=True,
+                    )
+                else:
+                    raise RuntimeError(f"BUG: unsupported noise artifact plan action {noise_artifact_plan.action!r}")
     elif _config.NOISE_MODE == "legacy":
+        if not explain:
+            print(
+                "[noise] WARNING: NOISE_MODE=legacy is the slow debug path. "
+                "It reads raw noise ZIP/FileGDB files and runs full PostGIS materialization. "
+                "The default (artifact mode) is much faster and does not read raw files.",
+                flush=True,
+            )
+
+    if explain:
+        build_plan = _plan_precompute_build(
+            engine=engine,
+            hashes=hashes,
+            has_complete_build=has_complete_build,
+            force_precompute=force_precompute,
+            noise_processing_hash=noise_processing_hash,
+            bake_pmtiles=bake_pmtiles,
+            pmtiles_output_path=pmtiles_output_path,
+            bake_noise_pmtiles=bake_noise_pmtiles,
+            noise_pmtiles_output_path=noise_pmtiles_output_path,
+            fine_surface_ready=fine_surface_ready,
+            refresh_noise_artifact=refresh_noise_artifact,
+            force_noise_artifact=force_noise_artifact,
+            reimport_noise_source=reimport_noise_source,
+            force_noise_all=force_noise_all,
+            refresh_noise_overlay_for_build=refresh_noise_overlay_for_build,
+        )
         print(
-            "[noise] WARNING: NOISE_MODE=legacy is the slow debug path. "
-            "It reads raw noise ZIP/FileGDB files and runs full PostGIS materialization. "
-            "The default (artifact mode) is much faster and does not read raw files.",
+            format_precompute_plan(
+                PrecomputePlan(
+                    import_plan=import_plan,
+                    noise_artifact_plan=noise_artifact_plan,
+                    build_plan=build_plan,
+                )
+            ),
             flush=True,
         )
+        return hashes.build_key
 
     if transit_preflight is not None:
         transit_preflight(engine)

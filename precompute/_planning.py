@@ -87,6 +87,73 @@ class PrecomputePlan:
         return tuple(reason for reason in reasons if reason)
 
 
+def _surface_action(plan: PrecomputePlan) -> tuple[str, str]:
+    if plan.build_plan.action == "rebuild_fine_surface":
+        return "rebuild", plan.build_plan.reason
+    if plan.build_plan.action == "skip":
+        return "skip", "fine surface cache is current"
+    if plan.build_plan.action == "rebake_missing_assets":
+        return "skip", "fine surface cache is already present"
+    if plan.build_plan.action == "refresh_noise_overlay_only":
+        return "skip", "refresh does not rebuild surface"
+    return "run", "full rebuild will materialize the surface"
+
+
+def _pmtiles_action(plan: PrecomputePlan) -> tuple[str, str]:
+    if plan.build_plan.action == "skip":
+        return "skip", "PMTiles archives are current"
+    if plan.build_plan.action == "rebake_missing_assets":
+        missing = []
+        if plan.build_plan.rebake_pmtiles_if_missing:
+            missing.append("main")
+        if plan.build_plan.rebake_noise_pmtiles_if_missing or plan.build_plan.rebake_noise_pmtiles_always:
+            missing.append("noise")
+        if not missing:
+            return "skip", "PMTiles archives are current"
+        return "rebake", f"missing {' and '.join(missing)} PMTiles archive(s)"
+    if plan.build_plan.action == "refresh_noise_overlay_only":
+        if plan.build_plan.rebake_pmtiles_if_missing or plan.build_plan.rebake_noise_pmtiles_always:
+            return "rebake", "refresh will rebake missing PMTiles archives"
+        return "skip", "refresh does not require PMTiles changes"
+    if plan.build_plan.action in {"rebuild_full_pipeline", "rebuild_fine_surface", "continue"}:
+        return "run", "full pipeline will handle PMTiles if needed"
+    return "skip", "PMTiles decision not needed"
+
+
+def _publish_action(plan: PrecomputePlan) -> tuple[str, str]:
+    if plan.build_plan.action == "refresh_noise_overlay_only":
+        return "refresh_noise_overlay_only", "refresh noise overlay without rebuilding the full pipeline"
+    if plan.build_plan.action == "skip":
+        return "skip", "complete build already exists"
+    if plan.build_plan.action == "rebake_missing_assets":
+        return "skip", "only missing PMTiles archives are rebaked"
+    if plan.build_plan.action in {"rebuild_full_pipeline", "rebuild_fine_surface", "continue"}:
+        return "run", "full publish will run"
+    return "skip", "publish decision not needed"
+
+
+def format_precompute_plan(plan: PrecomputePlan) -> str:
+    surface_action, surface_reason = _surface_action(plan)
+    pmtiles_action, pmtiles_reason = _pmtiles_action(plan)
+    publish_action, publish_reason = _publish_action(plan)
+    lines = [
+        "Precompute plan",
+        f"* import: {plan.import_plan.action}",
+        f"  reason: {plan.import_plan.reason}",
+        f"* noise artifact: {plan.noise_artifact_plan.action}",
+        f"  reason: {plan.noise_artifact_plan.reason}",
+        f"* build: {plan.build_plan.action}",
+        f"  reason: {plan.build_plan.reason}",
+        f"* surface: {surface_action}",
+        f"  reason: {surface_reason}",
+        f"* pmtiles: {pmtiles_action}",
+        f"  reason: {pmtiles_reason}",
+        f"* publish: {publish_action}",
+        f"  reason: {publish_reason}",
+    ]
+    return "\n".join(lines)
+
+
 def plan_import(context: PrecomputeContext) -> ImportPlan:
     if context.import_was_ready:
         return ImportPlan(action="skip", reason="raw OSM import already ready")

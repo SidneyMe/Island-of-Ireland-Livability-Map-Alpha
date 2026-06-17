@@ -341,6 +341,7 @@ def run_precompute(
     noise_accurate: bool = False,
     require_active_noise_artifact: bool = False,
     refresh_noise_artifact: bool = False,
+    explain: bool = False,
 ) -> str:
     normalized_profile = normalize_build_profile(profile)
     return _workflow.run_precompute_impl(
@@ -352,6 +353,7 @@ def run_precompute(
         noise_accurate=noise_accurate,
         require_active_noise_artifact=require_active_noise_artifact,
         refresh_noise_artifact=refresh_noise_artifact,
+        explain=explain,
         cache_dir=CACHE_DIR,
         build_profile=normalized_profile,
         current_normalization_scope_hash=lambda: current_normalization_scope_hash(normalized_profile),
