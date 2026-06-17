@@ -12,6 +12,7 @@ from shapely.geometry import box
 
 import config
 import precompute.surface as surface
+from precompute.reachability_arrays import ReachabilityMatrix
 from network.loader import run_surface_shell_build
 
 
@@ -118,6 +119,31 @@ class AggregationTests(TestCase):
 
 
 class FineSurfaceRuntimeTests(TestCase):
+    def test_build_node_score_arrays_accepts_reachability_matrices(self) -> None:
+        walk_graph = mock.Mock()
+        walk_graph.vcount.return_value = 3
+        counts = {0: {"shops": 2}, 2: {"transport": 1}}
+        clusters = {0: {"shops": 1}, 2: {"transport": 1}}
+        effective = {0: {"shops": 3.0}, 2: {"transport": 2.0}}
+        expected = surface.build_node_score_arrays(walk_graph, counts, clusters, effective)
+
+        actual = surface.build_node_score_arrays(
+            walk_graph,
+            ReachabilityMatrix.from_sparse_dict(counts, ["shops", "transport"], value_kind="counts"),
+            ReachabilityMatrix.from_sparse_dict(clusters, ["shops", "transport"], value_kind="counts"),
+            ReachabilityMatrix.from_sparse_dict(
+                effective,
+                ["shops", "transport"],
+                value_kind="effective_units",
+            ),
+        )
+
+        np.testing.assert_array_equal(actual["counts_matrix"], expected["counts_matrix"])
+        np.testing.assert_array_equal(actual["cluster_counts_matrix"], expected["cluster_counts_matrix"])
+        np.testing.assert_array_equal(actual["effective_units_matrix"], expected["effective_units_matrix"])
+        np.testing.assert_allclose(actual["reference_scores"], expected["reference_scores"])
+        np.testing.assert_allclose(actual["reference_total"], expected["reference_total"])
+
     def test_render_tile_caches_png_and_reuses_cached_result(self) -> None:
         with TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)

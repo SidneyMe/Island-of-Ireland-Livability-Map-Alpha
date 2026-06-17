@@ -40,8 +40,11 @@ snap_amenities = _network.snap_amenities
 normalize_origin_node_ids = _network.normalize_origin_node_ids
 merge_normalized_origin_node_ids = _network.merge_normalized_origin_node_ids
 precompute_counts_by_node = _network.precompute_counts_by_node
+precompute_walk_count_matrix_by_origin_node = _network.precompute_walk_count_matrix_by_origin_node
 precompute_walk_counts_by_origin_node = _network.precompute_walk_counts_by_origin_node
+precompute_walk_weighted_totals_matrix_by_origin_node = _network.precompute_walk_weighted_totals_matrix_by_origin_node
 precompute_walk_weighted_totals_by_origin_node = _network.precompute_walk_weighted_totals_by_origin_node
+precompute_walk_decayed_units_matrix_by_origin_node = _network.precompute_walk_decayed_units_matrix_by_origin_node
 precompute_walk_decayed_units_by_origin_node = _network.precompute_walk_decayed_units_by_origin_node
 
 # Re-exports from _grid used throughout the codebase and tests
@@ -153,5 +156,4 @@ def phase_networks(
         walkgraph_bin=WALKGRAPH_BIN,
         bbox_padding_m=WALKGRAPH_BBOX_PADDING_M,
     )
-
 

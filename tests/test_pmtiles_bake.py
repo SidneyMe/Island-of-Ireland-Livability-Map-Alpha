@@ -12,6 +12,73 @@ pmtiles_worker = importlib.import_module("pmtiles_bake_worker")
 
 
 class PmtilesBakeContractTests(TestCase):
+    def test_resolve_fine_grid_config_uses_geo_hash_for_surface_shell(self) -> None:
+        class _FakeResult:
+            def mappings(self):
+                return self
+
+            def one_or_none(self):
+                return {
+                    "geo_hash": "geo-hash-123",
+                    "score_hash": "score-hash-123",
+                    "summary_json": {"fine_resolutions_m": [2500, 1000, 500, 250, 100, 50]},
+                }
+
+        class _FakeConnection:
+            def execute(self, statement, params):
+                self.statement = statement
+                self.params = params
+                return _FakeResult()
+
+        connection = _FakeConnection()
+        with (
+            mock.patch.object(
+                bake_pmtiles._surface,
+                "build_surface_shell_hash",
+                return_value="shell-from-geo",
+            ) as shell_hash_mock,
+            mock.patch.object(
+                bake_pmtiles._surface,
+                "surface_shell_dir",
+                return_value=Path("surface-shell"),
+            ) as shell_dir_mock,
+            mock.patch.object(
+                bake_pmtiles._surface,
+                "surface_score_dir",
+                return_value=Path("surface-scores"),
+            ) as score_dir_mock,
+            mock.patch.object(
+                bake_pmtiles._surface,
+                "surface_analysis_ready",
+                return_value=True,
+            ) as ready_mock,
+        ):
+            config_payload = bake_pmtiles._resolve_fine_grid_config(
+                connection,
+                build_key="build-key-123",
+            )
+
+        self.assertNotIn("reach_hash", str(bake_pmtiles._BUILD_MANIFEST_SQL))
+        shell_hash_mock.assert_called_once_with("geo-hash-123")
+        shell_dir_mock.assert_called_once_with(
+            bake_pmtiles.CACHE_DIR,
+            surface_shell_hash="shell-from-geo",
+        )
+        score_dir_mock.assert_called_once_with(
+            bake_pmtiles.CACHE_DIR,
+            score_hash="score-hash-123",
+        )
+        ready_mock.assert_called_once_with(
+            Path("surface-shell"),
+            Path("surface-scores"),
+            expected_surface_shell_hash="shell-from-geo",
+            expected_score_hash="score-hash-123",
+        )
+        self.assertEqual(
+            config_payload,
+            {"shell_dir": "surface-shell", "score_dir": "surface-scores"},
+        )
+
     def test_grid_tile_sql_exports_popup_score_and_count_fields(self) -> None:
         sql = str(bake_pmtiles._GRID_TILE_SQL)
 

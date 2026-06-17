@@ -31,6 +31,7 @@
 - **Amenity tier classifier**: `precompute/amenity_tiers.py`
 - **Amenity clustering for Phase 2 variety scoring**: `precompute/amenity_clusters.py`
 - **Precompute cache helpers**: `precompute/cache.py`, `precompute/_cache_wrappers.py`
+- **Array-native reachability cache helpers**: `precompute/reachability_arrays.py`
 - **Precompute tier helpers**: `precompute/tiers.py`, `precompute/_tier_wrappers.py`
 - **Study-area geometry / coast mask**: `study_area.py`
 - **Precompute pipeline orchestration**: `precompute/__init__.py`, `precompute/workflow.py`, `precompute/phases.py`
@@ -291,10 +292,19 @@ Notes:
   - transport rows are kept separate from Overture merge
   - amenity rows are annotated with `tier` and `score_units`
   - Phase 2 builds scoring-only amenity clusters per category and chooses a deterministic representative row per cluster
-  - reachability cache now stores `walk_counts_by_origin_node`, `walk_cluster_counts_by_origin_node`, and `walk_effective_units_by_origin_node`
-  - large routing checkpoints may exist as a legacy full blob plus appended `.chunks` overlay frames; loaders merge both so interrupted runs can salvage and resume reachability work without dropping previously cached nodes
+  - reachability now persists `walk_counts_by_origin_node`, `walk_cluster_counts_by_origin_node`, and `walk_effective_units_by_origin_node` through versioned array-native caches under `reachability_arrays/*`
+  - routing checkpoints are committed `.npz` matrix chunks with `uint64` origin IDs, manifest-defined category order, and `uint32`/`float32` matrices; successful completion compacts chunks into `base.npz`
+  - legacy pickle/gzip dict reachability caches are ignored by default and only converted when `LIVABILITY_MIGRATE_LEGACY_REACH_CACHE=1`
   - origin-node normalization/union now uses low-memory sorted lists rather than Python `set(sorted(...))` dedupe, so coarse-grid and fine-surface reachability inputs can be combined without materializing another huge Python-object set
-- LOC: 917
+- LOC: 1093
+
+### `precompute/reachability_arrays.py`
+
+- Purpose: versioned array-native cache format for origin-node reachability matrices. (Confirmed)
+- Why it matters: preserves resumable reachability builds without expanding cached origins into dict-of-dicts, while keeping coarse-grid sparse JSON output via a one-row lookup adapter. (Confirmed)
+- Format: `manifest.json` plus `base.npz` and optional `chunks/chunk_*.npz`; categories live in the manifest, `origin_ids` are `<u8`, count matrices are `<u4`, and effective-unit matrices are `<f4`. (Confirmed)
+- Recovery behavior: orphan `.tmp` files are ignored, corrupt chunks are quarantined and recomputed, corrupt base matrices invalidate the v1 cache, and legacy pickle/gzip migration is opt-in only. (Confirmed)
+- LOC: 554
 
 ### `precompute/amenity_clusters.py`
 
@@ -426,10 +436,11 @@ Notes:
 ```text
 config.py
   -> geo_hash
+     -> surface_shell_hash (geometry-only fine shell)
+     -> geometry-only grid/snap caches
   -> reach_hash
-  -> surface_shell_hash
-  -> score_hash
-  -> render_hash
+     -> score_hash
+        -> render_hash
   -> config_hash
   -> build_key
 ```
@@ -443,6 +454,8 @@ Things that clearly feed this chain:
 - GTFS transit config hash
 - importer config version
 - schema / algorithm version constants
+
+Important split: fine surface shell shards, grid cell shells, walk cell node snaps, and walk origin-node union caches are geo-derived geometry artifacts. Transit reality / GTFS-only changes still invalidate reach, score, render/build layers as needed, but do not move those geometry-only shell/snap cache paths. (Confirmed)
 
 ### Schema change
 
@@ -711,9 +724,10 @@ Areas still relatively fragile:
 | Service desert | Cell with at least one reachable baseline GTFS stop but zero public departures in the desert window |
 | Noise contour | Official display-only Lden / Lnight polygon from ROI EPA or NI OpenDataNI data, normalized into dB bands and source types |
 | Conflict class | Amenity merge status: `osm_only`, `overture_only`, `source_agreement`, `source_conflict`; GTFS-direct transport rows use `gtfs_direct` |
-| Geo hash | Geometry-level cache hash including geometry / coastal-cleanup inputs |
-| Reach hash | Reachability-level hash including import, transit, tags, merge version, and Overture signature |
-| Score hash | Scoring-level hash including caps, tier-unit tables, and resolution tiers |
+| Geo hash | Geometry/import-level cache hash used for study area, walkgraph, fine surface shell, and geometry-only grid/snap caches |
+| Surface shell hash | Fine-surface shell identity derived from `geo_hash` plus shell/grid schema and geometry parameters |
+| Reach hash | Reachability-level hash including geo hash, transit reality, tags, merge version, and Overture signature |
+| Score hash | Scoring-level hash including reach hash, caps, tier-unit tables, and resolution tiers; owns scored walk cells and fine surface score arrays |
 | Build key | Build-scoped identifier used on published PostGIS rows |
 | Build profile | `full`, `dev`, or `test` |
 

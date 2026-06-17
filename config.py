@@ -515,6 +515,9 @@ def _bool_env(name: str, default: bool) -> bool:
     return default
 
 
+MIGRATE_LEGACY_REACH_CACHE = _bool_env("LIVABILITY_MIGRATE_LEGACY_REACH_CACHE", False)
+
+
 def _int_env(name: str, default: int, *, min_value: int = 1, max_value: int = 64) -> int:
     raw = os.getenv(name)
     if raw is None or not raw.strip():
@@ -989,6 +992,18 @@ class BuildHashes:
     build_key: str
 
 
+def surface_shell_hash_for_geo(geo_hash: str) -> str:
+    return hash_dict(
+        {
+            "geo_hash": str(geo_hash),
+            "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
+            "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
+            "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
+            "surface_shell_schema_version": SURFACE_SHELL_SCHEMA_VERSION,
+        }
+    )
+
+
 def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     normalized_profile = normalize_build_profile(profile)
     profile_settings = build_profile_settings(normalized_profile)
@@ -1070,15 +1085,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     }
     reach_hash = hash_dict(reach_params)
 
-    surface_shell_hash = hash_dict(
-        {
-            "reach_hash": reach_hash,
-            "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
-            "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
-            "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
-            "surface_shell_schema_version": SURFACE_SHELL_SCHEMA_VERSION,
-        }
-    )
+    surface_shell_hash = surface_shell_hash_for_geo(geo_hash)
 
     score_params = {
         "reach_hash": reach_hash,
@@ -1254,15 +1261,7 @@ def build_hashes_for_import(
             "overture_release": overture_info.get("last_release"),
         }
     )
-    surface_shell_hash = hash_dict(
-        {
-            "reach_hash": reach_hash,
-            "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
-            "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
-            "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
-            "surface_shell_schema_version": SURFACE_SHELL_SCHEMA_VERSION,
-        }
-    )
+    surface_shell_hash = surface_shell_hash_for_geo(geo_hash)
     score_hash = hash_dict(
         {
             "reach_hash": reach_hash,

@@ -8,6 +8,7 @@ from config import (
     CACHE_DIR,
     CAPS,
     LIVABILITY_SURFACE_THREADS,
+    MIGRATE_LEGACY_REACH_CACHE,
     TAGS,
     WALK_RADIUS_M,
     WALKGRAPH_BIN,
@@ -89,8 +90,10 @@ from ._phase_wrappers import (
     normalize_origin_node_ids,
     merge_normalized_origin_node_ids,
     precompute_counts_by_node,
+    precompute_walk_count_matrix_by_origin_node,
     precompute_walk_counts_by_origin_node,
     precompute_walk_weighted_totals_by_origin_node,
+    precompute_walk_decayed_units_matrix_by_origin_node,
     precompute_walk_decayed_units_by_origin_node,
     score_cell,
     score_cells,
@@ -135,15 +138,13 @@ def phase_reachability(
         cache_load=cache_load,
         cache_save=cache_save,
         cache_load_large=cache_load_large,
-        cache_save_large=cache_save_large,
-        cache_save_large_append_frame=cache_save_large_append_frame,
-        cache_reset_large_frames=cache_reset_large_frames,
         mark_building=_mark_building,
         mark_complete=_mark_complete,
         snap_amenities=snap_amenities,
         normalize_origin_node_ids=normalize_origin_node_ids,
-        precompute_walk_counts_by_origin_node=precompute_walk_counts_by_origin_node,
-        precompute_walk_decayed_units_by_origin_node=precompute_walk_decayed_units_by_origin_node,
+        precompute_walk_count_matrix_by_origin_node=precompute_walk_count_matrix_by_origin_node,
+        precompute_walk_decayed_units_matrix_by_origin_node=precompute_walk_decayed_units_matrix_by_origin_node,
+        migrate_legacy_reach_cache=MIGRATE_LEGACY_REACH_CACHE,
     )
 
 
@@ -162,6 +163,7 @@ def phase_grids(
         tracker,
         grid_sizes_m=list(_STATE.settings.grid_sizes_m),
         cache_dir=_STATE.score_cache_dir,
+        geometry_cache_dir=_STATE.geo_cache_dir,
         score_hash=_STATE.hashes.score_hash,
         tiers_building=_STATE.tiers_building,
         cache_exists=cache_exists,
@@ -237,13 +239,14 @@ def _compute_service_deserts(engine, walk_grids: dict[int, list[dict[str, Any]]]
 
     walk_cell_nodes_by_size: dict[int, list[int]] = {}
     for resolution_m, cells in walk_grids.items():
-        cached_nodes = cache_load(f"walk_cell_nodes_{resolution_m}", _STATE.score_cache_dir)
+        snap_key = _phases.walk_cell_nodes_cache_key(int(resolution_m))
+        cached_nodes = cache_load(snap_key, _STATE.geo_cache_dir)
         if cached_nodes is None:
             cached_nodes = snap_cells_to_nodes(
                 walk_graph,
                 cells,
-                f"walk_cell_nodes_{resolution_m}",
-                _STATE.score_cache_dir,
+                snap_key,
+                _STATE.geo_cache_dir,
             )
         walk_cell_nodes_by_size[int(resolution_m)] = [int(node) for node in cached_nodes]
 

@@ -437,6 +437,7 @@ class RenderAndCliTests(TestCase):
     def test_runtime_service_get_runtime_payload(self) -> None:
         manifest = {
             "build_key": "build-123",
+            "geo_hash": "geo-hash-123",
             "reach_hash": "reach-hash-123",
             "score_hash": "score-hash-123",
             "render_hash": "render-hash-123",
@@ -560,6 +561,7 @@ class RenderAndCliTests(TestCase):
     def test_runtime_service_omits_fine_surface_fields_when_unavailable(self) -> None:
         manifest = {
             "build_key": "build-123",
+            "geo_hash": "geo-hash-123",
             "reach_hash": "reach-hash-123",
             "score_hash": "score-hash-123",
             "render_hash": "render-hash-123",
@@ -604,6 +606,7 @@ class RenderAndCliTests(TestCase):
     def test_runtime_service_noise_proxy_metadata_stays_road_only_without_rail_rows(self) -> None:
         manifest = {
             "build_key": "build-123",
+            "geo_hash": "geo-hash-123",
             "reach_hash": "reach-hash-123",
             "score_hash": "score-hash-123",
             "render_hash": "render-hash-123",
@@ -634,6 +637,7 @@ class RenderAndCliTests(TestCase):
     def test_runtime_service_noise_proxy_metadata_stays_road_rail_without_airport_rows(self) -> None:
         manifest = {
             "build_key": "build-123",
+            "geo_hash": "geo-hash-123",
             "reach_hash": "reach-hash-123",
             "score_hash": "score-hash-123",
             "render_hash": "render-hash-123",
@@ -664,6 +668,7 @@ class RenderAndCliTests(TestCase):
     def test_runtime_service_uses_dev_config_hash_and_coarse_only_payload(self) -> None:
         manifest = {
             "build_key": "build-dev-123",
+            "geo_hash": "geo-hash-dev",
             "reach_hash": "reach-hash-dev",
             "score_hash": "score-hash-dev",
             "render_hash": "render-hash-dev",
@@ -721,6 +726,7 @@ class RenderAndCliTests(TestCase):
     def test_runtime_service_uses_test_config_hash_and_profile_specific_pmtiles(self) -> None:
         manifest = {
             "build_key": "build-test-123",
+            "geo_hash": "geo-hash-test",
             "reach_hash": "reach-hash-test",
             "score_hash": "score-hash-test",
             "render_hash": "render-hash-test",
@@ -781,6 +787,7 @@ class RenderAndCliTests(TestCase):
     def test_runtime_service_stale_manifest_fallback_is_env_gated(self) -> None:
         manifest = {
             "build_key": "build-fallback-123",
+            "geo_hash": "geo-hash-fallback",
             "reach_hash": "reach-hash-fallback",
             "score_hash": "score-hash-fallback",
             "render_hash": "render-hash-fallback",

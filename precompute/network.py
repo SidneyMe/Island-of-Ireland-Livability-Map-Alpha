@@ -20,6 +20,7 @@ from sklearn.neighbors import BallTree
 
 from config import PROJECT_TEMP_DIR, TAGS, WALKGRAPH_BIN
 from network.loader import WalkGraphIndex, run_walkgraph_reachability
+from .reachability_arrays import ReachabilityMatrix, merge_reachability_matrices
 
 
 RUST_REACHABILITY_CHUNK_SIZE = 250_000
@@ -260,7 +261,14 @@ def _iter_origin_chunks(origin_nodes: Sequence[int], *, chunk_size: int) -> Iter
 
 
 def _write_u32_array(path: Path, values: Sequence[int]) -> None:
-    np.asarray(values, dtype=U32_DTYPE).tofile(path)
+    checked_values: list[int] = []
+    max_u32 = int(np.iinfo(np.uint32).max)
+    for value in values:
+        normalized = int(value)
+        if normalized < 0 or normalized > max_u32:
+            raise ValueError(f"origin node id cannot be encoded as u32: {normalized!r}")
+        checked_values.append(normalized)
+    np.asarray(checked_values, dtype=U32_DTYPE).tofile(path)
 
 
 @contextmanager
@@ -356,7 +364,7 @@ def _chunk_units_from_matrix(
     return units_by_node
 
 
-def _rust_reachability_chunk(
+def _rust_reachability_matrix_chunk(
     graph: WalkGraphIndex,
     origin_nodes: Sequence[int],
     amenity_nodes: Sequence[int],
@@ -388,10 +396,36 @@ def _rust_reachability_chunk(
             origin_count=len(origin_nodes),
             category_count=len(categories),
         )
-    return _chunk_counts_from_matrix(origin_nodes, count_matrix, categories)
+    return ReachabilityMatrix.from_arrays(
+        origin_nodes,
+        categories,
+        count_matrix,
+        value_kind="counts",
+    )
 
 
-def _rust_decayed_units_chunk(
+def _rust_reachability_chunk(
+    graph: WalkGraphIndex,
+    origin_nodes: Sequence[int],
+    amenity_nodes: Sequence[int],
+    amenity_weights: np.ndarray,
+    categories: Sequence[str],
+    *,
+    cutoff: float,
+    progress_cb=None,
+) -> dict[int, dict[str, int]]:
+    return _rust_reachability_matrix_chunk(
+        graph,
+        origin_nodes,
+        amenity_nodes,
+        amenity_weights,
+        categories,
+        cutoff=cutoff,
+        progress_cb=progress_cb,
+    ).to_sparse_dict()
+
+
+def _rust_decayed_units_matrix_chunk(
     graph: WalkGraphIndex,
     origin_nodes: Sequence[int],
     amenity_nodes: Sequence[int],
@@ -430,10 +464,38 @@ def _rust_decayed_units_chunk(
             origin_count=len(origin_nodes),
             category_count=len(categories),
         )
-    return _chunk_units_from_matrix(origin_nodes, effective_matrix, categories)
+    return ReachabilityMatrix.from_arrays(
+        origin_nodes,
+        categories,
+        effective_matrix,
+        value_kind="effective_units",
+    )
 
 
-def _python_reachability_chunk(
+def _rust_decayed_units_chunk(
+    graph: WalkGraphIndex,
+    origin_nodes: Sequence[int],
+    amenity_nodes: Sequence[int],
+    amenity_weights: np.ndarray,
+    categories: Sequence[str],
+    *,
+    cutoff: float,
+    half_distances_m: dict[str, float],
+    progress_cb=None,
+) -> dict[int, dict[str, float]]:
+    return _rust_decayed_units_matrix_chunk(
+        graph,
+        origin_nodes,
+        amenity_nodes,
+        amenity_weights,
+        categories,
+        cutoff=cutoff,
+        half_distances_m=half_distances_m,
+        progress_cb=progress_cb,
+    ).to_sparse_dict()
+
+
+def _python_reachability_matrix_chunk(
     graph,
     origin_nodes: Sequence[int],
     amenity_nodes: Sequence[int],
@@ -457,10 +519,36 @@ def _python_reachability_chunk(
         distances = np.asarray([distances], dtype=np.float64)
     reachable = np.isfinite(distances) & (distances <= float(cutoff))
     count_matrix = reachable.astype(np.int8, copy=False) @ amenity_weights
-    return _chunk_counts_from_matrix(origin_nodes, count_matrix, categories)
+    return ReachabilityMatrix.from_arrays(
+        origin_nodes,
+        categories,
+        count_matrix,
+        value_kind="counts",
+    )
 
 
-def _python_decayed_units_chunk(
+def _python_reachability_chunk(
+    graph,
+    origin_nodes: Sequence[int],
+    amenity_nodes: Sequence[int],
+    amenity_weights: np.ndarray,
+    categories: Sequence[str],
+    *,
+    cutoff: float,
+    weight: str | Sequence[float],
+) -> dict[int, dict[str, int]]:
+    return _python_reachability_matrix_chunk(
+        graph,
+        origin_nodes,
+        amenity_nodes,
+        amenity_weights,
+        categories,
+        cutoff=cutoff,
+        weight=weight,
+    ).to_sparse_dict()
+
+
+def _python_decayed_units_matrix_chunk(
     graph,
     origin_nodes: Sequence[int],
     amenity_nodes: Sequence[int],
@@ -501,11 +589,123 @@ def _python_decayed_units_chunk(
             decay * base_units.reshape(1, -1),
             dtype=np.float64,
         ).sum(axis=1, dtype=np.float64).astype(np.float32)
-    return _chunk_units_from_matrix(origin_nodes, totals, categories)
+    return ReachabilityMatrix.from_arrays(
+        origin_nodes,
+        categories,
+        totals,
+        value_kind="effective_units",
+    )
+
+
+def _python_decayed_units_chunk(
+    graph,
+    origin_nodes: Sequence[int],
+    amenity_nodes: Sequence[int],
+    amenity_weights: np.ndarray,
+    categories: Sequence[str],
+    *,
+    cutoff: float,
+    weight: str | Sequence[float],
+    half_distances_m: dict[str, float],
+) -> dict[int, dict[str, float]]:
+    return _python_decayed_units_matrix_chunk(
+        graph,
+        origin_nodes,
+        amenity_nodes,
+        amenity_weights,
+        categories,
+        cutoff=cutoff,
+        weight=weight,
+        half_distances_m=half_distances_m,
+    ).to_sparse_dict()
 
 
 def _walkgraph_chunk_size(origin_count: int) -> int:
     return max(1, min(int(origin_count), RUST_REACHABILITY_CHUNK_SIZE))
+
+
+def precompute_walk_weighted_totals_matrix_by_origin_node(
+    graph,
+    node_weights_by_category: dict[str, list[tuple[int, int]]],
+    origin_node_ids: Iterable[int],
+    cutoff: float,
+    weight: str | Sequence[float] = "length_m",
+    progress_cb=None,
+    detail: str | None = None,
+    save_chunk_cb: Callable[[ReachabilityMatrix], None] | None = None,
+) -> ReachabilityMatrix:
+    origin_nodes = normalize_origin_node_ids(origin_node_ids)
+    if progress_cb is not None:
+        progress_cb("live_start", total_units=len(origin_nodes), detail=detail)
+
+    amenity_nodes, categories, amenity_weights = _node_weight_matrix(node_weights_by_category)
+    if not origin_nodes:
+        return ReachabilityMatrix.empty(categories, value_kind="counts")
+    if not amenity_nodes:
+        if progress_cb is not None:
+            progress_cb("advance", units=len(origin_nodes), detail=detail)
+        if save_chunk_cb is not None:
+            save_chunk_cb(
+                ReachabilityMatrix.for_origins(
+                    origin_nodes,
+                    categories,
+                    value_kind="counts",
+                )
+            )
+            return ReachabilityMatrix.empty(categories, value_kind="counts")
+        return ReachabilityMatrix.for_origins(origin_nodes, categories, value_kind="counts")
+
+    accumulate = save_chunk_cb is None
+    count_matrices: list[ReachabilityMatrix] = []
+
+    if _is_walkgraph_index(graph):
+        chunk_size = _walkgraph_chunk_size(len(origin_nodes))
+        for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
+            chunk_counts = _rust_reachability_matrix_chunk(
+                graph,
+                origin_chunk,
+                amenity_nodes,
+                amenity_weights,
+                categories,
+                cutoff=cutoff,
+                progress_cb=progress_cb,
+            )
+            if accumulate:
+                count_matrices.append(chunk_counts)
+            elif len(chunk_counts):
+                save_chunk_cb(chunk_counts)
+            if progress_cb is not None:
+                progress_cb("advance", units=len(origin_chunk), detail=detail)
+        return merge_reachability_matrices(
+            count_matrices,
+            categories=categories,
+            value_kind="counts",
+        )
+
+    _require_igraph()
+    chunk_size = _routing_batch_size(graph.vcount(), len(origin_nodes), len(amenity_nodes))
+    for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
+        chunk_counts = _python_reachability_matrix_chunk(
+            graph,
+            origin_chunk,
+            amenity_nodes,
+            amenity_weights,
+            categories,
+            cutoff=cutoff,
+            weight=weight,
+        )
+        if accumulate:
+            count_matrices.append(chunk_counts)
+        elif len(chunk_counts):
+            save_chunk_cb(chunk_counts)
+        if progress_cb is not None:
+            progress_cb("advance", units=len(origin_chunk), detail=detail)
+
+    return merge_reachability_matrices(
+        count_matrices,
+        categories=categories,
+        value_kind="counts",
+    )
 
 
 def precompute_walk_weighted_totals_by_origin_node(
@@ -518,66 +718,42 @@ def precompute_walk_weighted_totals_by_origin_node(
     detail: str | None = None,
     save_chunk_cb: Callable[[dict[int, dict[str, int]]], None] | None = None,
 ) -> dict[int, dict[str, int]]:
-    origin_nodes = normalize_origin_node_ids(origin_node_ids)
-    if progress_cb is not None:
-        progress_cb("live_start", total_units=len(origin_nodes), detail=detail)
-    if not origin_nodes:
-        return {}
+    matrix_chunk_cb = None
+    if save_chunk_cb is not None:
+        matrix_chunk_cb = lambda chunk: save_chunk_cb(chunk.to_sparse_dict())
+    matrix = precompute_walk_weighted_totals_matrix_by_origin_node(
+        graph,
+        node_weights_by_category,
+        origin_node_ids,
+        cutoff,
+        weight=weight,
+        progress_cb=progress_cb,
+        detail=detail,
+        save_chunk_cb=matrix_chunk_cb,
+    )
+    return _normalize_counts_by_node(matrix.to_sparse_dict())
 
-    amenity_nodes, categories, amenity_weights = _node_weight_matrix(node_weights_by_category)
-    if not amenity_nodes:
-        if progress_cb is not None:
-            progress_cb("advance", units=len(origin_nodes), detail=detail)
-        if save_chunk_cb is not None:
-            empty = {node: {} for node in origin_nodes}
-            if empty:
-                save_chunk_cb(empty)
-            return {}
-        return {node: {} for node in origin_nodes}
 
-    accumulate = save_chunk_cb is None
-    counts_by_node: dict[int, dict[str, int]] = {}
-
-    if _is_walkgraph_index(graph):
-        chunk_size = _walkgraph_chunk_size(len(origin_nodes))
-        for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
-            chunk_counts = _rust_reachability_chunk(
-                graph,
-                origin_chunk,
-                amenity_nodes,
-                amenity_weights,
-                categories,
-                cutoff=cutoff,
-                progress_cb=progress_cb,
-            )
-            if accumulate:
-                counts_by_node.update(chunk_counts)
-            elif chunk_counts:
-                save_chunk_cb(chunk_counts)
-            if progress_cb is not None:
-                progress_cb("advance", units=len(origin_chunk), detail=detail)
-        return _normalize_counts_by_node(counts_by_node)
-
-    _require_igraph()
-    chunk_size = _routing_batch_size(graph.vcount(), len(origin_nodes), len(amenity_nodes))
-    for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
-        chunk_counts = _python_reachability_chunk(
-            graph,
-            origin_chunk,
-            amenity_nodes,
-            amenity_weights,
-            categories,
-            cutoff=cutoff,
-            weight=weight,
-        )
-        if accumulate:
-            counts_by_node.update(chunk_counts)
-        elif chunk_counts:
-            save_chunk_cb(chunk_counts)
-        if progress_cb is not None:
-            progress_cb("advance", units=len(origin_chunk), detail=detail)
-
-    return _normalize_counts_by_node(counts_by_node)
+def precompute_walk_count_matrix_by_origin_node(
+    graph,
+    nodes_by_category: dict[str, list[int]],
+    origin_node_ids: Iterable[int],
+    cutoff: float,
+    weight: str | Sequence[float] = "length_m",
+    progress_cb=None,
+    detail: str | None = None,
+    save_chunk_cb: Callable[[ReachabilityMatrix], None] | None = None,
+) -> ReachabilityMatrix:
+    return precompute_walk_weighted_totals_matrix_by_origin_node(
+        graph,
+        _category_weight_rows_from_nodes(nodes_by_category),
+        origin_node_ids,
+        cutoff,
+        weight=weight,
+        progress_cb=progress_cb,
+        detail=detail,
+        save_chunk_cb=save_chunk_cb,
+    )
 
 
 def precompute_walk_counts_by_origin_node(
@@ -590,15 +766,109 @@ def precompute_walk_counts_by_origin_node(
     detail: str | None = None,
     save_chunk_cb: Callable[[dict[int, dict[str, int]]], None] | None = None,
 ) -> dict[int, dict[str, int]]:
-    return precompute_walk_weighted_totals_by_origin_node(
+    matrix_chunk_cb = None
+    if save_chunk_cb is not None:
+        matrix_chunk_cb = lambda chunk: save_chunk_cb(chunk.to_sparse_dict())
+    matrix = precompute_walk_count_matrix_by_origin_node(
         graph,
-        _category_weight_rows_from_nodes(nodes_by_category),
+        nodes_by_category,
         origin_node_ids,
         cutoff,
         weight=weight,
         progress_cb=progress_cb,
         detail=detail,
-        save_chunk_cb=save_chunk_cb,
+        save_chunk_cb=matrix_chunk_cb,
+    )
+    return _normalize_counts_by_node(matrix.to_sparse_dict())
+
+
+def precompute_walk_decayed_units_matrix_by_origin_node(
+    graph,
+    node_weights_by_category: dict[str, list[tuple[int, int]]],
+    origin_node_ids: Iterable[int],
+    cutoff: float,
+    half_distance_m_by_category: dict[str, float],
+    weight: str | Sequence[float] = "length_m",
+    progress_cb=None,
+    detail: str | None = None,
+    save_chunk_cb: Callable[[ReachabilityMatrix], None] | None = None,
+) -> ReachabilityMatrix:
+    origin_nodes = normalize_origin_node_ids(origin_node_ids)
+    if progress_cb is not None:
+        progress_cb("live_start", total_units=len(origin_nodes), detail=detail)
+
+    amenity_nodes, categories, amenity_weights = _node_weight_matrix(node_weights_by_category)
+    if not origin_nodes:
+        return ReachabilityMatrix.empty(categories, value_kind="effective_units")
+    if not amenity_nodes:
+        if progress_cb is not None:
+            progress_cb("advance", units=len(origin_nodes), detail=detail)
+        if save_chunk_cb is not None:
+            save_chunk_cb(
+                ReachabilityMatrix.for_origins(
+                    origin_nodes,
+                    categories,
+                    value_kind="effective_units",
+                )
+            )
+            return ReachabilityMatrix.empty(categories, value_kind="effective_units")
+        return ReachabilityMatrix.for_origins(
+            origin_nodes,
+            categories,
+            value_kind="effective_units",
+        )
+
+    accumulate = save_chunk_cb is None
+    decayed_unit_matrices: list[ReachabilityMatrix] = []
+
+    if _is_walkgraph_index(graph):
+        chunk_size = _walkgraph_chunk_size(len(origin_nodes))
+        for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
+            chunk_units = _rust_decayed_units_matrix_chunk(
+                graph,
+                origin_chunk,
+                amenity_nodes,
+                amenity_weights,
+                categories,
+                cutoff=cutoff,
+                half_distances_m=half_distance_m_by_category,
+                progress_cb=progress_cb,
+            )
+            if accumulate:
+                decayed_unit_matrices.append(chunk_units)
+            elif len(chunk_units):
+                save_chunk_cb(chunk_units)
+            if progress_cb is not None:
+                progress_cb("advance", units=len(origin_chunk), detail=detail)
+        return merge_reachability_matrices(
+            decayed_unit_matrices,
+            categories=categories,
+            value_kind="effective_units",
+        )
+
+    _require_igraph()
+    chunk_size = _routing_batch_size(graph.vcount(), len(origin_nodes), len(amenity_nodes))
+    for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
+        chunk_units = _python_decayed_units_matrix_chunk(
+            graph,
+            origin_chunk,
+            amenity_nodes,
+            amenity_weights,
+            categories,
+            cutoff=cutoff,
+            weight=weight,
+            half_distances_m=half_distance_m_by_category,
+        )
+        if accumulate:
+            decayed_unit_matrices.append(chunk_units)
+        elif len(chunk_units):
+            save_chunk_cb(chunk_units)
+        if progress_cb is not None:
+            progress_cb("advance", units=len(origin_chunk), detail=detail)
+    return merge_reachability_matrices(
+        decayed_unit_matrices,
+        categories=categories,
+        value_kind="effective_units",
     )
 
 
@@ -613,67 +883,21 @@ def precompute_walk_decayed_units_by_origin_node(
     detail: str | None = None,
     save_chunk_cb: Callable[[dict[int, dict[str, float]]], None] | None = None,
 ) -> dict[int, dict[str, float]]:
-    origin_nodes = normalize_origin_node_ids(origin_node_ids)
-    if progress_cb is not None:
-        progress_cb("live_start", total_units=len(origin_nodes), detail=detail)
-    if not origin_nodes:
-        return {}
-
-    amenity_nodes, categories, amenity_weights = _node_weight_matrix(node_weights_by_category)
-    if not amenity_nodes:
-        if progress_cb is not None:
-            progress_cb("advance", units=len(origin_nodes), detail=detail)
-        if save_chunk_cb is not None:
-            empty = {node: {} for node in origin_nodes}
-            if empty:
-                save_chunk_cb(empty)
-            return {}
-        return {node: {} for node in origin_nodes}
-
-    accumulate = save_chunk_cb is None
-    decayed_units_by_node: dict[int, dict[str, float]] = {}
-
-    if _is_walkgraph_index(graph):
-        chunk_size = _walkgraph_chunk_size(len(origin_nodes))
-        for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
-            chunk_units = _rust_decayed_units_chunk(
-                graph,
-                origin_chunk,
-                amenity_nodes,
-                amenity_weights,
-                categories,
-                cutoff=cutoff,
-                half_distances_m=half_distance_m_by_category,
-                progress_cb=progress_cb,
-            )
-            if accumulate:
-                decayed_units_by_node.update(chunk_units)
-            elif chunk_units:
-                save_chunk_cb(chunk_units)
-            if progress_cb is not None:
-                progress_cb("advance", units=len(origin_chunk), detail=detail)
-        return _normalize_units_by_node(decayed_units_by_node)
-
-    _require_igraph()
-    chunk_size = _routing_batch_size(graph.vcount(), len(origin_nodes), len(amenity_nodes))
-    for origin_chunk in _iter_origin_chunks(origin_nodes, chunk_size=chunk_size):
-        chunk_units = _python_decayed_units_chunk(
-            graph,
-            origin_chunk,
-            amenity_nodes,
-            amenity_weights,
-            categories,
-            cutoff=cutoff,
-            weight=weight,
-            half_distances_m=half_distance_m_by_category,
-        )
-        if accumulate:
-            decayed_units_by_node.update(chunk_units)
-        elif chunk_units:
-            save_chunk_cb(chunk_units)
-        if progress_cb is not None:
-            progress_cb("advance", units=len(origin_chunk), detail=detail)
-    return _normalize_units_by_node(decayed_units_by_node)
+    matrix_chunk_cb = None
+    if save_chunk_cb is not None:
+        matrix_chunk_cb = lambda chunk: save_chunk_cb(chunk.to_sparse_dict())
+    matrix = precompute_walk_decayed_units_matrix_by_origin_node(
+        graph,
+        node_weights_by_category,
+        origin_node_ids,
+        cutoff,
+        half_distance_m_by_category,
+        weight=weight,
+        progress_cb=progress_cb,
+        detail=detail,
+        save_chunk_cb=matrix_chunk_cb,
+    )
+    return _normalize_units_by_node(matrix.to_sparse_dict())
 
 
 def precompute_counts_by_node(

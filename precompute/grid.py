@@ -326,10 +326,10 @@ def score_cell(
 
 def score_cells(
     cells: list[dict[str, Any]],
-    counts_by_node: dict[Any, dict[str, int]],
-    cluster_counts_by_node: dict[Any, dict[str, int]],
+    counts_by_node,
+    cluster_counts_by_node,
     cell_nodes: list[Any],
-    effective_units_by_node: dict[Any, dict[str, float]] | None = None,
+    effective_units_by_node=None,
 ) -> None:
     if not cells:
         return

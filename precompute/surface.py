@@ -22,7 +22,6 @@ from config import (
     ENABLE_FINE_RASTER_SURFACE,
     FINE_RESOLUTIONS_M,
     FINE_SURFACE_SCHEMA_VERSION,
-    GRID_GEOMETRY_SCHEMA_VERSION,
     SURFACE_SCORE_RAMP,
     SURFACE_SHELL_SCHEMA_VERSION,
     SURFACE_SHARD_SIZE_M,
@@ -30,10 +29,11 @@ from config import (
     SURFACE_ZOOM_BREAKS,
     TO_TARGET,
     TO_WGS84,
-    hash_dict,
     resolution_for_zoom,
+    surface_shell_hash_for_geo,
 )
 from .grid import build_cell_id, score_cell
+from .reachability_arrays import ReachabilityMatrix
 
 
 SURFACE_MANIFEST_NAME = "manifest.json"
@@ -135,16 +135,8 @@ def write_surface_manifest(surface_dir: Path, payload: dict[str, Any]) -> None:
     tmp_path.replace(path)
 
 
-def build_surface_shell_hash(reach_hash: str) -> str:
-    return hash_dict(
-        {
-            "reach_hash": str(reach_hash),
-            "canonical_base_resolution_m": CANONICAL_BASE_RESOLUTION_M,
-            "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
-            "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
-            "surface_shell_schema_version": SURFACE_SHELL_SCHEMA_VERSION,
-        }
-    )
+def build_surface_shell_hash(geo_hash: str) -> str:
+    return surface_shell_hash_for_geo(geo_hash)
 
 
 def _manifest_shard_entries(manifest: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -362,41 +354,64 @@ def component_scores_for_nodes(
 
 def build_node_score_arrays(
     walk_graph,
-    walk_counts_by_node: dict[int, dict[str, int]],
-    walk_cluster_counts_by_node: dict[int, dict[str, int]],
-    walk_effective_units_by_node: dict[int, dict[str, float]],
+    walk_counts_by_node,
+    walk_cluster_counts_by_node,
+    walk_effective_units_by_node,
 ) -> dict[str, Any]:
     node_count = int(walk_graph.vcount())
     counts_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.uint32)
     cluster_counts_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.uint32)
     effective_units_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.float32)
 
-    for node_idx, category_counts in walk_counts_by_node.items():
-        normalized_node_idx = int(node_idx)
-        if normalized_node_idx < 0 or normalized_node_idx >= node_count:
-            continue
-        for category, count in category_counts.items():
-            if category not in _CATEGORY_TO_INDEX:
+    def _copy_reachability_matrix(source, target: np.ndarray) -> bool:
+        if not isinstance(source, ReachabilityMatrix):
+            return False
+        if len(source) == 0:
+            return True
+        valid_origin_mask = source.origin_ids < np.asarray(node_count, dtype=source.origin_ids.dtype)
+        if not bool(np.any(valid_origin_mask)):
+            return True
+        target_rows = source.origin_ids[valid_origin_mask].astype(np.int64, copy=False)
+        for source_column, category in enumerate(source.categories):
+            target_column = _CATEGORY_TO_INDEX.get(str(category))
+            if target_column is None:
                 continue
-            counts_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(int(count), 0)
+            values = source.matrix[valid_origin_mask, source_column]
+            if np.issubdtype(target.dtype, np.integer):
+                target[target_rows, target_column] = np.maximum(values, 0).astype(target.dtype)
+            else:
+                target[target_rows, target_column] = np.maximum(values, 0.0).astype(target.dtype)
+        return True
 
-    for node_idx, category_counts in walk_cluster_counts_by_node.items():
-        normalized_node_idx = int(node_idx)
-        if normalized_node_idx < 0 or normalized_node_idx >= node_count:
-            continue
-        for category, count in dict(category_counts).items():
-            if category not in _CATEGORY_TO_INDEX:
+    if not _copy_reachability_matrix(walk_counts_by_node, counts_matrix):
+        for node_idx, category_counts in walk_counts_by_node.items():
+            normalized_node_idx = int(node_idx)
+            if normalized_node_idx < 0 or normalized_node_idx >= node_count:
                 continue
-            cluster_counts_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(int(count), 0)
+            for category, count in category_counts.items():
+                if category not in _CATEGORY_TO_INDEX:
+                    continue
+                counts_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(int(count), 0)
 
-    for node_idx, category_units in walk_effective_units_by_node.items():
-        normalized_node_idx = int(node_idx)
-        if normalized_node_idx < 0 or normalized_node_idx >= node_count:
-            continue
-        for category, units in dict(category_units).items():
-            if category not in _CATEGORY_TO_INDEX:
+    if not _copy_reachability_matrix(walk_cluster_counts_by_node, cluster_counts_matrix):
+        for node_idx, category_counts in walk_cluster_counts_by_node.items():
+            normalized_node_idx = int(node_idx)
+            if normalized_node_idx < 0 or normalized_node_idx >= node_count:
                 continue
-            effective_units_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(float(units), 0.0)
+            for category, count in dict(category_counts).items():
+                if category not in _CATEGORY_TO_INDEX:
+                    continue
+                cluster_counts_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(int(count), 0)
+
+    if not _copy_reachability_matrix(walk_effective_units_by_node, effective_units_matrix):
+        for node_idx, category_units in walk_effective_units_by_node.items():
+            normalized_node_idx = int(node_idx)
+            if normalized_node_idx < 0 or normalized_node_idx >= node_count:
+                continue
+            for category, units in dict(category_units).items():
+                if category not in _CATEGORY_TO_INDEX:
+                    continue
+                effective_units_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(float(units), 0.0)
 
     reference_scores = component_scores_for_nodes(
         counts_matrix,

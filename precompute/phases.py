@@ -3,12 +3,26 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
-from config import DISTANCE_DECAY_HALF_DISTANCE_M, VARIETY_CLUSTER_RADIUS_M
+from config import (
+    DISTANCE_DECAY_HALF_DISTANCE_M,
+    GRID_GEOMETRY_SCHEMA_VERSION,
+    TAGS,
+    VARIETY_CLUSTER_RADIUS_M,
+)
 
 from .amenity_clusters import build_amenity_clusters
 from .amenity_tiers import annotate_amenity_row
+from .reachability_arrays import (
+    ReachabilityMatrix,
+    append_reachability_cache_chunk,
+    load_reachability_cache,
+    merge_reachability_matrices,
+    migrate_legacy_sparse_cache,
+    reset_reachability_cache,
+    save_reachability_cache,
+)
 
 
 def _top_count_summary(counts: dict[str, Any], *, limit: int = 3) -> str:
@@ -30,8 +44,19 @@ def _grid_size_signature(grid_sizes_m: list[int]) -> str:
     return "_".join(str(size) for size in sizes)
 
 
-def _walk_origin_nodes_cache_key(grid_sizes_m: list[int]) -> str:
-    return f"walk_origin_nodes__sizes_{_grid_size_signature(grid_sizes_m)}"
+def grid_cells_cache_key(size: int) -> str:
+    return f"grid_cells_v{GRID_GEOMETRY_SCHEMA_VERSION}_{int(size)}"
+
+
+def walk_cell_nodes_cache_key(size: int) -> str:
+    return f"walk_cell_nodes_v{GRID_GEOMETRY_SCHEMA_VERSION}_{int(size)}"
+
+
+def walk_origin_nodes_cache_key(grid_sizes_m: list[int]) -> str:
+    return (
+        f"walk_origin_nodes_v{GRID_GEOMETRY_SCHEMA_VERSION}"
+        f"__sizes_{_grid_size_signature(grid_sizes_m)}"
+    )
 
 
 def _merge_counts_lookup(
@@ -40,6 +65,90 @@ def _merge_counts_lookup(
 ) -> dict[int, dict[str, int]]:
     existing_counts.update(new_counts)
     return existing_counts
+
+
+def _ordered_reachability_categories(categories: Iterable[str]) -> list[str]:
+    category_set = {str(category) for category in categories}
+    tag_order = [category for category in TAGS if category in category_set]
+    extras = sorted(category for category in category_set if category not in TAGS)
+    return tag_order + extras
+
+
+def _node_weight_categories(
+    node_weights_by_category: dict[str, list[tuple[int, int]]],
+) -> list[str]:
+    return _ordered_reachability_categories(
+        category
+        for category, node_weights in node_weights_by_category.items()
+        if any(int(weight) > 0 for _, weight in node_weights)
+    )
+
+
+def _snapped_node_categories(nodes_by_category: dict[str, list[int]]) -> list[str]:
+    return _ordered_reachability_categories(
+        category
+        for category, nodes in nodes_by_category.items()
+        if nodes
+    )
+
+
+def _load_reachability_matrix_or_empty(
+    cache_name: str,
+    cache_dir: Path,
+    *,
+    categories: list[str],
+    value_kind: str,
+    migrate_legacy_reach_cache: bool,
+    legacy_cache_load_large,
+) -> tuple[ReachabilityMatrix, bool]:
+    state = load_reachability_cache(
+        cache_name,
+        cache_dir,
+        categories=categories,
+        value_kind=value_kind,
+    )
+    if state is not None:
+        return state.matrix, state.is_complete
+    reset_reachability_cache(cache_name, cache_dir)
+    if migrate_legacy_reach_cache and legacy_cache_load_large is not None:
+        try:
+            migrated = migrate_legacy_sparse_cache(
+                cache_name,
+                cache_dir,
+                categories=categories,
+                value_kind=value_kind,
+                legacy_cache_load_large=legacy_cache_load_large,
+            )
+        except ValueError as exc:
+            print(f"  [reachability_cache] {cache_name}: legacy migration skipped ({exc})")
+            migrated = None
+        if migrated is not None:
+            return migrated, True
+    return ReachabilityMatrix.empty(categories, value_kind=value_kind), False
+
+
+def _load_checkpointed_reachability_matrix(
+    cache_name: str,
+    cache_dir: Path,
+    *,
+    categories: list[str],
+    value_kind: str,
+    expected_origin_nodes: Iterable[int],
+) -> ReachabilityMatrix:
+    state = load_reachability_cache(
+        cache_name,
+        cache_dir,
+        categories=categories,
+        value_kind=value_kind,
+    )
+    if state is None:
+        raise RuntimeError(f"{cache_name} checkpoint cache became invalid after routing")
+    missing = state.matrix.missing_origin_ids(expected_origin_nodes)
+    if missing:
+        raise RuntimeError(
+            f"{cache_name} checkpoint cache is missing {len(missing):,} routed origins"
+        )
+    return state.matrix
 
 
 def _park_area_m2_from_row(row: dict[str, Any]) -> float:
@@ -135,12 +244,12 @@ def _load_or_build_grid_cells(
     build_grid,
     elapsed,
 ) -> tuple[list[dict[str, Any]], bool]:
-    grid_key = f"grid_cells_{size}"
+    grid_key = grid_cells_cache_key(size)
     cached_grid_cells = cache_load(grid_key, cache_dir)
     if cached_grid_cells is not None:
         if grid_cells_are_2d(cached_grid_cells):
             return cached_grid_cells, False
-        print(f"  [score] cached {size}m grid shells contain non-2D geometry - rebuilding")
+        print(f"  [geo] cached {size}m grid shells contain non-2D geometry - rebuilding")
 
     started_at = time.perf_counter()
     print(f"Phase 5 - grid {size:>5}m   building ...", end=" ", flush=True)
@@ -160,7 +269,7 @@ def _load_or_build_walk_origin_nodes(
     cache_save,
     normalize_origin_node_ids,
 ) -> tuple[list[int], bool]:
-    origin_key = _walk_origin_nodes_cache_key(grid_sizes_m)
+    origin_key = walk_origin_nodes_cache_key(grid_sizes_m)
     cached_origin_nodes = cache_load(origin_key, cache_dir)
     if cached_origin_nodes is not None:
         return list(cached_origin_nodes), False
@@ -506,15 +615,13 @@ def phase_reachability_impl(
     cache_load,
     cache_save,
     cache_load_large,
-    cache_save_large,
-    cache_save_large_append_frame,
-    cache_reset_large_frames,
     mark_building,
     mark_complete,
     snap_amenities,
     normalize_origin_node_ids,
-    precompute_walk_counts_by_origin_node,
-    precompute_walk_decayed_units_by_origin_node,
+    precompute_walk_count_matrix_by_origin_node,
+    precompute_walk_decayed_units_matrix_by_origin_node,
+    migrate_legacy_reach_cache: bool = False,
 ):
     if walk_origin_node_ids is None:
         raise ValueError("walk_origin_node_ids is required for walk reachability")
@@ -569,45 +676,50 @@ def phase_reachability_impl(
         )
         cache_save("walk_cluster_nodes_by_cat", walk_cluster_nodes_by_category, cache_dir)
 
-    walk_counts_by_node = cache_load_large("walk_counts_by_origin_node", cache_dir)
-    if walk_counts_by_node is None:
-        walk_counts_by_node = {}
-        cache_reset_large_frames("walk_counts_by_origin_node", cache_dir)
-    walk_cluster_counts_by_node = cache_load_large(
+    base_unit_rows = _base_unit_node_rows(
+        amenity_cluster_rows,
+        walk_cluster_nodes_by_category,
+    )
+
+    raw_count_categories = _snapped_node_categories(walk_nodes_by_category)
+    cluster_count_categories = _snapped_node_categories(walk_cluster_nodes_by_category)
+    effective_unit_categories = _node_weight_categories(base_unit_rows)
+
+    walk_counts_by_node, walk_counts_complete = _load_reachability_matrix_or_empty(
+        "walk_counts_by_origin_node",
+        cache_dir,
+        categories=raw_count_categories,
+        value_kind="counts",
+        migrate_legacy_reach_cache=migrate_legacy_reach_cache,
+        legacy_cache_load_large=cache_load_large,
+    )
+    walk_cluster_counts_by_node, walk_cluster_counts_complete = _load_reachability_matrix_or_empty(
         "walk_cluster_counts_by_origin_node",
         cache_dir,
+        categories=cluster_count_categories,
+        value_kind="counts",
+        migrate_legacy_reach_cache=migrate_legacy_reach_cache,
+        legacy_cache_load_large=cache_load_large,
     )
-    if walk_cluster_counts_by_node is None:
-        walk_cluster_counts_by_node = {}
-        cache_reset_large_frames("walk_cluster_counts_by_origin_node", cache_dir)
-    walk_effective_units_by_node = cache_load_large(
+    walk_effective_units_by_node, walk_effective_units_complete = _load_reachability_matrix_or_empty(
         "walk_effective_units_by_origin_node",
         cache_dir,
+        categories=effective_unit_categories,
+        value_kind="effective_units",
+        migrate_legacy_reach_cache=migrate_legacy_reach_cache,
+        legacy_cache_load_large=cache_load_large,
     )
-    if walk_effective_units_by_node is None:
-        walk_effective_units_by_node = {}
-        cache_reset_large_frames("walk_effective_units_by_origin_node", cache_dir)
 
-    missing_counts: list[int] = []
-    missing_clusters: list[int] = []
-    missing_effective: list[int] = []
-    missing_any: list[int] = []
-    for node in requested_walk_origin_nodes:
-        counts_missing = node not in walk_counts_by_node
-        clusters_missing = node not in walk_cluster_counts_by_node
-        effective_missing = node not in walk_effective_units_by_node
-        if counts_missing:
-            missing_counts.append(node)
-        if clusters_missing:
-            missing_clusters.append(node)
-        if effective_missing:
-            missing_effective.append(node)
-        if counts_missing or clusters_missing or effective_missing:
-            missing_any.append(node)
-    missing_count_nodes = tuple(missing_counts)
-    missing_cluster_count_nodes = tuple(missing_clusters)
-    missing_effective_nodes = tuple(missing_effective)
-    missing_origin_nodes = tuple(missing_any)
+    missing_count_nodes = walk_counts_by_node.missing_origin_ids(requested_walk_origin_nodes)
+    missing_cluster_count_nodes = walk_cluster_counts_by_node.missing_origin_ids(
+        requested_walk_origin_nodes
+    )
+    missing_effective_nodes = walk_effective_units_by_node.missing_origin_ids(
+        requested_walk_origin_nodes
+    )
+    missing_origin_nodes = tuple(
+        sorted({*missing_count_nodes, *missing_cluster_count_nodes, *missing_effective_nodes})
+    )
 
     if missing_origin_nodes:
         built_any = True
@@ -632,6 +744,10 @@ def phase_reachability_impl(
             force_log=True,
         )
 
+    counts_needs_save = not walk_counts_complete
+    cluster_counts_needs_save = not walk_cluster_counts_complete
+    effective_units_needs_save = not walk_effective_units_complete
+
     if missing_origin_nodes:
         counts_cache_save_seconds = 0.0
         cluster_counts_cache_save_seconds = 0.0
@@ -647,17 +763,20 @@ def phase_reachability_impl(
 
         if missing_count_nodes:
             routing_started_at = time.perf_counter()
+            counts_checkpointed = False
 
-            def _checkpoint_save_counts(chunk_counts: dict[int, dict[str, int]]) -> None:
-                nonlocal walk_counts_by_node, counts_cache_save_seconds
-                walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, chunk_counts)
+            def _checkpoint_save_counts(chunk_counts: ReachabilityMatrix) -> None:
+                nonlocal counts_cache_save_seconds, counts_checkpointed
                 save_started_at = time.perf_counter()
-                cache_save_large_append_frame(
-                    "walk_counts_by_origin_node", chunk_counts, cache_dir
+                append_reachability_cache_chunk(
+                    "walk_counts_by_origin_node",
+                    cache_dir,
+                    chunk_counts,
                 )
+                counts_checkpointed = True
                 counts_cache_save_seconds += max(time.perf_counter() - save_started_at, 0.0)
 
-            new_walk_counts = precompute_walk_counts_by_origin_node(
+            new_walk_counts = precompute_walk_count_matrix_by_origin_node(
                 walk_graph,
                 walk_nodes_by_category,
                 missing_count_nodes,
@@ -674,12 +793,21 @@ def phase_reachability_impl(
                 routing_started_at,
                 force_log=True,
             )
-            if new_walk_counts:
-                walk_counts_by_node = _merge_counts_lookup(walk_counts_by_node, new_walk_counts)
-            if counts_cache_save_seconds <= 0.0:
-                save_started_at = time.perf_counter()
-                cache_save_large("walk_counts_by_origin_node", walk_counts_by_node, cache_dir)
-                counts_cache_save_seconds = max(time.perf_counter() - save_started_at, 0.0)
+            if counts_checkpointed:
+                walk_counts_by_node = _load_checkpointed_reachability_matrix(
+                    "walk_counts_by_origin_node",
+                    cache_dir,
+                    categories=raw_count_categories,
+                    value_kind="counts",
+                    expected_origin_nodes=missing_count_nodes,
+                )
+            elif new_walk_counts:
+                walk_counts_by_node = merge_reachability_matrices(
+                    [walk_counts_by_node, new_walk_counts],
+                    categories=raw_count_categories,
+                    value_kind="counts",
+                )
+            counts_needs_save = True
             tracker.record_substep(
                 "reachability",
                 "walk_cache_save",
@@ -689,25 +817,23 @@ def phase_reachability_impl(
 
         if missing_cluster_count_nodes:
             cluster_routing_started_at = time.perf_counter()
+            cluster_counts_checkpointed = False
 
-            def _checkpoint_save_cluster_counts(chunk_counts: dict[int, dict[str, int]]) -> None:
-                nonlocal walk_cluster_counts_by_node, cluster_counts_cache_save_seconds
-                walk_cluster_counts_by_node = _merge_counts_lookup(
-                    walk_cluster_counts_by_node,
-                    chunk_counts,
-                )
+            def _checkpoint_save_cluster_counts(chunk_counts: ReachabilityMatrix) -> None:
+                nonlocal cluster_counts_cache_save_seconds, cluster_counts_checkpointed
                 save_started_at = time.perf_counter()
-                cache_save_large_append_frame(
+                append_reachability_cache_chunk(
                     "walk_cluster_counts_by_origin_node",
-                    chunk_counts,
                     cache_dir,
+                    chunk_counts,
                 )
+                cluster_counts_checkpointed = True
                 cluster_counts_cache_save_seconds += max(
                     time.perf_counter() - save_started_at,
                     0.0,
                 )
 
-            new_cluster_counts = precompute_walk_counts_by_origin_node(
+            new_cluster_counts = precompute_walk_count_matrix_by_origin_node(
                 walk_graph,
                 walk_cluster_nodes_by_category,
                 missing_cluster_count_nodes,
@@ -724,22 +850,21 @@ def phase_reachability_impl(
                 cluster_routing_started_at,
                 force_log=True,
             )
-            if new_cluster_counts:
-                walk_cluster_counts_by_node = _merge_counts_lookup(
-                    walk_cluster_counts_by_node,
-                    new_cluster_counts,
-                )
-            if cluster_counts_cache_save_seconds <= 0.0:
-                save_started_at = time.perf_counter()
-                cache_save_large(
+            if cluster_counts_checkpointed:
+                walk_cluster_counts_by_node = _load_checkpointed_reachability_matrix(
                     "walk_cluster_counts_by_origin_node",
-                    walk_cluster_counts_by_node,
                     cache_dir,
+                    categories=cluster_count_categories,
+                    value_kind="counts",
+                    expected_origin_nodes=missing_cluster_count_nodes,
                 )
-                cluster_counts_cache_save_seconds = max(
-                    time.perf_counter() - save_started_at,
-                    0.0,
+            elif new_cluster_counts:
+                walk_cluster_counts_by_node = merge_reachability_matrices(
+                    [walk_cluster_counts_by_node, new_cluster_counts],
+                    categories=cluster_count_categories,
+                    value_kind="counts",
                 )
+            cluster_counts_needs_save = True
             tracker.record_substep(
                 "reachability",
                 "walk_cluster_cache_save",
@@ -748,33 +873,27 @@ def phase_reachability_impl(
             )
 
         if missing_effective_nodes:
-            base_unit_rows = _base_unit_node_rows(
-                amenity_cluster_rows,
-                walk_cluster_nodes_by_category,
-            )
             if base_unit_rows:
                 effective_routing_started_at = time.perf_counter()
+                effective_units_checkpointed = False
 
                 def _checkpoint_save_effective_units(
-                    chunk_units: dict[int, dict[str, float]],
+                    chunk_units: ReachabilityMatrix,
                 ) -> None:
-                    nonlocal walk_effective_units_by_node, effective_units_cache_save_seconds
-                    walk_effective_units_by_node = _merge_counts_lookup(
-                        walk_effective_units_by_node,
-                        chunk_units,
-                    )
+                    nonlocal effective_units_cache_save_seconds, effective_units_checkpointed
                     save_started_at = time.perf_counter()
-                    cache_save_large_append_frame(
+                    append_reachability_cache_chunk(
                         "walk_effective_units_by_origin_node",
-                        chunk_units,
                         cache_dir,
+                        chunk_units,
                     )
+                    effective_units_checkpointed = True
                     effective_units_cache_save_seconds += max(
                         time.perf_counter() - save_started_at,
                         0.0,
                     )
 
-                effective_units_by_node = precompute_walk_decayed_units_by_origin_node(
+                effective_units_by_node = precompute_walk_decayed_units_matrix_by_origin_node(
                     walk_graph,
                     base_unit_rows,
                     missing_effective_nodes,
@@ -792,33 +911,59 @@ def phase_reachability_impl(
                     effective_routing_started_at,
                     force_log=True,
                 )
-                if effective_units_by_node:
-                    walk_effective_units_by_node = _merge_counts_lookup(
-                        walk_effective_units_by_node,
-                        effective_units_by_node,
+                if effective_units_checkpointed:
+                    walk_effective_units_by_node = _load_checkpointed_reachability_matrix(
+                        "walk_effective_units_by_origin_node",
+                        cache_dir,
+                        categories=effective_unit_categories,
+                        value_kind="effective_units",
+                        expected_origin_nodes=missing_effective_nodes,
+                    )
+                elif effective_units_by_node:
+                    walk_effective_units_by_node = merge_reachability_matrices(
+                        [walk_effective_units_by_node, effective_units_by_node],
+                        categories=effective_unit_categories,
+                        value_kind="effective_units",
                     )
             else:
-                walk_effective_units_by_node = _merge_counts_lookup(
-                    walk_effective_units_by_node,
-                    {node: {} for node in missing_effective_nodes},
+                empty_effective_units = ReachabilityMatrix.for_origins(
+                    missing_effective_nodes,
+                    effective_unit_categories,
+                    value_kind="effective_units",
+                )
+                walk_effective_units_by_node = merge_reachability_matrices(
+                    [walk_effective_units_by_node, empty_effective_units],
+                    categories=effective_unit_categories,
+                    value_kind="effective_units",
                 )
 
-            if effective_units_cache_save_seconds <= 0.0:
-                save_started_at = time.perf_counter()
-                cache_save_large(
-                    "walk_effective_units_by_origin_node",
-                    walk_effective_units_by_node,
-                    cache_dir,
-                )
-                effective_units_cache_save_seconds = max(
-                    time.perf_counter() - save_started_at,
-                    0.0,
-                )
+            effective_units_needs_save = True
             tracker.record_substep(
                 "reachability",
                 "walk_effective_units_cache_save",
                 effective_units_cache_save_seconds,
                 force_log=True,
+            )
+
+    if counts_needs_save or cluster_counts_needs_save or effective_units_needs_save:
+        built_any = True
+        if counts_needs_save:
+            save_reachability_cache(
+                "walk_counts_by_origin_node",
+                cache_dir,
+                walk_counts_by_node,
+            )
+        if cluster_counts_needs_save:
+            save_reachability_cache(
+                "walk_cluster_counts_by_origin_node",
+                cache_dir,
+                walk_cluster_counts_by_node,
+            )
+        if effective_units_needs_save:
+            save_reachability_cache(
+                "walk_effective_units_by_origin_node",
+                cache_dir,
+                walk_effective_units_by_node,
             )
 
     if built_any:
@@ -846,6 +991,7 @@ def phase_grids_impl(
     *,
     grid_sizes_m: list[int],
     cache_dir,
+    geometry_cache_dir,
     score_hash: str,
     tiers_building: set,
     cache_exists,
@@ -965,40 +1111,36 @@ def phase_grids_impl(
     if needs_walk_origin_nodes:
         for size in grid_sizes_m:
             if size not in grid_cells_by_size:
-                grid_cells, built_grid_cells = _load_or_build_grid_cells(
+                grid_cells, _ = _load_or_build_grid_cells(
                     size,
                     study_area_metric,
                     tracker=tracker,
-                    cache_dir=cache_dir,
+                    cache_dir=geometry_cache_dir,
                     cache_load=cache_load,
                     cache_save=cache_save,
                     grid_cells_are_2d=grid_cells_are_2d,
                     build_grid=build_grid,
                     elapsed=elapsed,
                 )
-                if built_grid_cells:
-                    ensure_score_building(f"grid_shell_{size}")
                 grid_cells_by_size[size] = grid_cells
             tracker.set_live_work("grids", detail=f"{size}m walk node snap")
             started_at = time.perf_counter()
             walk_cell_nodes_by_size[size] = snap_cells_to_nodes(
                 walk_graph,
                 grid_cells_by_size[size],
-                f"walk_cell_nodes_{size}",
-                cache_dir,
+                walk_cell_nodes_cache_key(size),
+                geometry_cache_dir,
             )
             _record_substep(tracker, "grids", "walk_snapping", started_at, force_log=True)
 
-        walk_origin_nodes, built_walk_origin_nodes = _load_or_build_walk_origin_nodes(
+        walk_origin_nodes, _ = _load_or_build_walk_origin_nodes(
             grid_sizes_m,
             walk_cell_nodes_by_size,
-            cache_dir=cache_dir,
+            cache_dir=geometry_cache_dir,
             cache_load=cache_load,
             cache_save=cache_save,
             normalize_origin_node_ids=normalize_origin_node_ids,
         )
-        if built_walk_origin_nodes:
-            ensure_score_building(f"walk_origins_{_grid_size_signature(grid_sizes_m)}")
 
     if fine_surface_enabled:
         ensure_surface_shell_cache(

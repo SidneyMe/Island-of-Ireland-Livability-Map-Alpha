@@ -484,7 +484,7 @@ class RuntimeService:
         surface_score_dir: Path | None = None
         surface_tile_dir: Path | None = None
         if profile_fine_surface_enabled(self._profile):
-            surface_shell_hash = _surface.build_surface_shell_hash(str(manifest["reach_hash"]))
+            surface_shell_hash = _surface.build_surface_shell_hash(str(manifest["geo_hash"]))
             surface_shell_dir = _surface.surface_shell_dir(
                 CACHE_DIR,
                 surface_shell_hash=surface_shell_hash,

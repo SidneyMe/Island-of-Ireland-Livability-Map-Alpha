@@ -9,6 +9,8 @@ from typing import Any
 
 import importlib.metadata
 
+from .reachability_arrays import reachability_cache_ready, reachability_cache_recoverable
+
 
 GRAPH_REQUIRED_FILENAMES = (
     "walk_graph.meta.json",
@@ -154,9 +156,9 @@ def can_finalize_reach_tier(
         amenity_data is not None
         and cache_load_for_finalize("walk_nodes_by_cat", reach_cache_dir) is not None
         and cache_load_for_finalize("walk_cluster_nodes_by_cat", reach_cache_dir) is not None
-        and cache_exists_large_for_finalize("walk_counts_by_origin_node", reach_cache_dir)
-        and cache_exists_large_for_finalize("walk_cluster_counts_by_origin_node", reach_cache_dir)
-        and cache_exists_large_for_finalize("walk_effective_units_by_origin_node", reach_cache_dir)
+        and reachability_cache_ready("walk_counts_by_origin_node", reach_cache_dir)
+        and reachability_cache_ready("walk_cluster_counts_by_origin_node", reach_cache_dir)
+        and reachability_cache_ready("walk_effective_units_by_origin_node", reach_cache_dir)
     )
 
 
@@ -184,11 +186,9 @@ def _has_recoverable_reach_artefacts(
             cache_load_for_finalize("amenities", reach_cache_dir) is not None,
             cache_load_for_finalize("walk_nodes_by_cat", reach_cache_dir) is not None,
             cache_load_for_finalize("walk_cluster_nodes_by_cat", reach_cache_dir) is not None,
-            cache_load_large_for_finalize("walk_counts_by_origin_node", reach_cache_dir) is not None,
-            cache_load_large_for_finalize("walk_cluster_counts_by_origin_node", reach_cache_dir)
-            is not None,
-            cache_load_large_for_finalize("walk_effective_units_by_origin_node", reach_cache_dir)
-            is not None,
+            reachability_cache_recoverable("walk_counts_by_origin_node", reach_cache_dir),
+            reachability_cache_recoverable("walk_cluster_counts_by_origin_node", reach_cache_dir),
+            reachability_cache_recoverable("walk_effective_units_by_origin_node", reach_cache_dir),
         )
     )
 
@@ -202,9 +202,7 @@ def _has_recoverable_score_artefacts(
     for size in grid_sizes_m:
         if cache_load_for_finalize(f"walk_cells_{size}", score_cache_dir) is not None:
             return True
-    if not score_cache_dir.exists():
-        return False
-    return any(path.name.startswith("walk_origin_nodes__sizes_") for path in score_cache_dir.iterdir())
+    return False
 
 
 def validate_tier(

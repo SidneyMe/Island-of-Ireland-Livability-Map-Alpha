@@ -83,7 +83,7 @@ _MAX_PARALLEL_ATTEMPTS = 2
 
 _BUILD_MANIFEST_SQL = text(
     """
-    SELECT reach_hash, score_hash, summary_json
+    SELECT geo_hash, score_hash, summary_json
     FROM build_manifest
     WHERE build_key = :build_key
     """
@@ -373,7 +373,7 @@ def _resolve_fine_grid_config(connection, *, build_key: str) -> dict[str, str] |
     if not isinstance(fine_resolutions, list) or not fine_resolutions:
         return None
 
-    surface_shell_hash = _surface.build_surface_shell_hash(str(row["reach_hash"]))
+    surface_shell_hash = _surface.build_surface_shell_hash(str(row["geo_hash"]))
     shell_dir = _surface.surface_shell_dir(
         CACHE_DIR,
         surface_shell_hash=surface_shell_hash,

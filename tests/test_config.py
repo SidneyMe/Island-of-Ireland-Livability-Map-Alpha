@@ -151,6 +151,37 @@ class ConfigHashTests(TestCase):
         self.assertEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
         self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
 
+    def test_transit_reality_change_reuses_geo_surface_shell_hash(self) -> None:
+        previous_hashes = config.build_hashes_for_import(
+            "import-fingerprint-123",
+            transit_reality_fingerprint="transit-reality-a",
+        )
+        current_hashes = config.build_hashes_for_import(
+            "import-fingerprint-123",
+            transit_reality_fingerprint="transit-reality-b",
+        )
+
+        self.assertEqual(previous_hashes.geo_hash, current_hashes.geo_hash)
+        self.assertEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
+        self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+        self.assertNotEqual(previous_hashes.build_key, current_hashes.build_key)
+
+    def test_import_fingerprint_change_invalidates_geo_surface_shell_hash(self) -> None:
+        previous_hashes = config.build_hashes_for_import(
+            "import-fingerprint-a",
+            transit_reality_fingerprint="transit-reality-123",
+        )
+        current_hashes = config.build_hashes_for_import(
+            "import-fingerprint-b",
+            transit_reality_fingerprint="transit-reality-123",
+        )
+
+        self.assertNotEqual(previous_hashes.geo_hash, current_hashes.geo_hash)
+        self.assertNotEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
+        self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+
     def test_build_profiles_produce_distinct_config_hashes_and_build_keys(self) -> None:
         full_hashes = config.build_config_hashes(profile="full")
         dev_hashes = config.build_config_hashes(profile="dev")
@@ -394,6 +425,7 @@ class SurfaceResolutionTests(TestCase):
             current_hashes = config.build_config_hashes()
 
         self.assertNotEqual(previous_hashes.geo_hash, current_hashes.geo_hash)
+        self.assertNotEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
         self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
         self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
         self.assertNotEqual(previous_hashes.render_hash, current_hashes.render_hash)
