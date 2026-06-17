@@ -33,6 +33,7 @@ class _BuildState:
     transit_reality_state: Any = None
     study_area_metric: Any = None
     study_area_wgs84: Any = None
+    amenity_merge_stats: Any = None
 
     @classmethod
     def bootstrap(cls) -> _BuildState:

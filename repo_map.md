@@ -26,6 +26,7 @@
 - **OSM ingest**: `local_osm_import/` + `osm2pgsql_livability.lua`
 - **GTFS ingest and transit reality**: `transit/`
 - **Overture integration and dedupe**: `overture/loader.py`, `overture/merge.py`, `db_postgis/amenity_merge.py`
+- **Amenity merge observability**: `db_postgis/amenity_merge.py`, `precompute/phases.py`, `precompute/_rows.py`, `precompute/publish.py`
 - **Noise overlay ingestion**: `noise/loader.py`
 - **Noise artifact source ingest modes**: `noise_artifacts/ingest.py`, `noise_artifacts/ogr_ingest.py`
 - **Amenity tier classifier**: `precompute/amenity_tiers.py`
@@ -209,6 +210,7 @@ Notes:
 | Amenity tiering | `config.py` tier constants, `precompute/amenity_tiers.py` | `precompute/phases.py`, `precompute/publish.py` | None |
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
+| Amenity merge diagnostics | `db_postgis/amenity_merge.py`, `precompute/phases.py`, `precompute/_rows.py`, `precompute/publish.py` | `phase_amenities_impl()` -> `_summary_json()` -> `build_manifest.summary_json` | `summary_json["amenity_merge"]` persists stage timings, key row counts, candidate-path counts, and compact warnings without storing geometries or SQL text. |
 | Noise overlay source handling | `noise/loader.py`, `noise_artifacts/*` | `noise_polygons`, separate `noise` PMTiles archive, `/api/runtime` noise counts + `noise_pmtiles_url` | `noise_datasets/*.zip` local inputs |
 | Noise artifact ogr2ogr ingest safety/perf | `noise_artifacts/ogr_ingest.py` | Road GDB canonical pipeline (FileGDB -> local GPKG cache -> one PG stage import -> batch normalize), SQL timeouts, disk preflight (cache + PostgreSQL `data_directory`) | `NOISE_ROAD_GDB_CANONICAL_CACHE`, `NOISE_REBUILD_ROAD_GDB_CACHE`, `NOISE_ROAD_NORMALIZE_BATCH_SIZE`, `NOISE_SQL_*`, `NOISE_MIN_FREE_DISK_GB` |
 | Precompute orchestration | `precompute/_planning.py`, `precompute/workflow.py` | `precompute/__init__.py` | `precompute/workflow.py` now also has an explain-mode short-circuit that prints the pure planner output without running geometry, reachability, publish, or schema-migration setup phases. |

@@ -364,7 +364,7 @@ def phase_amenities_impl(
     merge_source_amenity_rows,
     load_merged_source_amenity_rows=None,
     transit_reality_fingerprint: str | None = None,
-) -> tuple[dict[str, list[tuple[float, float]]], list[dict[str, Any]]]:
+) -> tuple[dict[str, list[tuple[float, float]]], list[dict[str, Any]], dict[str, Any] | None]:
     tracker.start_phase(
         "amenities",
         total_units=len(tags),
@@ -394,7 +394,7 @@ def phase_amenities_impl(
             force_log=True,
         )
         tracker.finish_phase("amenities", "cached", detail=f"{total:,} features")
-        return amenity_data, amenity_source_rows
+        return amenity_data, amenity_source_rows, None
 
     mark_building(cache_dir, "reach", reach_hash, "amenities")
     tracker.set_phase_detail("amenities", "loading OSM amenity rows")
@@ -416,6 +416,7 @@ def phase_amenities_impl(
     }
     tracker.set_phase_detail("amenities", f"merging {len(osm_merge_rows):,} OSM + {len(overture_rows):,} Overture rows")
     merge_stats: dict[str, Any] | None = None
+    merged_rows: list[dict[str, Any]]
     if load_merged_source_amenity_rows is not None:
         merged_rows, merge_stats = load_merged_source_amenity_rows(
             engine,
@@ -531,7 +532,10 @@ def phase_amenities_impl(
         "completed",
         detail=f"{total:,} features | {len(amenity_cluster_rows):,} scoring clusters",
     )
-    return amenity_data, amenity_source_rows
+    if merge_stats is not None:
+        merge_stats["merged_row_count"] = int(len(merged_rows))
+        merge_stats["published_row_count"] = int(len(amenity_source_rows))
+    return amenity_data, amenity_source_rows, merge_stats
 
 
 def phase_networks_impl(

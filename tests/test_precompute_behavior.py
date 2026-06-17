@@ -759,7 +759,7 @@ class AmenityPhaseIntegrationTests(TestCase):
         ]
 
         cache: dict[str, object] = {}
-        amenity_data, amenity_source_rows = precompute._phases.phase_amenities_impl(
+        amenity_data, amenity_source_rows, merge_stats = precompute._phases.phase_amenities_impl(
             mock.sentinel.engine,
             box(-6.4, 53.2, -6.1, 53.5),
             tracker,
@@ -825,6 +825,7 @@ class AmenityPhaseIntegrationTests(TestCase):
                 },
             ],
         )
+        self.assertIsNone(merge_stats)
         self.assertEqual(cache["amenities"], amenity_source_rows)
 
     def test_phase_amenities_prefers_db_backed_merge_helper_when_available(self) -> None:
@@ -873,7 +874,7 @@ class AmenityPhaseIntegrationTests(TestCase):
         db_merge_mock = mock.Mock(return_value=(merged_rows, merge_stats))
         python_merge_mock = mock.Mock(side_effect=AssertionError("DB helper should be preferred"))
 
-        amenity_data, amenity_source_rows = precompute._phases.phase_amenities_impl(
+        amenity_data, amenity_source_rows, merge_stats = precompute._phases.phase_amenities_impl(
             mock.sentinel.engine,
             box(-6.4, 53.2, -6.1, 53.5),
             tracker,
@@ -896,6 +897,8 @@ class AmenityPhaseIntegrationTests(TestCase):
         self.assertEqual(amenity_data["shops"], [(53.35, -6.26)])
         self.assertEqual(amenity_source_rows[0]["conflict_class"], "source_agreement")
         db_merge_mock.assert_called_once()
+        self.assertEqual(merge_stats["merged_row_count"], 1)
+        self.assertEqual(merge_stats["published_row_count"], 1)
 
     def test_iter_amenity_rows_preserves_public_metadata_fields(self) -> None:
         hashes = SimpleNamespace(
@@ -1094,6 +1097,139 @@ class AmenityPhaseIntegrationTests(TestCase):
         self.assertEqual(summary["noise_metric_counts"], {"Lden": 2, "Lnight": 1})
         self.assertEqual(summary["noise_band_counts"], {"55-59": 2, "50-54": 1})
 
+    def test_summary_json_includes_amenity_merge_summary(self) -> None:
+        amenity_merge_summary = precompute._publish._amenity_merge_summary(
+            {
+                "merge_categories_resolved": ["shops", "parks"],
+                "osm_rows": 12,
+                "overture_rows": 34,
+                "osm_alias_rows": 5,
+                "overture_alias_rows": 6,
+                "osm_self_candidate_count": 3,
+                "osm_duplicate_cluster_count": 2,
+                "osm_duplicate_rows_removed": 1,
+                "candidate_pair_count": 6,
+                "same_category_candidate_count": 4,
+                "cross_category_candidate_count": 2,
+                "candidate_pairs_by_path": {"same_category_near": 3, "cross_category_alias": 2},
+                "candidate_pairs_by_osm_category": {"shops": 5, "parks": 1},
+                "stage_ms": {"filter_osm_rows": 10.0, "generate_overture_candidates": 20.0},
+                "merged_row_count": 8,
+                "published_row_count": 10,
+            },
+            amenity_source_row_count=10,
+        )
+        summary = precompute._publish.summary_json_impl(
+            box(-10.0, 50.0, -5.0, 55.0),
+            {20_000: [_grid_cell("coarse-cell")]},
+            _empty_amenity_data(),
+            [],
+            amenity_merge={
+                "merge_categories_resolved": ["shops", "parks"],
+                "osm_rows": 12,
+                "overture_rows": 34,
+                "osm_alias_rows": 5,
+                "overture_alias_rows": 6,
+                "osm_self_candidate_count": 3,
+                "osm_duplicate_cluster_count": 2,
+                "osm_duplicate_rows_removed": 1,
+                "candidate_pair_count": 6,
+                "same_category_candidate_count": 4,
+                "cross_category_candidate_count": 2,
+                "candidate_pairs_by_path": {"same_category_near": 3, "cross_category_alias": 2},
+                "candidate_pairs_by_osm_category": {"shops": 5, "parks": 1},
+                "stage_ms": {"filter_osm_rows": 10.0, "generate_overture_candidates": 20.0},
+                "merged_row_count": 8,
+                "published_row_count": 10,
+            },
+            hashes=SimpleNamespace(
+                build_key="build-key-dev",
+                config_hash="config-hash-dev",
+                import_fingerprint="import-fingerprint-dev",
+            ),
+            build_profile="dev",
+            source_state=SimpleNamespace(extract_path=Path("extract.osm.pbf")),
+            osm_extract_path=Path("extract.osm.pbf"),
+            grid_sizes_m=[20_000],
+            fine_resolutions_m=[],
+            output_html="index.html",
+            zoom_breaks=[(0, 20_000)],
+        )
+
+        self.assertEqual(summary["amenity_merge"], amenity_merge_summary)
+        self.assertEqual(summary["amenity_merge"]["row_counts"]["merged_row_count"], 8)
+        self.assertEqual(summary["amenity_merge"]["row_counts"]["published_row_count"], 10)
+        self.assertEqual(
+            summary["amenity_merge"]["candidate_counts"]["candidate_pairs_by_path"],
+            {"same_category_near": 3, "cross_category_alias": 2},
+        )
+        self.assertEqual(summary["amenity_merge"]["warnings"], [])
+        json.dumps(summary)
+
+    def test_summary_json_includes_amenity_merge_warning_for_large_candidate_tables(self) -> None:
+        summary = precompute._publish.summary_json_impl(
+            box(-10.0, 50.0, -5.0, 55.0),
+            {20_000: [_grid_cell("coarse-cell")]},
+            _empty_amenity_data(),
+            [],
+            amenity_merge={
+                "merge_categories_resolved": ["shops"],
+                "osm_rows": 1,
+                "overture_rows": 1,
+                "candidate_pair_count": precompute._publish.AMENITY_MERGE_LARGE_CANDIDATE_WARNING_ROWS,
+                "stage_ms": {},
+                "candidate_pairs_by_path": {},
+                "candidate_pairs_by_osm_category": {},
+            },
+            hashes=SimpleNamespace(
+                build_key="build-key-dev",
+                config_hash="config-hash-dev",
+                import_fingerprint="import-fingerprint-dev",
+            ),
+            build_profile="dev",
+            source_state=SimpleNamespace(extract_path=Path("extract.osm.pbf")),
+            osm_extract_path=Path("extract.osm.pbf"),
+            grid_sizes_m=[20_000],
+            fine_resolutions_m=[],
+            output_html="index.html",
+            zoom_breaks=[(0, 20_000)],
+        )
+
+        self.assertEqual(summary["amenity_merge"]["warnings"][0]["code"], "large_candidate_table")
+        self.assertEqual(
+            summary["amenity_merge"]["warnings"][0]["table"],
+            "_tmp_amenity_merge_candidates_raw",
+        )
+
+    def test_summary_json_includes_amenity_merge_summary_with_sparse_counts(self) -> None:
+        summary = precompute._publish.summary_json_impl(
+            box(-10.0, 50.0, -5.0, 55.0),
+            {20_000: [_grid_cell("coarse-cell")]},
+            _empty_amenity_data(),
+            [],
+            amenity_merge={
+                "merge_categories_resolved": ["shops"],
+                "stage_ms": {"filter_osm_rows": 5.0},
+            },
+            hashes=SimpleNamespace(
+                build_key="build-key-dev",
+                config_hash="config-hash-dev",
+                import_fingerprint="import-fingerprint-dev",
+            ),
+            build_profile="dev",
+            source_state=SimpleNamespace(extract_path=Path("extract.osm.pbf")),
+            osm_extract_path=Path("extract.osm.pbf"),
+            grid_sizes_m=[20_000],
+            fine_resolutions_m=[],
+            output_html="index.html",
+            zoom_breaks=[(0, 20_000)],
+        )
+
+        self.assertEqual(summary["amenity_merge"]["row_counts"]["osm_rows"], 0)
+        self.assertEqual(summary["amenity_merge"]["row_counts"]["candidate_pair_count"], 0)
+        self.assertEqual(summary["amenity_merge"]["candidate_counts"]["candidate_pairs_by_path"], {})
+        json.dumps(summary)
+
     def test_summary_json_includes_coastal_cleanup_summary(self) -> None:
         coastal_cleanup_summary = {
             "enabled": True,
@@ -1183,6 +1319,46 @@ class AmenityPhaseIntegrationTests(TestCase):
         self.assertEqual(summary, {"summary": True})
         self.assertEqual(impl_mock.call_args.kwargs["coastal_cleanup"], coastal_cleanup_summary)
         json.dumps(coastal_cleanup_summary)
+
+    def test_summary_json_wrapper_threads_amenity_merge_summary(self) -> None:
+        amenity_merge_summary = {
+            "enabled": True,
+            "stage_timings_s": {"filter_osm_rows": 0.01},
+            "row_counts": {
+                "osm_rows": 1,
+                "overture_rows": 1,
+                "osm_alias_rows": 1,
+                "overture_alias_rows": 1,
+                "osm_self_candidate_count": 0,
+                "osm_duplicate_cluster_count": 0,
+                "osm_duplicate_rows_removed": 0,
+                "candidate_pair_count": 1,
+                "same_category_candidate_count": 1,
+                "cross_category_candidate_count": 0,
+                "merged_row_count": 1,
+                "published_row_count": 1,
+            },
+            "candidate_counts": {
+                "candidate_pairs_by_path": {"same_category_near": 1},
+                "candidate_pairs_by_osm_category": {"shops": 1},
+                "merge_categories_resolved": ["shops"],
+            },
+            "warnings": [],
+        }
+        with (
+            mock.patch.object(precompute._rows._STATE, "amenity_merge_stats", amenity_merge_summary),
+            mock.patch.object(precompute._rows._publish, "summary_json_impl", return_value={"summary": True}) as impl_mock,
+        ):
+            summary = precompute._rows._summary_json(
+                box(-10.0, 50.0, -5.0, 55.0),
+                {20_000: [_grid_cell("coarse-cell")]},
+                _empty_amenity_data(),
+                [],
+                noise_rows=[],
+            )
+
+        self.assertEqual(summary, {"summary": True})
+        self.assertEqual(impl_mock.call_args.kwargs["amenity_merge"], amenity_merge_summary)
 
 
 class PrecomputeReachabilityTests(TestCase):

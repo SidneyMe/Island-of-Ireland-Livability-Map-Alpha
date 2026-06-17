@@ -115,7 +115,8 @@ def phase_amenities(
     study_area_wgs84,
     tracker: PrecomputeProgressTracker,
 ) -> tuple[dict[str, list[tuple[float, float]]], list[dict[str, Any]]]:
-    return _phases.phase_amenities_impl(
+    _STATE.amenity_merge_stats = None
+    amenity_data, amenity_source_rows, amenity_merge_stats = _phases.phase_amenities_impl(
         engine,
         study_area_wgs84,
         tracker,
@@ -134,6 +135,8 @@ def phase_amenities(
         load_merged_source_amenity_rows=load_merged_source_amenity_rows,
         transit_reality_fingerprint=_STATE.hashes.transit_reality_fingerprint,
     )
+    _STATE.amenity_merge_stats = amenity_merge_stats
+    return amenity_data, amenity_source_rows
 
 
 def phase_networks(
@@ -156,4 +159,3 @@ def phase_networks(
         walkgraph_bin=WALKGRAPH_BIN,
         bbox_padding_m=WALKGRAPH_BBOX_PADDING_M,
     )
-

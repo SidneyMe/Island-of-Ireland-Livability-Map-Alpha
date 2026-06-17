@@ -9,6 +9,7 @@ from shapely.geometry import Point
 
 
 PREP_PROGRESS_EVERY = 1_000
+AMENITY_MERGE_LARGE_CANDIDATE_WARNING_ROWS = 50_000
 
 
 def _centre_point(cell: dict[str, Any]) -> Point:
@@ -91,6 +92,70 @@ def _amenity_tier_counts(
         bucket = counts.setdefault(category, {})
         bucket[tier] = int(bucket.get(tier, 0)) + 1
     return counts
+
+
+def _amenity_merge_summary(
+    merge_stats: dict[str, Any] | None,
+    *,
+    amenity_source_row_count: int,
+) -> dict[str, Any] | None:
+    if not merge_stats:
+        return None
+
+    stage_ms = dict(merge_stats.get("stage_ms") or {})
+    candidate_pair_count = int(merge_stats.get("candidate_pair_count", 0))
+    warnings: list[dict[str, Any]] = []
+
+    if candidate_pair_count >= AMENITY_MERGE_LARGE_CANDIDATE_WARNING_ROWS:
+        warnings.append(
+            {
+                "code": "large_candidate_table",
+                "table": "_tmp_amenity_merge_candidates_raw",
+                "rows": candidate_pair_count,
+            }
+        )
+
+    merge_warning = merge_stats.get("merge_categories_warning")
+    if merge_warning:
+        warnings.append(
+            {
+                "code": "merge_categories_warning",
+                "message": str(merge_warning),
+            }
+        )
+
+    return {
+        "enabled": True,
+        "stage_timings_s": {name: float(value) / 1000.0 for name, value in stage_ms.items()},
+        "row_counts": {
+            "osm_rows": int(merge_stats.get("osm_rows", 0)),
+            "overture_rows": int(merge_stats.get("overture_rows", 0)),
+            "osm_alias_rows": int(merge_stats.get("osm_alias_rows", 0)),
+            "overture_alias_rows": int(merge_stats.get("overture_alias_rows", 0)),
+            "osm_self_candidate_count": int(merge_stats.get("osm_self_candidate_count", 0)),
+            "osm_duplicate_cluster_count": int(merge_stats.get("osm_duplicate_cluster_count", 0)),
+            "osm_duplicate_rows_removed": int(merge_stats.get("osm_duplicate_rows_removed", 0)),
+            "candidate_pair_count": candidate_pair_count,
+            "same_category_candidate_count": int(
+                merge_stats.get("same_category_candidate_count", 0)
+            ),
+            "cross_category_candidate_count": int(
+                merge_stats.get("cross_category_candidate_count", 0)
+            ),
+            "merged_row_count": int(merge_stats.get("merged_row_count", 0)),
+            "published_row_count": int(
+                merge_stats.get("published_row_count", amenity_source_row_count)
+            ),
+        },
+        "candidate_counts": {
+            "candidate_pairs_by_path": dict(merge_stats.get("candidate_pairs_by_path") or {}),
+            "candidate_pairs_by_osm_category": dict(
+                merge_stats.get("candidate_pairs_by_osm_category") or {}
+            ),
+            "merge_categories_resolved": list(merge_stats.get("merge_categories_resolved") or []),
+        },
+        "warnings": warnings,
+    }
 
 
 @dataclass
@@ -348,6 +413,7 @@ def summary_json_impl(
     transport_reality_rows: list[dict[str, Any]] | None = None,
     noise_rows: list[dict[str, Any]] | None = None,
     coastal_cleanup: dict[str, Any] | None = None,
+    amenity_merge: dict[str, Any] | None = None,
     *,
     hashes,
     build_profile: str,
@@ -396,6 +462,12 @@ def summary_json_impl(
     }
     if coastal_cleanup is not None:
         payload["coastal_cleanup"] = coastal_cleanup
+    amenity_merge_summary = _amenity_merge_summary(
+        amenity_merge,
+        amenity_source_row_count=len(amenity_source_rows or []),
+    )
+    if amenity_merge_summary is not None:
+        payload["amenity_merge"] = amenity_merge_summary
     if transit_reality_state is not None:
         _tc = _transport_summary_counts(transport_reality_rows)
         payload.update(

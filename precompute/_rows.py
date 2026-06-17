@@ -400,6 +400,7 @@ def _summary_json(
     noise_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     coastal_cleanup = _study_area.get_last_coastal_cleanup_summary()
+    amenity_merge = _STATE.amenity_merge_stats
     return _publish.summary_json_impl(
         study_area_wgs84,
         walk_grids,
@@ -408,6 +409,7 @@ def _summary_json(
         transport_reality_rows=transport_reality_rows,
         noise_rows=noise_rows,
         coastal_cleanup=coastal_cleanup,
+        amenity_merge=amenity_merge,
         hashes=_STATE.hashes,
         build_profile=_STATE.profile,
         source_state=_STATE.source_state,
