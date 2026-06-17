@@ -44,6 +44,7 @@
 - **Frontend grid diagnostics helper**: `frontend/src/grid_debug.js`
 - **Served frontend bundle**: `static/dist/`
 - **Human docs / design notes**: `README.md`, `docs/*.md`
+- **Read-only DB integrity preflight**: `scripts/db_integrity_check.py` and `tests/test_db_integrity_check.py`; checks logical duplicate groups before future PK/unique/FK constraints and deliberately skips `amenities` as ambiguous.
 
 ---
 
@@ -680,6 +681,7 @@ Representative tests confirmed present:
 | `tests/test_transit_phase1.py` | GTFS-first transit reality rows, weekly bus subtiers, bus daytime headway buckets, frequency departure windows, transport score units, exact local GTFS snapshot stop regressions for each bus-tier bucket plus strict exception-only / unscheduled examples, exports, school-only classification, `gtfs-refresh` artifact loading |
 | `tests/test_surface_runtime.py` | fine-surface runtime behavior |
 | `tests/test_sanity_check.py` | sanity fixture structure and runtime lookup mode selection |
+| `tests/test_db_integrity_check.py` | duplicate-detection reporting, missing-table handling, and ambiguous-key skipping for future constraint preflight |
 | `frontend/src/runtime_contract.test.js` | frontend runtime contract parsing, score-layer label/expression mapping, separate noise vector source wiring, active fill/outline grid layer definitions, lifecycle rebuild decisions, explicit visibility plans, the transport rail/tram styling priority, and the single active debug-grid filter path |
 | `frontend/src/grid_debug.test.js` | persistent grid debug card rendering, diagnosis states, resolution display updates, and copyable snapshot formatting |
 | `frontend/src/transport_filters.test.js` | public transport filter logic including weekly bus tiers, exact rail/tram mode matching, and exception-only intersection logic |
