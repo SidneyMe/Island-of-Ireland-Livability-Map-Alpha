@@ -1362,6 +1362,13 @@ class AmenityPhaseIntegrationTests(TestCase):
 
 
 class PrecomputeReachabilityTests(TestCase):
+    def test_activate_clears_amenity_merge_diagnostics(self) -> None:
+        precompute._STATE.amenity_merge_stats = {"stale": True}
+
+        precompute._STATE.activate("import-fingerprint-new", profile="dev")
+
+        self.assertIsNone(precompute._STATE.amenity_merge_stats)
+
     def test_snap_amenities_uses_compact_vertex_ids(self) -> None:
         graph = _FakeGraph({})
         amenity_data = {

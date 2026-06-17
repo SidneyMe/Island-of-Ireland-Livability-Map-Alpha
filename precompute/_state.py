@@ -75,6 +75,9 @@ class _BuildState:
     ) -> None:
         self.profile = normalize_build_profile(profile)
         self.settings = build_profile_settings(self.profile)
+        # Reset per-build diagnostics so a failed or skipped amenity phase does not
+        # leak the previous run's merge summary into the next manifest summary.
+        self.amenity_merge_stats = None
         self.hashes = build_hashes_for_import(
             import_fingerprint,
             transit_reality_fingerprint=transit_reality_fingerprint,
