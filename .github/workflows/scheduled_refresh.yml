@@ -11,11 +11,18 @@ on:
         default: 'false'
         type: boolean
 
+concurrency:
+  group: scheduled-osm-refresh
+  cancel-in-progress: false
+
 jobs:
   refresh:
+    timeout-minutes: 240
     # Full precompute requires PostGIS, osm2pgsql, the walkgraph binary,
     # and ~1 GB disk for the OSM extract. Configure a self-hosted runner
     # with these prerequisites and register it in your repository settings.
+    # No dedicated runner label is documented in the repo yet, so keep the
+    # generic self-hosted label here until one is explicitly added.
     runs-on: self-hosted
 
     env:

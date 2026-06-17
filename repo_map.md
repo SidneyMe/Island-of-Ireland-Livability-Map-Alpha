@@ -75,6 +75,7 @@
 ### `.github/workflows/scheduled_refresh.yml`
 
 - Weekly self-hosted workflow. (Confirmed)
+- Uses workflow-level concurrency so scheduled and manual refresh runs do not overlap, and a 240-minute job timeout to keep long refresh/precompute runs bounded. It still uses generic `self-hosted` because no dedicated runner label is documented yet. (Confirmed)
 - Runs:
   - `python scripts/refresh_osm.py`
   - `python main.py --refresh-transit`
