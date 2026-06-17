@@ -82,7 +82,7 @@
 ### `.github/workflows/scheduled_refresh.yml`
 
 - Weekly self-hosted workflow. (Confirmed)
-- Uses workflow-level concurrency so scheduled and manual refresh runs do not overlap, and a 240-minute job timeout to keep long refresh/precompute runs bounded. It still uses generic `self-hosted` because no dedicated runner label is documented yet. (Confirmed)
+- Uses workflow-level concurrency so scheduled and manual refresh runs do not overlap, and a 240-minute job timeout to keep long refresh/precompute runs bounded. The OSM force flag is expanded without bash-only syntax so the workflow stays portable across an undocumented self-hosted runner OS. (Confirmed)
 - Runs:
   - `python scripts/refresh_osm.py`
   - `python main.py --refresh-transit`
@@ -92,6 +92,7 @@
 ### `.github/workflows/ci.yml`
 
 - Push / PR validation workflow. (Confirmed)
+- Uses an explicit `pwsh` default shell on the Windows job so the PowerShell bundle freshness check is unambiguous. (Confirmed)
 - Runs:
   - `npm ci` in `frontend/` using `frontend/package-lock.json`
   - `npm test` and `npm run build` in `frontend/`

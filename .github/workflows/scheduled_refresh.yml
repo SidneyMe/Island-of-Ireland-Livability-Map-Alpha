@@ -41,10 +41,9 @@ jobs:
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
       - name: Download latest OSM extract
-        run: |
-          FLAGS=""
-          if [ "${{ github.event.inputs.force }}" = "true" ]; then FLAGS="--force"; fi
-          python scripts/refresh_osm.py $FLAGS
+        # Keep the force flag expansion shell-neutral so this workflow remains
+        # portable across self-hosted runner OSes.
+        run: python scripts/refresh_osm.py${{ github.event.inputs.force == 'true' && ' --force' || '' }}
 
       - name: Run precompute
         run: |
