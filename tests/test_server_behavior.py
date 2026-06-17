@@ -150,6 +150,16 @@ def _make_fixture(tmp: Path, pmtiles_bytes: bytes = b"PMTILESFAKE" * 32) -> tupl
     return static_dir, pmtiles_path
 
 
+def _make_validating_runtime_service() -> tuple[serve_from_db.RuntimeService, mock.Mock, mock.Mock]:
+    service = serve_from_db.RuntimeService(mock.sentinel.engine)
+    runtime = mock.Mock()
+    state = mock.Mock()
+    state.fine_resolutions = [2500, 1000, 500, 250, 100, 50]
+    service.state = mock.Mock(return_value=state)
+    service.surface_runtime = mock.Mock(return_value=runtime)
+    return service, runtime, state
+
+
 class LocalServerEndpointTests(TestCase):
     def test_client_disconnect_logging_suppresses_inspect_abort_noise(self) -> None:
         handler = serve_from_db.LivabilityRequestHandler.__new__(serve_from_db.LivabilityRequestHandler)
@@ -381,6 +391,27 @@ class LocalServerEndpointTests(TestCase):
         self.assertEqual(payload["effective_units"], {"shops": 1.5})
         self.assertIn(("inspect", 53.4, -6.2, 15.0), service.calls)
 
+    def test_inspect_endpoint_rejects_invalid_coordinates(self) -> None:
+        service, runtime, _state = _make_validating_runtime_service()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                bad_queries = [
+                    "lat=nan&lon=-6.2",
+                    "lat=inf&lon=-6.2",
+                    "lat=999&lon=-6.2",
+                    "lat=53.4&lon=-999",
+                    "lat=53.4&lon=-6.2&zoom=-1",
+                    "lat=53.4&lon=-6.2&zoom=999",
+                ]
+                for query in bad_queries:
+                    with self.subTest(query=query):
+                        with self.assertRaises(HTTPError) as ctx:
+                            urlopen(base_url + "/api/inspect?" + query)
+                        self.assertEqual(ctx.exception.code, 400)
+
+        runtime.inspect.assert_not_called()
+
     def test_surface_tile_endpoint_returns_404_when_fine_surface_disabled(self) -> None:
         service = _DisabledFineService()
         with TemporaryDirectory() as tmp_name:
@@ -390,6 +421,28 @@ class LocalServerEndpointTests(TestCase):
                     urlopen(base_url + "/tiles/surface/250/15/3/4.png")
 
         self.assertEqual(ctx.exception.code, 404)
+
+    def test_surface_tile_endpoint_rejects_invalid_coordinates(self) -> None:
+        service, runtime, _state = _make_validating_runtime_service()
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
+            with _ServerHarness(service, pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                bad_paths = [
+                    "/tiles/surface/123/15/3/4.png",
+                    "/tiles/surface/250/-1/3/4.png",
+                    "/tiles/surface/250/20/0/0.png",
+                    "/tiles/surface/250/15/3.5/4.png",
+                    "/tiles/surface/250/15/32768/4.png",
+                    "/tiles/surface/250/15/3/-1.png",
+                    "/tiles/surface/250/15/3/32768.png",
+                ]
+                for path in bad_paths:
+                    with self.subTest(path=path):
+                        with self.assertRaises(HTTPError) as ctx:
+                            urlopen(base_url + path)
+                        self.assertEqual(ctx.exception.code, 400)
+
+        runtime.render_tile.assert_not_called()
 
     def test_inspect_endpoint_returns_404_when_fine_surface_disabled(self) -> None:
         service = _DisabledFineService()
@@ -418,6 +471,59 @@ class LocalServerEndpointTests(TestCase):
                     static_dir=static_dir,
                     pmtiles_path=missing_pmtiles_path,
                 )
+
+
+class RuntimeValidationTests(TestCase):
+    def test_runtime_service_rejects_invalid_inspect_values_before_rendering(self) -> None:
+        service, runtime, _state = _make_validating_runtime_service()
+        bad_cases = [
+            {"lat": float("nan"), "lon": -6.2},
+            {"lat": float("inf"), "lon": -6.2},
+            {"lat": 999, "lon": -6.2},
+            {"lat": 53.4, "lon": -999},
+            {"lat": 53.4, "lon": -6.2, "zoom": -1},
+            {"lat": 53.4, "lon": -6.2, "zoom": 999},
+        ]
+        for kwargs in bad_cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    service.inspect(**kwargs)
+
+        runtime.inspect.assert_not_called()
+
+    def test_runtime_service_rejects_invalid_surface_tile_values_before_rendering(self) -> None:
+        service, runtime, _state = _make_validating_runtime_service()
+        bad_cases = [
+            {"resolution_m": 123, "z": 15, "x": 3, "y": 4},
+            {"resolution_m": 250, "z": -1, "x": 0, "y": 0},
+            {"resolution_m": 250, "z": 20, "x": 0, "y": 0},
+            {"resolution_m": 250, "z": 15.5, "x": 0, "y": 0},
+            {"resolution_m": 250, "z": 15, "x": -1, "y": 0},
+            {"resolution_m": 250, "z": 15, "x": 32768, "y": 0},
+            {"resolution_m": 250, "z": 15, "x": 0, "y": -1},
+            {"resolution_m": 250, "z": 15, "x": 0, "y": 32768},
+            {"resolution_m": 250, "z": 15, "x": 3.5, "y": 4},
+            {"resolution_m": 250, "z": 15, "x": 3, "y": 4.5},
+        ]
+        for kwargs in bad_cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    service.get_surface_tile(**kwargs)
+
+        runtime.render_tile.assert_not_called()
+
+    def test_runtime_service_allows_valid_surface_tile_and_inspect_requests(self) -> None:
+        service, runtime, _state = _make_validating_runtime_service()
+        runtime.render_tile.return_value = b"png"
+        runtime.inspect.return_value = {"ok": True}
+
+        tile_payload = service.get_surface_tile(resolution_m=250, z=15, x=3, y=4)
+        inspect_payload = service.inspect(lat=53.4, lon=-6.2, zoom=15)
+
+        self.assertEqual(tile_payload, b"png")
+        self.assertEqual(inspect_payload, {"ok": True})
+        runtime.render_tile.assert_called_once_with(resolution_m=250, z=15, x=3, y=4)
+        runtime.inspect.assert_called_once_with(lat=53.4, lon=-6.2, zoom=15.0)
 
 
 class RenderAndCliTests(TestCase):

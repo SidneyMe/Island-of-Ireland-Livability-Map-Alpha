@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import math
 import mimetypes
 import os
 import re
@@ -45,8 +46,56 @@ INDEX_HTML_PATH = STATIC_DIR / "index.html"
 MISSING_PRECOMPUTE_MESSAGE = "No PostGIS precompute found for current config"
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionResetError)
 RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
-SURFACE_TILE_RE = re.compile(r"^/tiles/surface/(\d+)/(\d+)/(\d+)/(\d+)\.png$")
+SURFACE_TILE_RE = re.compile(r"^/tiles/surface/([^/]+)/([^/]+)/([^/]+)/([^/]+)\.png$")
 RUNTIME_STALE_FALLBACK_ENV = "LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME"
+
+
+def _require_finite_float(raw_value: Any, *, field_name: str) -> float:
+    if isinstance(raw_value, bool):
+        raise ValueError(f"{field_name} must be numeric")
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field_name} must be numeric") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite")
+    return value
+
+
+def _require_finite_float_in_range(
+    raw_value: Any,
+    *,
+    field_name: str,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = _require_finite_float(raw_value, field_name=field_name)
+    if value < minimum or value > maximum:
+        raise ValueError(f"{field_name} must be between {minimum} and {maximum}")
+    return value
+
+
+def _require_exact_int(raw_value: Any, *, field_name: str) -> int:
+    value = _require_finite_float(raw_value, field_name=field_name)
+    integer_value = int(value)
+    if float(integer_value) != value:
+        raise ValueError(f"{field_name} must be an integer")
+    return integer_value
+
+
+def _require_tile_coordinates(z: Any, x: Any, y: Any) -> tuple[int, int, int]:
+    tile_z = _require_exact_int(z, field_name="tile z")
+    if tile_z < 0 or tile_z > SURFACE_MAX_ZOOM:
+        raise ValueError(f"tile z must be between 0 and {SURFACE_MAX_ZOOM}")
+
+    max_tile_coord = (1 << tile_z) - 1
+    tile_x = _require_exact_int(x, field_name="tile x")
+    tile_y = _require_exact_int(y, field_name="tile y")
+    if tile_x < 0 or tile_x > max_tile_coord:
+        raise ValueError(f"tile x must be between 0 and {max_tile_coord} for zoom {tile_z}")
+    if tile_y < 0 or tile_y > max_tile_coord:
+        raise ValueError(f"tile y must be between 0 and {max_tile_coord} for zoom {tile_z}")
+    return tile_z, tile_x, tile_y
 
 
 def _env_truthy(name: str) -> bool:
@@ -639,18 +688,43 @@ class RuntimeService:
         return self._surface_runtime
 
     def get_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> bytes:
-        normalized_resolution = int(resolution_m)
+        normalized_resolution = _require_exact_int(resolution_m, field_name="resolution_m")
         if normalized_resolution not in self.state().fine_resolutions:
             raise ValueError(f"Unsupported fine surface resolution: {resolution_m}")
+        tile_z, tile_x, tile_y = _require_tile_coordinates(z, x, y)
         return self.surface_runtime().render_tile(
             resolution_m=normalized_resolution,
-            z=int(z),
-            x=int(x),
-            y=int(y),
+            z=tile_z,
+            x=tile_x,
+            y=tile_y,
         )
 
     def inspect(self, *, lat: float, lon: float, zoom: float | None = None) -> dict[str, Any]:
-        return self.surface_runtime().inspect(lat=float(lat), lon=float(lon), zoom=zoom)
+        normalized_lat = _require_finite_float_in_range(
+            lat,
+            field_name="inspect lat",
+            minimum=-90.0,
+            maximum=90.0,
+        )
+        normalized_lon = _require_finite_float_in_range(
+            lon,
+            field_name="inspect lon",
+            minimum=-180.0,
+            maximum=180.0,
+        )
+        normalized_zoom = None
+        if zoom is not None:
+            normalized_zoom = _require_finite_float_in_range(
+                zoom,
+                field_name="inspect zoom",
+                minimum=0.0,
+                maximum=float(SURFACE_MAX_ZOOM),
+            )
+        return self.surface_runtime().inspect(
+            lat=normalized_lat,
+            lon=normalized_lon,
+            zoom=normalized_zoom,
+        )
 
 
 class LivabilityHTTPServer(ThreadingHTTPServer):
