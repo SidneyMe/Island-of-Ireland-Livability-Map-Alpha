@@ -264,6 +264,12 @@ class TransitGtfsParsingTests(TestCase):
         self.assertEqual(dataset.calendar_services, {})
         self.assertEqual(len(dataset.calendar_dates), 1)
         self.assertEqual(dataset.calendar_dates[0].service_id, "SVC1")
+        self.assertEqual(dataset.raw_stop_rows, [])
+        self.assertEqual(dataset.raw_route_rows, [])
+        self.assertEqual(dataset.raw_trip_rows, [])
+        self.assertEqual(dataset.raw_stop_time_rows, [])
+        self.assertEqual(dataset.raw_calendar_rows, [])
+        self.assertEqual(dataset.raw_calendar_date_rows, [])
 
     def test_parse_gtfs_zip_accepts_calendar_only_feed(self) -> None:
         with TemporaryDirectory() as tmp_name:
@@ -972,6 +978,11 @@ class TransitWorkflowTests(TestCase):
     "Local NTA GTFS snapshot is required for exact stop regression checks.",
 )
 class TransitSnapshotNtaRegressionTests(TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.addClassCleanup(_snapshot_rows_by_stop.cache_clear)
+
     def _row(self, stop_id: str) -> GtfsStopReality:
         rows = _snapshot_rows_by_stop("nta", str(NTA_GTFS_SNAPSHOT_PATH), SNAPSHOT_ANALYSIS_DATE.isoformat())
         return rows[stop_id]
@@ -1016,6 +1027,11 @@ class TransitSnapshotNtaRegressionTests(TestCase):
     "Local Translink GTFS snapshot is required for exact stop regression checks.",
 )
 class TransitSnapshotTranslinkRegressionTests(TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        super().setUpClass()
+        cls.addClassCleanup(_snapshot_rows_by_stop.cache_clear)
+
     def _row(self, stop_id: str) -> GtfsStopReality:
         rows = _snapshot_rows_by_stop(
             "translink",

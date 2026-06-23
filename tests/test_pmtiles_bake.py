@@ -598,6 +598,11 @@ class PmtilesBakeReliabilityTests(TestCase):
             )
             with (
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
+                mock.patch.object(
+                    bake_pmtiles,
+                    "database_url",
+                    return_value="postgresql+psycopg://test:test@localhost/test",
+                ) as db_url_mock,
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
@@ -625,6 +630,7 @@ class PmtilesBakeReliabilityTests(TestCase):
                 self.assertTrue(output_path.exists())
 
         self.assertEqual(result, output_path)
+        self.assertEqual(db_url_mock.call_count, 2)
         self.assertEqual(
             [call.kwargs["workers"] for call in parallel_mock.call_args_list],
             [4, 2],
@@ -673,6 +679,11 @@ class PmtilesBakeReliabilityTests(TestCase):
             )
             with (
                 mock.patch.object(bake_pmtiles, "Writer", _FakeWriter),
+                mock.patch.object(
+                    bake_pmtiles,
+                    "database_url",
+                    return_value="postgresql+psycopg://test:test@localhost/test",
+                ) as db_url_mock,
                 mock.patch.object(bake_pmtiles, "_load_amenity_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_transport_reality_points", return_value=[]),
                 mock.patch.object(bake_pmtiles, "_load_noise_bounds", return_value=[]),
@@ -701,6 +712,7 @@ class PmtilesBakeReliabilityTests(TestCase):
 
             self.assertEqual(output_path.read_bytes(), b"old-archive")
             self.assertFalse(temp_output_path.exists())
+            self.assertEqual(db_url_mock.call_count, 2)
 
     def test_bake_pmtiles_failure_cleans_temp_output_and_preserves_final_archive(self) -> None:
         class _FakeWriter:

@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-06-17. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-06-22. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -100,6 +100,12 @@
   - `python -m unittest discover -s tests -t . -p "test_*.py"`
   - `cargo test --manifest-path walkgraph/Cargo.toml`
   - `python scripts/sanity_check.py --validate-only`
+
+### `scripts/ci_local.ps1`
+
+- Local Windows PowerShell CI runner for pre-push checks. (Confirmed)
+- Runs the practical developer-facing sequence: command availability checks for `python`, `npm.cmd`, and `git`; `python -m pytest -q`; `python -m alembic current`; `python -m alembic upgrade head`; `python scripts/db_integrity_check.py`; `python main.py --precompute-dev --explain`; `npm.cmd test --prefix frontend`; `npm.cmd run build --prefix frontend`; `git diff --exit-code -- static/dist`; and `git diff --check`. (Confirmed)
+- Stops on the first failure, prints section headers, and reports elapsed time per step. (Confirmed)
 
 ### `scripts/sanity_check.py`
 

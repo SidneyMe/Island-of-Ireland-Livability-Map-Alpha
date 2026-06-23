@@ -6,8 +6,6 @@ from io import TextIOWrapper
 from pathlib import Path
 from zipfile import ZipFile
 
-from shapely.geometry import Point
-
 from config import (
     GTFS_SCHOOL_AM_END_HOUR,
     GTFS_SCHOOL_AM_START_HOUR,
@@ -205,25 +203,6 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
                 platform_code=_optional_text(row, "platform_code"),
             )
             dataset.stops[stop_id] = stop_info
-            dataset.raw_stop_rows.append(
-                {
-                    "feed_fingerprint": dataset.feed_fingerprint,
-                    "feed_id": dataset.feed_id,
-                    "stop_id": stop_id,
-                    "stop_code": stop_info.stop_code,
-                    "stop_name": stop_name,
-                    "stop_desc": stop_info.stop_desc,
-                    "stop_lat": stop_lat,
-                    "stop_lon": stop_lon,
-                    "parent_station": stop_info.parent_station,
-                    "zone_id": stop_info.zone_id,
-                    "location_type": stop_info.location_type,
-                    "wheelchair_boarding": stop_info.wheelchair_boarding,
-                    "platform_code": stop_info.platform_code,
-                    "geom": Point(stop_lon, stop_lat),
-                    "created_at": created_at,
-                }
-            )
 
         for row in _csv_rows(zip_file, "routes.txt"):
             route_id = _required_text(row, "route_id", file_name="routes.txt")
@@ -240,22 +219,6 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
                 route_text_color=_optional_text(row, "route_text_color"),
             )
             dataset.routes[route_id] = route_info
-            dataset.raw_route_rows.append(
-                {
-                    "feed_fingerprint": dataset.feed_fingerprint,
-                    "feed_id": dataset.feed_id,
-                    "route_id": route_id,
-                    "agency_id": route_info.agency_id,
-                    "route_short_name": route_info.route_short_name,
-                    "route_long_name": route_info.route_long_name,
-                    "route_desc": route_info.route_desc,
-                    "route_type": route_info.route_type,
-                    "route_url": route_info.route_url,
-                    "route_color": route_info.route_color,
-                    "route_text_color": route_info.route_text_color,
-                    "created_at": created_at,
-                }
-            )
 
         for row in _csv_rows(zip_file, "trips.txt"):
             trip_id = _required_text(row, "trip_id", file_name="trips.txt")
@@ -273,21 +236,6 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
                 shape_id=_optional_text(row, "shape_id"),
             )
             dataset.trips[trip_id] = trip_info
-            dataset.raw_trip_rows.append(
-                {
-                    "feed_fingerprint": dataset.feed_fingerprint,
-                    "feed_id": dataset.feed_id,
-                    "route_id": route_id,
-                    "service_id": service_id,
-                    "trip_id": trip_id,
-                    "trip_headsign": trip_info.trip_headsign,
-                    "trip_short_name": trip_info.trip_short_name,
-                    "direction_id": trip_info.direction_id,
-                    "block_id": trip_info.block_id,
-                    "shape_id": trip_info.shape_id,
-                    "created_at": created_at,
-                }
-            )
 
             route_info = dataset.routes.get(route_id)
             if route_info is not None:
@@ -327,23 +275,6 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
                     end_date=_required_date(row, "end_date", file_name="calendar.txt"),
                 )
                 dataset.calendar_services[service_id] = calendar_service
-                dataset.raw_calendar_rows.append(
-                    {
-                        "feed_fingerprint": dataset.feed_fingerprint,
-                        "feed_id": dataset.feed_id,
-                        "service_id": service_id,
-                        "monday": calendar_service.monday,
-                        "tuesday": calendar_service.tuesday,
-                        "wednesday": calendar_service.wednesday,
-                        "thursday": calendar_service.thursday,
-                        "friday": calendar_service.friday,
-                        "saturday": calendar_service.saturday,
-                        "sunday": calendar_service.sunday,
-                        "start_date": calendar_service.start_date,
-                        "end_date": calendar_service.end_date,
-                        "created_at": created_at,
-                    }
-                )
 
         if calendar_member_names["calendar_dates.txt"] is not None:
             for row in _csv_rows(zip_file, "calendar_dates.txt"):
@@ -354,16 +285,6 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
                     exception_type=int(_required_text(row, "exception_type", file_name="calendar_dates.txt")),
                 )
                 dataset.calendar_dates.append(exception)
-                dataset.raw_calendar_date_rows.append(
-                    {
-                        "feed_fingerprint": dataset.feed_fingerprint,
-                        "feed_id": dataset.feed_id,
-                        "service_id": exception.service_id,
-                        "service_date": exception.service_date,
-                        "exception_type": exception.exception_type,
-                        "created_at": created_at,
-                    }
-                )
 
         for row in _csv_rows(zip_file, "stop_times.txt"):
             trip_id = _required_text(row, "trip_id", file_name="stop_times.txt")
@@ -405,19 +326,5 @@ def parse_gtfs_zip(feed_state: TransitFeedState) -> FeedDataset:
                 {"morning": 0, "afternoon": 0, "offpeak": 0},
             )
             bucket_counts[bucket] += 1
-            dataset.raw_stop_time_rows.append(
-                {
-                    "feed_fingerprint": dataset.feed_fingerprint,
-                    "feed_id": dataset.feed_id,
-                    "trip_id": trip_id,
-                    "arrival_seconds": arrival_seconds,
-                    "departure_seconds": departure_seconds,
-                    "stop_id": stop_id,
-                    "stop_sequence": stop_sequence,
-                    "pickup_type": _optional_int(row, "pickup_type", file_name="stop_times.txt"),
-                    "drop_off_type": _optional_int(row, "drop_off_type", file_name="stop_times.txt"),
-                    "created_at": created_at,
-                }
-            )
 
     return dataset
