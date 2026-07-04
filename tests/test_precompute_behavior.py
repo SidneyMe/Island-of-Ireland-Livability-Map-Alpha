@@ -3064,6 +3064,22 @@ class WorkflowTests(TestCase):
         self.assertNotIn("drive_rows", publish_kwargs)
         self.assertNotIn("hotspot_rows", publish_kwargs)
 
+    def test_service_deserts_are_written_after_manifest_publish(self) -> None:
+        call_order: list[str] = []
+        kwargs = _workflow_kwargs(
+            phase_grids=mock.Mock(return_value={1000: []}),
+            publish_precomputed_artifacts=mock.Mock(
+                side_effect=lambda *args, **kwargs: call_order.append("publish")
+            ),
+            compute_service_deserts=mock.Mock(
+                side_effect=lambda *args, **kwargs: call_order.append("service_deserts")
+            ),
+        )
+
+        precompute._workflow.run_precompute_impl(force_precompute=True, **kwargs)
+
+        self.assertEqual(call_order, ["publish", "service_deserts"])
+
     def test_refresh_local_import_workflow_runs_import_without_full_scoring(self) -> None:
         kwargs = _workflow_kwargs(import_payload_ready=mock.Mock(return_value=False))
 

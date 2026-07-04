@@ -780,43 +780,35 @@ def _store_extract_fingerprint_cache(
 
 
 def gtfs_static_feed_configs() -> tuple[TransitFeedConfig, ...]:
-    default_cache_root = CACHE_DIR / "gtfs"
+    default_feed_root = BASE_DIR / "gtfs"
     return (
         TransitFeedConfig(
-            feed_id="tfi_gtfs_all",
-            label="Transport for Ireland GTFS All",
+            feed_id="nta",
+            label="NTA GTFS",
             zip_path=Path(
                 os.getenv(
-                    "GTFS_TFI_ALL_ZIP_PATH",
-                    default_cache_root / "tfi_gtfs_all" / "current.zip",
+                    "GTFS_NTA_ZIP_PATH",
+                    default_feed_root / "nta_gtfs.zip",
                 )
             ),
-            url=(
-                os.getenv("GTFS_TFI_ALL_URL")
-                or "https://www.transportforireland.ie/transitData/Data/GTFS_All.zip"
-            ).strip()
-            or None,
+            url=(os.getenv("GTFS_NTA_URL") or "").strip() or None,
             enabled=True,
             priority=10,
             use_for_transit=True,
         ),
         TransitFeedConfig(
-            feed_id="tfi_gtfs_realtime_static",
-            label="Transport for Ireland GTFS Realtime Static",
+            feed_id="translink",
+            label="Translink GTFS",
             zip_path=Path(
                 os.getenv(
-                    "GTFS_TFI_REALTIME_STATIC_ZIP_PATH",
-                    default_cache_root / "tfi_gtfs_realtime_static" / "current.zip",
+                    "GTFS_TRANSLINK_ZIP_PATH",
+                    default_feed_root / "translink_gtfs.zip",
                 )
             ),
-            url=(
-                os.getenv("GTFS_TFI_REALTIME_STATIC_URL")
-                or "https://www.transportforireland.ie/transitData/Data/GTFS_Realtime.zip"
-            ).strip()
-            or None,
+            url=(os.getenv("GTFS_TRANSLINK_URL") or "").strip() or None,
             enabled=True,
             priority=20,
-            use_for_transit=False,
+            use_for_transit=True,
         ),
     )
 

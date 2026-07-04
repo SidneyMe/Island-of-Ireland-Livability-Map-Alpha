@@ -82,16 +82,16 @@ class DatabaseUrlTests(TestCase):
 
 
 class ConfigHashTests(TestCase):
-    def test_gtfs_static_feed_configs_include_tfi_public_feeds(self) -> None:
+    def test_gtfs_static_feed_configs_include_active_public_feeds(self) -> None:
         self.assertEqual(
             [feed.feed_id for feed in config.gtfs_static_feed_configs()],
-            ["tfi_gtfs_all", "tfi_gtfs_realtime_static"],
+            ["nta", "translink"],
         )
 
-    def test_transit_feed_configs_use_gtfs_all_only_by_default(self) -> None:
+    def test_transit_feed_configs_use_nta_and_translink_by_default(self) -> None:
         self.assertEqual(
             [feed.feed_id for feed in config.transit_feed_configs()],
-            ["tfi_gtfs_all"],
+            ["nta", "translink"],
         )
 
     def test_transit_config_hash_inputs_follow_transit_feed_configs(self) -> None:
@@ -102,7 +102,7 @@ class ConfigHashTests(TestCase):
         payload = hash_mock.call_args.args[0]
         self.assertEqual(
             [feed["feed_id"] for feed in payload["feeds"]],
-            ["tfi_gtfs_all"],
+            ["nta", "translink"],
         )
 
     def test_build_transit_reality_state_uses_selected_transit_feed(self) -> None:
@@ -114,12 +114,13 @@ class ConfigHashTests(TestCase):
 
         self.assertEqual(
             [feed.feed_id for feed in state.feed_states],
-            ["tfi_gtfs_all"],
+            ["nta", "translink"],
         )
         self.assertEqual(
             state.feed_fingerprints,
             {
-                "tfi_gtfs_all": "fp-current.zip",
+                "nta": "fp-current.zip",
+                "translink": "fp-current.zip",
             },
         )
 

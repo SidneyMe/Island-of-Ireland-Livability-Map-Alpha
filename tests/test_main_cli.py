@@ -516,7 +516,7 @@ class MainCliTests(TestCase):
 
     def test_refresh_gtfs_status_dispatches_status_runner(self) -> None:
         status_row = SimpleNamespace(
-            feed_id="tfi_gtfs_all",
+            feed_id="nta",
             path="/tmp/current.zip",
             sha256="abc",
             downloaded_at_utc="2026-05-26T00:00:00Z",

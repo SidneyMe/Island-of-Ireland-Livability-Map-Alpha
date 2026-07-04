@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-06-22. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-06-29. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -8,10 +8,11 @@
 
 - Offline-first pipeline that scores grid cells across the island of Ireland for livability using walk access to `shops`, `transport`, `healthcare`, and `parks`. (Confirmed)
 - Shops, healthcare, and parks now use tiered score units instead of flat presence counts. Examples: corner shop vs supermarket, clinic vs emergency hospital, pocket park vs regional park. (Confirmed)
-- Ingests local OSM PBF via `osm2pgsql`, cache-managed public static GTFS ZIP feeds (default active transit input: `tfi_gtfs_all`), and optionally an Overture Places geoparquet dataset. (Confirmed)
+- Ingests local OSM PBF via `osm2pgsql`, cache-managed public static GTFS ZIP feeds (default active transit inputs: `nta` and `translink`), and optionally an Overture Places geoparquet dataset. (Confirmed)
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
+- Current live transit config in `config.py` now wires the active `nta` and `translink` GTFS feeds, matching the README/tests and restoring Northern Ireland transport coverage in the published transport layer. (Confirmed)
 - Adds a display-only transport/industry noise overlay (Phase E: roads + rail + airport + industry, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport/industry use resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
 - Uses layered content hashes so changes to geometry, scoring params, GTFS feeds, Overture data, or importer config only invalidate the affected cache tiers. (Confirmed)
 - Alpha-stage: amenity tiering, Overture merge, service deserts, and the new fine vector grid / inspect-backed surface path are still moving. (Inference from recent migrations, tests, and docs)
@@ -66,6 +67,7 @@
   - `--force-gtfs-refresh` -> only valid with `--refresh-gtfs` / `--refresh-transit`; forces GTFS ZIP re-download
   - `--refresh-transit` -> `transit_refresh_runner.refresh_transit()`
   - `--force-transit-refresh` -> same path, but only valid with `--refresh-transit`
+- `--refresh-transit` reuses the existing GTFS cache by default; automatic feed download only happens with `--auto-refresh-gtfs` or `--force-gtfs-refresh`, and a missing cache still fails fast. (Confirmed)
 - `--precompute` / `--precompute-dev` / `--precompute-test` -> `precompute.run_precompute(profile="full"|"dev"|"test")`
   - `--explain` / `--precompute-explain` with a precompute profile -> prints the planner decision tree without entering the expensive execution phases
   - `--force-precompute` -> only valid with `--precompute` / `--precompute-dev` / `--precompute-test`
@@ -346,6 +348,7 @@ Notes:
 
 - Purpose: PMTiles bake orchestrator and layer metadata owner. (Confirmed)
 - Why it matters: owns `GRID_AMENITY_CATEGORIES`, `_pmtiles_metadata()`, the z15 source-zoom cap, and the sparse fine-grid tile-spec planner that stitches coarse SQL tiles together with fine vector grid tiles. Noise is no longer declared or baked into the main livability archive. It also bounds parallel in-flight work, clamps fine-grid bakes to 4 workers, retries once at half workers after `BrokenProcessPool`, and only replaces the final PMTiles archive after a successful temp-file finalize. Tests import these directly. (Confirmed)
+- Windows can still fail here with `could not load library "postgis-3.dll": The paging file is too small for this operation to complete` when too many parallel bake workers hit PostGIS at once; that is an OS memory/pagefile limit, not a missing DLL. (Confirmed)
 - The amenities layer metadata declares `category`, `tier`, `name`, and `conflict_class`. (Confirmed from tests and code)
 - The transport layer metadata now declares weekly bus subtier / mask fields, bus daytime frequency fields, comma-separated `route_modes`, numeric `0/1` transport flags, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`; the frontend uses `route_modes` for exact rail/tram filtering and `bus_frequency_tier` for bus-frequency filtering, and the worker SQL emits one feature per published `transport_reality` row instead of grouping same-name same-coordinate stops. (Confirmed from code and tests)
 - The `grid` source-layer now carries both coarse and fine features, with fine rows padded with zero-valued popup numerics so metadata and popup consumers stay schema-stable. (Confirmed from code and tests)
@@ -580,9 +583,9 @@ tests/test_server_behavior.py
 |---|---|---|
 | `DATABASE_URL` | Full SQLAlchemy / PostGIS connection string; default `connect_timeout=15` is appended when absent | None |
 | `POSTGRES_HOST`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT` | DB fallback parts; rendered through the same default `connect_timeout=15` SQLAlchemy URL | None |
-| `GTFS_TFI_ALL_ZIP_PATH` | Cache path for `tfi_gtfs_all` static ZIP | `.livability_cache/gtfs/tfi_gtfs_all/current.zip` |
-| `GTFS_TFI_REALTIME_STATIC_ZIP_PATH` | Cache path for `tfi_gtfs_realtime_static` static ZIP | `.livability_cache/gtfs/tfi_gtfs_realtime_static/current.zip` |
-| `GTFS_TFI_ALL_URL`, `GTFS_TFI_REALTIME_STATIC_URL` | Public static GTFS ZIP URLs (override-able) | TFI public ZIP URLs in `config.py` |
+| `GTFS_NTA_ZIP_PATH` | Default zip path for `nta` static feed | `gtfs/nta_gtfs.zip` |
+| `GTFS_TRANSLINK_ZIP_PATH` | Default zip path for `translink` static feed | `gtfs/translink_gtfs.zip` |
+| `GTFS_NTA_URL`, `GTFS_TRANSLINK_URL` | Public GTFS ZIP URLs (override-able) | unset by default; set explicitly when refreshing from network |
 | `GTFS_ANALYSIS_WINDOW_DAYS` | Transit analysis window | `30` |
 | `GTFS_SERVICE_DESERT_WINDOW_DAYS` | Service-desert window | `7` |
 | `GTFS_LOOKAHEAD_DAYS` | Transit lookahead window | `14` |
@@ -619,6 +622,7 @@ tests/test_server_behavior.py
 | `scripts/win/bootstrap_geo_env.cmd` | Windows first-time setup wrapper: activates conda base, creates `%GEO_CONDA_ENV%` from `environment.yml` via mamba when missing, then runs env checks |
 | `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
 | `scripts/win/selftest_geo_env.cmd` | Windows post-check smoke script for `ogr2ogr` path, GDAL/PROJ env vars, PostgreSQL GDAL driver, and core Python imports |
+| `scripts/win/precompute_dev.cmd` | Windows dev precompute wrapper that routes `python main.py --precompute-dev` through `geo_env.cmd` and the conda-backed `livability-gdal` Python |
 | `scripts/win/precompute_noise_dev.cmd` | Windows fast DevReuse wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevReuse`; requires an existing mode-matched resolved artifact and never passes `--force-precompute` |
 | `scripts/win/prepare_noise_artifact_dev.cmd` | Windows dev-fast cache-aware artifact refresh wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevPrepare`; builds when missing/stale without forcing source reimport or amenities/grids |
 | `scripts/win/prepare_noise_artifact_accurate.cmd` | Windows accurate cache-aware artifact refresh wrapper via `run_noise_precompute_watchdog.ps1 -Mode AccuratePrepare`; builds when missing/stale without forcing source reimport or amenities/grids |
@@ -636,7 +640,7 @@ tests/test_server_behavior.py
 | Any pipeline command | reachable PostGIS config |
 | `--refresh-import` | local OSM PBF + `osm2pgsql` available |
 | `--refresh-gtfs` | network access to configured public static GTFS ZIP URLs (unless custom local-only URL/path config is used) |
-| `--refresh-transit` | cached GTFS ZIP(s) (or `--auto-refresh-gtfs`) + compiled `walkgraph` with `gtfs-refresh` support |
+| `--refresh-transit` | cached GTFS ZIP(s) by default; add `--auto-refresh-gtfs` or `--force-gtfs-refresh` to download/update feeds + compiled `walkgraph` with `gtfs-refresh` support |
 | `--precompute` | managed schema ready, raw import ready or `--auto-refresh-import`, preferred `ireland_main_island_shp` coastline or fallback boundaries present, compiled `walkgraph` |
 | `--serve` | completed precompute build and main PMTiles archive for the chosen profile; noise PMTiles is optional and advertised only when available |
 | Overture merge | `overture/ireland_places.geoparquet` present; otherwise it degrades gracefully |
@@ -653,6 +657,7 @@ tests/test_server_behavior.py
 - `config.resolution_for_zoom()` is not `pmtiles_bake_worker._resolution_for_zoom()`.
 - `HASHES = build_config_hashes()` runs at import time and silently tolerates missing files by hashing zero-like metadata.
 - `_STATE = _BuildState.bootstrap()` also runs at import time and is invalid until activation.
+- `transit_derived.service_desert_cells` has a foreign key to `build_manifest`, and the precompute flow now writes those rows after `publish_precomputed_artifacts()` inserts the `build_manifest` row, so the FK is satisfied for the same `build_key`. (Confirmed)
 - `extract_fingerprint()` now caches the exact `.osm.pbf` content hash in `.livability_cache/osm_extract_fingerprint_cache.json`, keyed by resolved path + file size + `mtime_ns`. Deleting or corrupting that cache only affects startup time; the code falls back to a full re-hash.
 - `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` has a non-zero live default even though the nearby comment still talks about "default 0 = disabled". Trust the constant, not the stale comment.
 - `overture/ireland_places.geoparquet`, `ireland_main_island_shp/*`, and `boundaries/*.geojson` are external inputs, not committed repo assets.
@@ -666,6 +671,7 @@ tests/test_server_behavior.py
 - Frontend click priority is now transport -> amenity -> service desert -> noise -> fine inspect -> coarse grid, with `frontend/src/click_priority.js` carrying the testable resolver.
 - Noise datasets are local large inputs ignored by git; `noise_datasets/*.zip` should remain untracked. The loader intentionally fails loudly if the newer ROI Round 4 road FileGDB cannot be read.
 - NI Round 1 shapefiles are class-coded (`GRIDCODE` 1..7 with `Noise_Cl` labels), not threshold-coded. Reusing threshold arithmetic on Round 1 creates invalid synthetic labels like `2-6`.
+- Transport reality is intentionally sparse at low zoom in some NI tiles: for example, the Belfast z9 tile only carries a handful of hub-like features in the baked PMTiles archive, so a sparse screenshot there is not by itself proof that transport data is missing from the build.
 - Noise artifact ingest now stages rows in a temp table (`noise_ingest_stage_*`) and then runs SQL geometry normalization (`ST_GeomFromWKB` -> `ST_Transform` -> `ST_MakeValid`) instead of building giant 500-row inline `VALUES` statements with huge WKB hex params.
 - Noise force semantics are split: resolved rebuild (`--force-noise-artifact`) is separate from source re-import (`--reimport-noise-source`), and `--force-noise-all` does both.
 - Accurate noise mode reads all available rounds and applies road/rail simplification only inside the dissolve CTE; canonical `noise_normalized` rows must not be updated in place.
@@ -733,6 +739,10 @@ Areas still relatively fragile:
 | `.livability_cache/` | Generated outputs and timing history | Never edit manually |
 | `walkgraph/target/` | Rust build output | Rebuild with Cargo |
 | `docs/*.md` | Human context, design, methodology, validation notes | Useful for intent, not runtime truth |
+
+Local disk hotspots to remember:
+
+- `osm/flat-nodes.bin` is the dominant single file when the OSM import cache is present, and `.livability_cache/` can also grow large from rebuildable PMTiles and noise/geo caches. Both are generated state, not source.
 
 ---
 

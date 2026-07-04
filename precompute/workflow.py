@@ -790,9 +790,6 @@ def run_precompute_impl(
     )
     print()
 
-    if compute_service_deserts is not None:
-        compute_service_deserts(engine, walk_grids)
-
     publish_started_at = datetime.now(timezone.utc)
     publish_progress_cb = tracker.phase_callback("publish")
 
@@ -882,6 +879,10 @@ def run_precompute_impl(
         noise_artifact_hash=resolved_artifact_hash,
         progress_cb=publish_progress_cb,
     )
+
+    if compute_service_deserts is not None:
+        compute_service_deserts(engine, walk_grids)
+
     walk_stats = getattr(walk_row_payload, "stats", None)
     walk_prep_seconds = 0.0
     if walk_stats is not None:

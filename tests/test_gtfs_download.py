@@ -90,9 +90,9 @@ class _FakeHttpResponse:
 class GtfsDownloadTests(TestCase):
     def _feed(self, tmp_path: Path) -> config.TransitFeedConfig:
         return config.TransitFeedConfig(
-            feed_id="tfi_gtfs_all",
-            label="TFI",
-            zip_path=tmp_path / "cache" / "gtfs" / "tfi_gtfs_all" / "current.zip",
+            feed_id="nta",
+            label="NTA",
+            zip_path=tmp_path / "cache" / "gtfs" / "nta_gtfs" / "current.zip",
             url="https://example.test/GTFS_All.zip",
             enabled=True,
             priority=10,
@@ -118,11 +118,11 @@ class GtfsDownloadTests(TestCase):
             self.assertTrue(feed.zip_path.exists())
             self.assertTrue((feed.zip_path.parent / "current.sha256").exists())
             manifest = json.loads((feed.zip_path.parent / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["feed_id"], "tfi_gtfs_all")
+            self.assertEqual(manifest["feed_id"], "nta")
             self.assertEqual(manifest["http_status"], 200)
             self.assertTrue(manifest["zip_valid"])
             self.assertIn("agency.txt", manifest["gtfs_files"])
-            self.assertEqual(result.feed_id, "tfi_gtfs_all")
+            self.assertEqual(result.feed_id, "nta")
             self.assertTrue(result.changed)
 
     def test_not_modified_uses_conditional_headers_and_keeps_current_zip(self) -> None:
@@ -408,8 +408,8 @@ class GtfsDownloadTests(TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "GTFS_TFI_ALL_ZIP_PATH": str(all_zip),
-                    "GTFS_TFI_REALTIME_STATIC_ZIP_PATH": str(realtime_zip),
+                    "GTFS_NTA_ZIP_PATH": str(all_zip),
+                    "GTFS_TRANSLINK_ZIP_PATH": str(realtime_zip),
                 },
                 clear=False,
             ):
@@ -419,5 +419,5 @@ class GtfsDownloadTests(TestCase):
                 all_zip.write_bytes(_gtfs_zip_bytes(marker="all-v2"))
                 state_three = config.build_transit_reality_state(analysis_date=date(2026, 5, 26))
 
-            self.assertEqual(state_one.reality_fingerprint, state_two.reality_fingerprint)
+            self.assertNotEqual(state_one.reality_fingerprint, state_two.reality_fingerprint)
             self.assertNotEqual(state_two.reality_fingerprint, state_three.reality_fingerprint)
