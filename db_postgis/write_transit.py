@@ -13,6 +13,8 @@ from .tables import (
     transit_gtfs_stop_reality,
     transit_gtfs_stop_service_summary,
     transit_reality_manifest,
+    transit_railway_corridor_manifest,
+    transit_railway_corridors,
     transit_routes,
     transit_service_classification,
     transit_service_desert_cells,
@@ -149,6 +151,71 @@ def replace_transit_reality_rows(
         connection.execute(
             update(transit_reality_manifest)
             .where(transit_reality_manifest.c.reality_fingerprint == reality_fingerprint)
+            .values(status="complete", completed_at=datetime.now(timezone.utc))
+        )
+
+
+def replace_transit_railway_corridors(
+    engine: Engine,
+    *,
+    materialization,
+    progress_cb: ProgressCallback | None = None,
+) -> None:
+    created_at = datetime.now(timezone.utc)
+    root = root_module()
+    manifest = dict(getattr(materialization, "manifest", {}) or {})
+    rows = list(getattr(materialization, "rows", []) or [])
+    with engine.begin() as connection:
+        connection.execute(
+            delete(transit_railway_corridors).where(
+                transit_railway_corridors.c.reality_fingerprint == manifest.get("reality_fingerprint")
+            )
+        )
+        connection.execute(
+            delete(transit_railway_corridor_manifest).where(
+                transit_railway_corridor_manifest.c.reality_fingerprint == manifest.get("reality_fingerprint")
+            )
+        )
+
+        manifest_payload = {
+            "reality_fingerprint": manifest["reality_fingerprint"],
+            "import_fingerprint": manifest["import_fingerprint"],
+            "transit_config_hash": manifest["transit_config_hash"],
+            "railway_proximity_hash": manifest["railway_proximity_hash"],
+            "source_kind": manifest["source_kind"],
+            "active_feed_count": int(manifest.get("active_feed_count", 0)),
+            "active_service_count": int(manifest.get("active_service_count", 0)),
+            "active_trip_count": int(manifest.get("active_trip_count", 0)),
+            "active_shape_count": int(manifest.get("active_shape_count", 0)),
+            "warning_count": int(manifest.get("warning_count", 0)),
+            "warnings_json": list(manifest.get("warnings_json") or []),
+            "status": "building",
+            "created_at": created_at,
+            "completed_at": None,
+        }
+        connection.execute(insert(transit_railway_corridor_manifest), [manifest_payload])
+
+        if rows:
+            prepared_rows = [
+                {
+                    **dict(row),
+                    "created_at": created_at,
+                }
+                for row in rows
+            ]
+            root._bulk_insert(
+                connection,
+                transit_railway_corridors,
+                prepared_rows,
+                progress_cb=progress_cb,
+            )
+
+        connection.execute(
+            update(transit_railway_corridor_manifest)
+            .where(
+                transit_railway_corridor_manifest.c.reality_fingerprint
+                == manifest["reality_fingerprint"]
+            )
             .values(status="complete", completed_at=datetime.now(timezone.utc))
         )
 

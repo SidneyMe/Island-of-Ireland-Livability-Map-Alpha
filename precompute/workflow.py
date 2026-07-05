@@ -825,6 +825,7 @@ def run_precompute_impl(
         walk_grids,
         amenity_data,
         amenity_source_rows,
+        engine=engine,
         transport_reality_rows=transport_reality_row_payload,
         noise_rows=None,
     )

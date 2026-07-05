@@ -334,7 +334,7 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 - Migration `20260423_000010_transport_frequency_scoring.py` persists the frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
 - Migration `20260424_000011_bus_frequency_tiers.py` persists weekday daytime bus frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
 - `transport_score_units` plus bus frequency metadata now flows through DB reads, scoring amenity rows, PMTiles metadata, runtime summaries, frontend filters, the standalone export bundle, and transport popups.
-- `TRANSIT_REALITY_ALGO_VERSION = 8`, `CACHE_SCHEMA_VERSION = 12`, and `PMTILES_SCHEMA_VERSION = 8` invalidate stale transport, cache, and tile outputs.
+- `TRANSIT_REALITY_ALGO_VERSION = 9`, `CACHE_SCHEMA_VERSION = 13`, `FINE_SURFACE_SCHEMA_VERSION = 2`, and `PMTILES_SCHEMA_VERSION = 11` invalidate stale transport, cache, surface, and tile outputs.
 
 ### Deferred mode tiering
 
@@ -408,7 +408,9 @@ The first merged noise slice is a display-only baseline, not a scoring penalty. 
 - Decide whether road/rail grid proxy should be refined with class-specific differentiation before scoring.
 - Decide how to combine official-derived noise bands with OSM proximity-based nuisance penalties without double-counting.
 
-### Railway track proximity
+### ~~Railway track proximity~~
+
+The implementation below is the earlier design note. The landed code now uses GTFS shapes-backed corridors instead of OSM rail-line geometry.
 
 **What:** Penalty for cells directly adjacent to active railway tracks.
 
@@ -417,6 +419,12 @@ The first merged noise slice is a display-only baseline, not a scoring penalty. 
 - Buffer active `railway=rail` lines (exclude `railway=disused`, `railway=abandoned`) by 50–200 m.
 - Penalty decays with distance.
 - Only applies to tracks with actual scheduled service from Phase 1 GTFS — disused lines shouldn't penalize the areas next to them.
+
+**Done so far:**
+
+- Active non-school rail and tram corridors are now materialized from GTFS `shapes.txt` instead of OSM rail-line geometry, dissolved in metric space, cached by hash, and skipped with a warning when a feed has no shapes file.
+- The hidden railway-proximity penalty is wired into the shared scoring core, so `grid_walk`, fine-surface inspect, PMTiles, and popup breakdowns all stay in sync.
+- Runtime/build diagnostics now record whether corridor data was present, how many corridors were materialized, and the rail proximity hash/settings.
 
 ### Motorway and major-road noise
 

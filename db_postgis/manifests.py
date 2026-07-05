@@ -5,7 +5,13 @@ from typing import Any
 
 from ._dependencies import Engine, delete, insert, select, update
 from .common import root_module
-from .tables import build_manifest, import_manifest, transit_feed_manifest, transit_reality_manifest
+from .tables import (
+    build_manifest,
+    import_manifest,
+    transit_feed_manifest,
+    transit_railway_corridor_manifest,
+    transit_reality_manifest,
+)
 
 
 def load_import_manifest(engine: Engine, import_fingerprint: str) -> dict[str, Any] | None:
@@ -75,6 +81,31 @@ def has_complete_transit_reality_manifest(
     if import_fingerprint is None:
         return True
     return str(manifest.get("import_fingerprint") or "") == import_fingerprint
+
+
+def load_transit_railway_corridor_manifest(
+    engine: Engine,
+    reality_fingerprint: str,
+) -> dict[str, Any] | None:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(transit_railway_corridor_manifest)
+            .where(transit_railway_corridor_manifest.c.reality_fingerprint == reality_fingerprint)
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def has_complete_transit_railway_corridor_manifest(
+    engine: Engine,
+    reality_fingerprint: str,
+    railway_proximity_hash: str | None = None,
+) -> bool:
+    manifest = root_module().load_transit_railway_corridor_manifest(engine, reality_fingerprint)
+    if manifest is None or manifest.get("status") != "complete":
+        return False
+    if railway_proximity_hash is None:
+        return True
+    return str(manifest.get("railway_proximity_hash") or "") == railway_proximity_hash
 
 
 def has_complete_build(engine: Engine, build_key: str) -> bool:

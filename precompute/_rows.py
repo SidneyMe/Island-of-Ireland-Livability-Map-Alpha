@@ -13,10 +13,16 @@ from config import (
     NOISE_MODE,
     OSM_EXTRACT_PATH,
     OUTPUT_HTML,
+    RAILWAY_PROXIMITY_ACTIVE_MODES,
+    RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M,
+    RAILWAY_PROXIMITY_MAX_PENALTY,
+    RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
 )
 from db_postgis import (
+    load_railway_corridor_rows,
     load_service_desert_rows,
     load_transport_reality_points,
+    load_transit_railway_corridor_manifest,
 )
 import noise.loader as _noise_loader
 import overture.loader as _overture
@@ -396,12 +402,13 @@ def _summary_json(
     amenity_data: dict[str, list[tuple[float, float]]],
     amenity_source_rows: list[dict[str, Any]],
     *,
+    engine=None,
     transport_reality_rows: list[dict[str, Any]] | None = None,
     noise_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     coastal_cleanup = _study_area.get_last_coastal_cleanup_summary()
     amenity_merge = _STATE.amenity_merge_stats
-    return _publish.summary_json_impl(
+    payload = _publish.summary_json_impl(
         study_area_wgs84,
         walk_grids,
         amenity_data,
@@ -425,3 +432,52 @@ def _summary_json(
         service_deserts_enabled=True,
         overture_dataset=_overture.dataset_info(),
     )
+    if engine is not None and _STATE.transit_reality_state is not None:
+        reality_fingerprint = _STATE.transit_reality_state.reality_fingerprint
+        try:
+            corridor_manifest = load_transit_railway_corridor_manifest(engine, reality_fingerprint)
+            corridor_rows = load_railway_corridor_rows(engine, reality_fingerprint)
+        except Exception:
+            corridor_manifest = None
+            corridor_rows = []
+        railway_summary = {
+            "railway_proximity_enabled": bool(corridor_manifest is not None),
+            "railway_proximity_data_present": bool(corridor_rows),
+            "railway_proximity_hash": (
+                str(corridor_manifest.get("railway_proximity_hash"))
+                if corridor_manifest and corridor_manifest.get("railway_proximity_hash")
+                else None
+            ),
+            "railway_proximity_source_kind": (
+                str(corridor_manifest.get("source_kind"))
+                if corridor_manifest and corridor_manifest.get("source_kind")
+                else None
+            ),
+            "railway_proximity_active_feed_count": int(
+                corridor_manifest.get("active_feed_count", 0) if corridor_manifest else 0
+            ),
+            "railway_proximity_active_service_count": int(
+                corridor_manifest.get("active_service_count", 0) if corridor_manifest else 0
+            ),
+            "railway_proximity_active_trip_count": int(
+                corridor_manifest.get("active_trip_count", 0) if corridor_manifest else 0
+            ),
+            "railway_proximity_active_shape_count": int(
+                corridor_manifest.get("active_shape_count", 0) if corridor_manifest else 0
+            ),
+            "railway_proximity_warning_count": int(
+                corridor_manifest.get("warning_count", 0) if corridor_manifest else 0
+            ),
+            "railway_proximity_materialized_corridor_count": len(corridor_rows),
+            "railway_proximity_full_penalty_distance_m": float(
+                RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M
+            ),
+            "railway_proximity_zero_penalty_distance_m": float(
+                RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M
+            ),
+            "railway_proximity_max_penalty": float(RAILWAY_PROXIMITY_MAX_PENALTY),
+            "railway_proximity_active_modes": list(RAILWAY_PROXIMITY_ACTIVE_MODES),
+        }
+        payload.update(railway_summary)
+        payload["railway_proximity"] = railway_summary
+    return payload

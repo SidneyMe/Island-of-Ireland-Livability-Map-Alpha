@@ -462,7 +462,7 @@ A display-only official-derived noise proxy overlay is now merged. It is intenti
 - [x] Build a separate `noise.pmtiles` overlay from official-derived strategic noise artifacts, with `road` / `rail` grid proxy rows plus resolved `airport` / `industry` polygons for `Lden` and `Lnight`.
 - [x] Expose noise runtime metadata and frontend controls: hidden-by-default overlay toggle, metric/source controls, mapped-count labels, opacity slider, and explicit caveat that the layer is not measured point noise.
 - [ ] Convert the official-derived noise proxy into a calibrated scoring penalty.
-- [ ] Railway track proximity (the tracks themselves, not stations).
+- [x] Railway track proximity (the tracks themselves, not stations).
 - [ ] Motorway and major-road noise.
 - [ ] Flight paths and airport proximity.
 - [ ] Over-concentration of nightlife, fast food, and retail relative to residential context.

@@ -11,6 +11,7 @@ from .tables import (
     grid_walk,
     import_manifest,
     transit_gtfs_stop_reality,
+    transit_railway_corridors,
     transit_service_desert_cells,
 )
 
@@ -199,6 +200,36 @@ def load_transport_reality_points(
             }
         )
     return payload
+
+
+def load_railway_corridor_rows(
+    engine: Engine,
+    reality_fingerprint: str,
+) -> list[dict[str, Any]]:
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(transit_railway_corridors)
+            .where(transit_railway_corridors.c.reality_fingerprint == reality_fingerprint)
+            .order_by(transit_railway_corridors.c.feed_id)
+        ).mappings().all()
+
+    root = root_module()
+    return [
+        {
+            "reality_fingerprint": row["reality_fingerprint"],
+            "import_fingerprint": row["import_fingerprint"],
+            "railway_proximity_hash": row["railway_proximity_hash"],
+            "feed_id": row["feed_id"],
+            "source_kind": row["source_kind"],
+            "active_service_count": int(row["active_service_count"] or 0),
+            "active_trip_count": int(row["active_trip_count"] or 0),
+            "active_shape_count": int(row["active_shape_count"] or 0),
+            "dissolved_shape_count": int(row["dissolved_shape_count"] or 0),
+            "route_modes_json": list(row.get("route_modes_json") or []),
+            "geom": root.to_shape(row["geom"]),
+        }
+        for row in rows
+    ]
 
 
 def load_service_desert_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:

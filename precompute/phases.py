@@ -5,15 +5,19 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 from config import (
     DISTANCE_DECAY_HALF_DISTANCE_M,
     GRID_GEOMETRY_SCHEMA_VERSION,
     TAGS,
     VARIETY_CLUSTER_RADIUS_M,
 )
+from db_postgis import load_railway_corridor_rows
+from transit import compute_railway_proximity_penalties
 
 from .amenity_clusters import build_amenity_clusters
 from .amenity_tiers import annotate_amenity_row
+from ._state import _STATE
 from .reachability_arrays import (
     ReachabilityMatrix,
     append_reachability_cache_chunk,
@@ -1096,6 +1100,19 @@ def phase_grids_impl(
     )
 
     walk_graph = phase_networks(engine, tracker)
+    railway_proximity_penalties = np.zeros(int(walk_graph.vcount()), dtype=np.float32)
+    if getattr(_STATE, "transit_reality_state", None) is not None:
+        try:
+            corridor_rows = load_railway_corridor_rows(
+                engine,
+                _STATE.transit_reality_state.reality_fingerprint,
+            )
+            railway_proximity_penalties = compute_railway_proximity_penalties(
+                walk_graph,
+                corridor_rows,
+            )
+        except Exception as exc:
+            print(f"  [score] railway proximity penalties unavailable ({exc})")
 
     did_build_score = False
 
@@ -1188,6 +1205,7 @@ def phase_grids_impl(
             walk_counts_by_node=walk_counts_by_node,
             walk_cluster_counts_by_node=walk_cluster_counts_by_node,
             walk_effective_units_by_node=walk_effective_units_by_node,
+            railway_proximity_penalties=railway_proximity_penalties,
             tracker=tracker,
         )
 
@@ -1221,6 +1239,7 @@ def phase_grids_impl(
             walk_cluster_counts_by_node,
             walk_cell_nodes_by_size[size],
             walk_effective_units_by_node,
+            railway_proximity_penalties,
         )
         walk_scores = [cell["total"] for cell in walk_cells]
         print(f"{_score_summary(walk_scores)} {elapsed(started_at)}")

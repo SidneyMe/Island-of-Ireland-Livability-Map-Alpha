@@ -124,6 +124,7 @@ class PmtilesBakeContractTests(TestCase):
                 self.assertEqual(grid_layer["fields"][f"cluster_{category}"], "Number")
                 self.assertEqual(grid_layer["fields"][f"effective_units_{category}"], "Number")
                 self.assertEqual(grid_layer["fields"][f"score_{category}"], "Number")
+        self.assertEqual(grid_layer["fields"]["score_railway_proximity"], "Number")
 
     def test_pmtiles_metadata_declares_transit_reality_and_service_desert_layers(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
@@ -236,6 +237,7 @@ class PmtilesBakeContractTests(TestCase):
         self.assertIn("CASE WHEN t.is_unscheduled_stop THEN 1 ELSE 0 END", sql)
         self.assertNotIn("STRING_AGG", sql)
         self.assertNotIn("SUM(t.school_only_departures_30d)", sql)
+        self.assertIn("score_railway_proximity", sql)
 
     def test_noise_tile_sql_exports_display_fields(self) -> None:
         sql = str(pmtiles_worker._NOISE_TILE_SQL)

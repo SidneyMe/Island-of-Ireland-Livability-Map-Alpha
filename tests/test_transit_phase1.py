@@ -31,6 +31,10 @@ from transit.models import (
     StopInfo,
     StopServiceSummary,
 )
+from transit.railway_corridors import (
+    build_railway_corridor_materialization,
+    railway_proximity_penalty_for_distance,
+)
 from transit.rust_gtfs import load_gtfs_stop_reality_models, run_walkgraph_gtfs_refresh
 from transit.service import (
     expand_service_windows,
@@ -71,6 +75,44 @@ def _minimal_gtfs_files(
     return files
 
 
+def _shapes_gtfs_files(*, include_shapes: bool = True) -> dict[str, str]:
+    files = _minimal_gtfs_files()
+    files["routes.txt"] = (
+        "route_id,route_type\n"
+        "R1,1\n"
+        "R2,0\n"
+        "R3,3\n"
+    )
+    files["trips.txt"] = (
+        "route_id,service_id,trip_id,shape_id\n"
+        "R1,SVC_ACTIVE_RAIL,T1,rail_shape\n"
+        "R1,SVC_SCHOOL_ONLY,T2,rail_school_shape\n"
+        "R2,SVC_ACTIVE_TRAM,T3,tram_shape\n"
+        "R3,SVC_ACTIVE_BUS,T4,bus_shape\n"
+    )
+    files["calendar.txt"] = (
+        "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+        "SVC_ACTIVE_RAIL,1,1,1,1,1,0,0,20260401,20260430\n"
+        "SVC_SCHOOL_ONLY,1,1,1,1,1,0,0,20260401,20260430\n"
+        "SVC_ACTIVE_TRAM,1,1,1,1,1,0,0,20260401,20260430\n"
+        "SVC_ACTIVE_BUS,1,1,1,1,1,0,0,20260401,20260430\n"
+    )
+    files["calendar_dates.txt"] = ""
+    if include_shapes:
+        files["shapes.txt"] = (
+            "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n"
+            "rail_shape,53.3500,-6.2600,1\n"
+            "rail_shape,53.3510,-6.2500,2\n"
+            "rail_school_shape,53.3400,-6.2700,1\n"
+            "rail_school_shape,53.3410,-6.2600,2\n"
+            "tram_shape,53.3600,-6.2700,1\n"
+            "tram_shape,53.3610,-6.2600,2\n"
+            "bus_shape,53.3700,-6.2800,1\n"
+            "bus_shape,53.3710,-6.2700,2\n"
+        )
+    return files
+
+
 def _feed_state(zip_path: Path) -> TransitFeedState:
     return TransitFeedState(
         feed_id="nta",
@@ -80,6 +122,46 @@ def _feed_state(zip_path: Path) -> TransitFeedState:
         feed_fingerprint="feed-fingerprint-123",
         analysis_date=date(2026, 4, 14),
     )
+
+
+class _FakeMappingsResult:
+    def __init__(self, rows):
+        self._rows = list(rows)
+
+    def mappings(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
+
+
+class _FakeConnection:
+    def __init__(self, service_rows, trip_rows):
+        self._service_rows = list(service_rows)
+        self._trip_rows = list(trip_rows)
+        self._execute_calls = 0
+
+    def execute(self, _statement):
+        self._execute_calls += 1
+        if self._execute_calls == 1:
+            return _FakeMappingsResult(self._service_rows)
+        if self._execute_calls == 2:
+            return _FakeMappingsResult(self._trip_rows)
+        return _FakeMappingsResult([])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeEngine:
+    def __init__(self, service_rows, trip_rows):
+        self._connection = _FakeConnection(service_rows, trip_rows)
+
+    def connect(self):
+        return self._connection
 
 
 def _single_stop_dataset(
@@ -900,6 +982,78 @@ class TransitRustRefreshTests(TestCase):
         self.assertEqual(config_payload["friday_evening_end_hour"], 2)
         self.assertNotIn("osm_features_path", config_payload)
         self.assertNotIn("match_radius_m", config_payload)
+
+
+class RailwayCorridorMaterializationTests(TestCase):
+    def test_materialization_selects_only_active_rail_tram_shapes(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            zip_path = tmp / "feed.zip"
+            _write_gtfs_zip(zip_path, _shapes_gtfs_files())
+            materialization = build_railway_corridor_materialization(
+                _FakeEngine(
+                    service_rows=[
+                        {"service_id": "SVC_ACTIVE_RAIL", "school_only_state": "no"},
+                        {"service_id": "SVC_SCHOOL_ONLY", "school_only_state": "yes"},
+                        {"service_id": "SVC_ACTIVE_TRAM", "school_only_state": "no"},
+                        {"service_id": "SVC_ACTIVE_BUS", "school_only_state": "no"},
+                    ],
+                    trip_rows=[
+                        {"trip_id": "T1", "service_id": "SVC_ACTIVE_RAIL", "shape_id": "rail_shape", "route_type": 1},
+                        {"trip_id": "T2", "service_id": "SVC_SCHOOL_ONLY", "shape_id": "rail_school_shape", "route_type": 1},
+                        {"trip_id": "T3", "service_id": "SVC_ACTIVE_TRAM", "shape_id": "tram_shape", "route_type": 0},
+                        {"trip_id": "T4", "service_id": "SVC_ACTIVE_BUS", "shape_id": "bus_shape", "route_type": 3},
+                    ],
+                ),
+                reality_fingerprint="reality-123",
+                import_fingerprint="import-123",
+                transit_config_hash="config-hash",
+                feed_states=[_feed_state(zip_path)],
+            )
+
+        self.assertEqual(materialization.manifest["status"], "complete")
+        self.assertEqual(materialization.manifest["warning_count"], 0)
+        self.assertEqual(materialization.manifest["active_feed_count"], 1)
+        self.assertEqual(materialization.manifest["active_service_count"], 2)
+        self.assertEqual(materialization.manifest["active_trip_count"], 2)
+        self.assertEqual(materialization.manifest["active_shape_count"], 2)
+        self.assertEqual(len(materialization.rows), 1)
+        self.assertEqual(materialization.rows[0]["route_modes_json"], ["rail", "tram"])
+        self.assertGreater(materialization.rows[0]["geom"].length, 0.0)
+
+    def test_materialization_missing_shapes_txt_warns_and_skips_feed(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            zip_path = tmp / "feed.zip"
+            _write_gtfs_zip(zip_path, _shapes_gtfs_files(include_shapes=False))
+            materialization = build_railway_corridor_materialization(
+                _FakeEngine(
+                    service_rows=[
+                        {"service_id": "SVC_ACTIVE_RAIL", "school_only_state": "no"},
+                        {"service_id": "SVC_ACTIVE_TRAM", "school_only_state": "no"},
+                    ],
+                    trip_rows=[
+                        {"trip_id": "T1", "service_id": "SVC_ACTIVE_RAIL", "shape_id": "rail_shape", "route_type": 1},
+                        {"trip_id": "T2", "service_id": "SVC_ACTIVE_TRAM", "shape_id": "tram_shape", "route_type": 0},
+                    ],
+                ),
+                reality_fingerprint="reality-123",
+                import_fingerprint="import-123",
+                transit_config_hash="config-hash",
+                feed_states=[_feed_state(zip_path)],
+            )
+
+        self.assertEqual(materialization.manifest["status"], "complete")
+        self.assertEqual(materialization.manifest["warning_count"], 1)
+        self.assertEqual(materialization.rows, [])
+        self.assertEqual(materialization.manifest["active_feed_count"], 0)
+
+    def test_railway_proximity_penalty_uses_capped_linear_decay(self) -> None:
+        self.assertEqual(railway_proximity_penalty_for_distance(25), 4.0)
+        self.assertEqual(railway_proximity_penalty_for_distance(50), 4.0)
+        self.assertAlmostEqual(railway_proximity_penalty_for_distance(125), 2.0)
+        self.assertEqual(railway_proximity_penalty_for_distance(200), 0.0)
+        self.assertEqual(railway_proximity_penalty_for_distance(250), 0.0)
 
 
 class TransitWorkflowTests(TestCase):

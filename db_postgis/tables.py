@@ -319,6 +319,44 @@ transit_reality_manifest = Table(
     schema=TRANSIT_DERIVED_SCHEMA,
 )
 
+transit_railway_corridor_manifest = Table(
+    "railway_corridor_manifest",
+    metadata,
+    Column("reality_fingerprint", Text, primary_key=True),
+    Column("import_fingerprint", Text, nullable=False),
+    Column("transit_config_hash", Text, nullable=False),
+    Column("railway_proximity_hash", Text, nullable=False),
+    Column("source_kind", Text, nullable=False),
+    Column("active_feed_count", Integer, nullable=False),
+    Column("active_service_count", Integer, nullable=False),
+    Column("active_trip_count", Integer, nullable=False),
+    Column("active_shape_count", Integer, nullable=False),
+    Column("warning_count", Integer, nullable=False),
+    Column("warnings_json", JSONB, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    schema=TRANSIT_DERIVED_SCHEMA,
+)
+
+transit_railway_corridors = Table(
+    "railway_corridors",
+    metadata,
+    Column("reality_fingerprint", Text, nullable=False),
+    Column("import_fingerprint", Text, nullable=False),
+    Column("railway_proximity_hash", Text, nullable=False),
+    Column("feed_id", Text, nullable=False),
+    Column("source_kind", Text, nullable=False),
+    Column("active_service_count", Integer, nullable=False),
+    Column("active_trip_count", Integer, nullable=False),
+    Column("active_shape_count", Integer, nullable=False),
+    Column("dissolved_shape_count", Integer, nullable=False),
+    Column("route_modes_json", JSONB, nullable=False),
+    Column("geom", Geometry("GEOMETRY", srid=4326), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    schema=TRANSIT_DERIVED_SCHEMA,
+)
+
 transit_service_classification = Table(
     "service_classification",
     metadata,
@@ -555,6 +593,8 @@ REQUIRED_TRANSIT_RAW_TABLES = {
 
 REQUIRED_TRANSIT_DERIVED_TABLES = {
     "reality_manifest",
+    "railway_corridor_manifest",
+    "railway_corridors",
     "service_classification",
     "gtfs_stop_service_summary",
     "gtfs_stop_reality",
@@ -580,6 +620,8 @@ MANAGED_RAW_SUPPORT_TABLES = (
     transit_calendar_services,
     transit_calendar_dates,
     transit_reality_manifest,
+    transit_railway_corridor_manifest,
+    transit_railway_corridors,
     transit_service_classification,
     transit_gtfs_stop_service_summary,
     transit_gtfs_stop_reality,
@@ -595,6 +637,7 @@ GEOMETRY_FIELDS = {
     _table_key(service_deserts): ("cell_geom",),
     _table_key(noise_polygons): ("geom",),
     _table_key(features): ("geom",),
+    _table_key(transit_railway_corridors): ("geom",),
     _table_key(transit_stops): ("geom",),
     _table_key(transit_gtfs_stop_reality): ("geom",),
     _table_key(transit_service_desert_cells): ("cell_geom",),

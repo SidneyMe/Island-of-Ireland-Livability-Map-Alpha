@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-06-29. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-07-06. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -11,7 +11,7 @@
 - Ingests local OSM PBF via `osm2pgsql`, cache-managed public static GTFS ZIP feeds (default active transit inputs: `nta` and `translink`), and optionally an Overture Places geoparquet dataset. (Confirmed)
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
-- Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
+- Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
 - Current live transit config in `config.py` now wires the active `nta` and `translink` GTFS feeds, matching the README/tests and restoring Northern Ireland transport coverage in the published transport layer. (Confirmed)
 - Adds a display-only transport/industry noise overlay (Phase E: roads + rail + airport + industry, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport/industry use resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
 - Uses layered content hashes so changes to geometry, scoring params, GTFS feeds, Overture data, or importer config only invalidate the affected cache tiers. (Confirmed)
@@ -26,6 +26,7 @@
 - **Schema and DB IO**: `db_postgis/`
 - **OSM ingest**: `local_osm_import/` + `osm2pgsql_livability.lua`
 - **GTFS ingest and transit reality**: `transit/`
+- **GTFS rail-corridor proxy**: `transit/railway_corridors.py`
 - **Overture integration and dedupe**: `overture/loader.py`, `overture/merge.py`, `db_postgis/amenity_merge.py`
 - **Amenity merge observability**: `db_postgis/amenity_merge.py`, `precompute/phases.py`, `precompute/_rows.py`, `precompute/publish.py`
 - **Noise overlay ingestion**: `noise/loader.py`
@@ -211,7 +212,7 @@ Notes:
 | Config and hash chain | `config.py` | Imported almost everywhere | None |
 | Schema history | `db_postgis/migrations/versions/` | `db_postgis/tables.py` | `schema.sql` |
 | OSM ingest rules | `osm2pgsql_livability.lua`, `local_osm_import/` | `config.IMPORTER_CONFIG_VERSION` | None |
-| Transit reality | `transit/workflow.py`, `transit/rust_gtfs.py` | `config.transit_config_hash()` | None |
+| Transit reality | `transit/workflow.py`, `transit/rust_gtfs.py`, `transit/railway_corridors.py` | `config.transit_config_hash()` | None |
 | Amenity tiering | `config.py` tier constants, `precompute/amenity_tiers.py` | `precompute/phases.py`, `precompute/publish.py` | None |
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
@@ -243,13 +244,18 @@ Notes:
   - `PARK_TIER_UNITS = {"pocket": 1, "neighbourhood": 2, "district": 3, "regional": 4}`
   - `VARIETY_CLUSTER_RADIUS_M = 25.0`
   - `DISTANCE_DECAY_HALF_DISTANCE_M = {"shops": 150.0, "transport": 250.0, "healthcare": 300.0, "parks": 350.0}`
-  - `TRANSIT_REALITY_ALGO_VERSION = 8`
+  - `TRANSIT_REALITY_ALGO_VERSION = 9`
   - `AMENITY_MERGE_ALGO_VERSION = 4`
-  - `PMTILES_SCHEMA_VERSION = 9`
+  - `FINE_SURFACE_SCHEMA_VERSION = 2`
+  - `PMTILES_SCHEMA_VERSION = 11`
   - `GRID_GEOMETRY_SCHEMA_VERSION = 4`
-  - `CACHE_SCHEMA_VERSION = 12` (unchanged by display-only noise)
+  - `CACHE_SCHEMA_VERSION = 13` (unchanged by display-only noise)
   - `WALKGRAPH_FORMAT_VERSION = 3`
   - `IMPORTER_CONFIG_VERSION = "2026-04-08"`
+  - `RAILWAY_PROXIMITY_ACTIVE_MODES = ("rail", "tram")`
+  - `RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M = 50.0`
+  - `RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M = 200.0`
+  - `RAILWAY_PROXIMITY_MAX_PENALTY = 4.0`
 - Build profiles:
   - `full`: vector grid `20000/10000/5000/2500/1000/500/250/100/50` baked into PMTiles, with archive source zoom capped at `15` and frontend overzoom to `19`
   - `dev`: coarse vector only
@@ -278,8 +284,8 @@ Notes:
 
 ### `transit_refresh_runner.py`
 
-  - Purpose: lightweight CLI-only GTFS refresh path used by `main.py gtfs status`, `main.py gtfs refresh`, and `main.py transit`. (Confirmed)
-- Why it matters: avoids importing the whole `precompute` package before the first transit progress line, now starts the tracker before DB/schema checks and source-state resolution, and passes transit progress callbacks into OSM source-state fingerprinting so users can see `osm2pgsql --version` probes plus cached-vs-rehashed `.osm.pbf` resolution immediately in the console. (Confirmed)
+- Purpose: lightweight CLI-only GTFS refresh path used by `main.py gtfs status`, `main.py gtfs refresh`, and `main.py transit`. (Confirmed)
+- Why it matters: avoids importing the whole `precompute` package before the first transit progress line, now starts the tracker before DB/schema checks and source-state resolution, materializes the transit-derived rail corridor cache when transit reality is current, and passes transit progress callbacks into OSM source-state fingerprinting so users can see `osm2pgsql --version` probes plus cached-vs-rehashed `.osm.pbf` resolution immediately in the console. (Confirmed)
 - Main functions: `refresh_gtfs()`, `gtfs_status()`, `refresh_transit()`, `_preflight_transit_rebuild()`
 
 ### `transit/gtfs_download.py`
@@ -287,6 +293,12 @@ Notes:
 - Purpose: cache-aware public static GTFS downloader/validator used by transit source resolution. (Confirmed)
 - Why it matters: centralizes polite HTTP behavior (timeout, retry/backoff, conditional requests), atomic ZIP replacement, SHA256 manifests, and required-GTFS-file validation before any `current.zip` update is accepted. (Confirmed)
 - Main functions: `refresh_gtfs_feed()`, `refresh_gtfs_feeds()`, `ensure_transit_feed_available()`
+
+### `transit/railway_corridors.py`
+
+- Purpose: shapes-backed rail/tram corridor materialization and hidden railway proximity penalty helper. (Confirmed)
+- Why it matters: GTFS shapes are the current service-backed geometry source for rail/tram proximity, so this module hashes, dissolves, caches, and scores the corridor layer without changing the public overlay surface. (Confirmed)
+- Main functions: `build_railway_corridor_materialization()`, `compute_railway_proximity_penalties()`, `railway_proximity_penalty_for_distance()`
 
 ### `precompute/workflow.py`
 
@@ -315,6 +327,7 @@ Notes:
   - routing checkpoints are committed `.npz` matrix chunks with `uint64` origin IDs, manifest-defined category order, and `uint32`/`float32` matrices; successful completion compacts chunks into `base.npz`
   - legacy pickle/gzip dict reachability caches are ignored by default and only converted when `LIVABILITY_MIGRATE_LEGACY_REACH_CACHE=1`
   - origin-node normalization/union now uses low-memory sorted lists rather than Python `set(sorted(...))` dedupe, so coarse-grid and fine-surface reachability inputs can be combined without materializing another huge Python-object set
+  - railway proximity penalties are now computed from the transit-derived corridor layer and threaded through grid scoring, node score arrays, inspect payloads, and PMTiles export
 - LOC: 1093
 
 ### `precompute/reachability_arrays.py`
@@ -411,7 +424,7 @@ Notes:
 - Current schema facts:
   - `amenities` has `category`, `tier`, `geom`, `source`, `source_ref`, `name`, `conflict_class`
   - `grid_walk` has `counts_json`, `cluster_counts_json`, `effective_units_json`, `scores_json`, `total_score`, clipped-area fields
-  - `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, and public `transport_reality` now also carry `bus_active_days_mask_7d` (legacy export name for the base weekly bus mask), `bus_service_subtier`, `bus_daytime_deps`, `bus_daytime_headway_min`, `bus_frequency_tier`, `bus_frequency_score_units`, `is_unscheduled_stop`, `has_exception_only_service`, `has_any_bus_service`, `has_daily_bus_service`, `route_modes_json`, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`
+  - `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, `transit_derived.railway_corridor_manifest`, `transit_derived.railway_corridors`, and public `transport_reality` now also carry `bus_active_days_mask_7d` (legacy export name for the base weekly bus mask), `bus_service_subtier`, `bus_daytime_deps`, `bus_daytime_headway_min`, `bus_frequency_tier`, `bus_frequency_score_units`, `is_unscheduled_stop`, `has_exception_only_service`, `has_any_bus_service`, `has_daily_bus_service`, `route_modes_json`, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`
   - public output tables are `grid_walk`, `amenities`, `transport_reality`, `service_deserts`, `build_manifest`
   - public `noise_polygons` stores build-scoped noise overlay geometry; in artifact mode this is currently Phase E transport/industry output (`source_type IN ('road','rail','airport','industry')`, `metric IN ('Lden','Lnight')`, unclassified class) encoded via compatibility columns and exported as `noise_proxy` layer properties
 - LOC: 497

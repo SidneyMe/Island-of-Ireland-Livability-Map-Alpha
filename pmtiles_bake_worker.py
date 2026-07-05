@@ -64,6 +64,7 @@ _GRID_TILE_SQL = text(
             COALESCE((g.cluster_counts_json ->> 'parks')::integer, 0) AS cluster_parks,
             COALESCE((g.effective_units_json ->> 'parks')::double precision, 0.0) AS effective_units_parks,
             COALESCE((g.scores_json ->> 'parks')::double precision, 0.0) AS score_parks,
+            COALESCE((g.scores_json ->> 'railway_proximity')::double precision, 0.0) AS score_railway_proximity,
             ST_AsMVTGeom(
                 ST_Transform(g.cell_geom, 3857),
                 tile.env_3857,

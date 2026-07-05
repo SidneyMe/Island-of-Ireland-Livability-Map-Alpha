@@ -781,6 +781,22 @@ class RenderAndCliTests(TestCase):
                 "noise_source_counts": {"road": 4, "rail": 2, "airport": 2, "industry": 1},
                 "noise_metric_counts": {"Lden": 5, "Lnight": 3},
                 "noise_band_counts": {"55-59": 6, "75+": 2},
+                "railway_proximity": {
+                    "railway_proximity_enabled": True,
+                    "railway_proximity_data_present": True,
+                    "railway_proximity_hash": "railway-hash-123",
+                    "railway_proximity_source_kind": "gtfs_shapes",
+                    "railway_proximity_active_feed_count": 1,
+                    "railway_proximity_active_service_count": 2,
+                    "railway_proximity_active_trip_count": 2,
+                    "railway_proximity_active_shape_count": 2,
+                    "railway_proximity_warning_count": 0,
+                    "railway_proximity_materialized_corridor_count": 1,
+                    "railway_proximity_full_penalty_distance_m": 50.0,
+                    "railway_proximity_zero_penalty_distance_m": 200.0,
+                    "railway_proximity_max_penalty": 4.0,
+                    "railway_proximity_active_modes": ["rail", "tram"],
+                },
                 "transit_analysis_date": "2026-04-14",
                 "transit_analysis_window_days": 30,
                 "transit_service_desert_window_days": 7,
@@ -844,6 +860,11 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["noise_source_counts"]["industry"], 1)
         self.assertEqual(payload["noise_metric_counts"], {"Lden": 5, "Lnight": 3})
         self.assertEqual(payload["noise_band_counts"]["75+"], 2)
+        self.assertTrue(payload["railway_proximity"]["railway_proximity_enabled"])
+        self.assertTrue(payload["railway_proximity"]["railway_proximity_data_present"])
+        self.assertEqual(payload["railway_proximity"]["railway_proximity_hash"], "railway-hash-123")
+        self.assertEqual(payload["railway_proximity"]["railway_proximity_materialized_corridor_count"], 1)
+        self.assertEqual(payload["railway_proximity"]["railway_proximity_active_modes"], ["rail", "tram"])
         self.assertTrue(payload["noise_proxy_metadata"]["enabled"])
         self.assertEqual(payload["noise_proxy_metadata"]["source_id"], "noise")
         self.assertEqual(payload["noise_proxy_metadata"]["source_layer"], "noise_proxy")

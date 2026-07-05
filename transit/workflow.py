@@ -12,16 +12,19 @@ from config import (
 )
 from db_postgis.manifests import (
     has_complete_transit_feed_manifest,
+    has_complete_transit_railway_corridor_manifest,
     has_complete_transit_reality_manifest,
 )
 from db_postgis.reads import load_transport_reality_points
 from db_postgis.writes import (
     replace_gtfs_feed_rows_from_artifacts,
+    replace_transit_railway_corridors,
     replace_transit_reality_rows_from_artifacts,
 )
 
 from .export import EXPORTS_DIR, ZIP_FILENAME, export_transport_reality_bundle
 from .models import GtfsStopReality
+from .railway_corridors import build_railway_corridor_materialization
 from .rust_gtfs import load_gtfs_stop_reality_models, run_walkgraph_gtfs_refresh
 from .sources import ensure_feed_zip
 
@@ -34,6 +37,39 @@ def _emit(progress_cb: ProgressFn, detail: str) -> None:
         print(detail, flush=True)
         return
     progress_cb("detail", detail=detail, force_log=True)
+
+
+def _ensure_railway_track_proximity(
+    engine,
+    *,
+    import_fingerprint: str,
+    reality_state: TransitRealityState,
+    progress_cb: ProgressFn = None,
+) -> None:
+    if has_complete_transit_railway_corridor_manifest(
+        engine,
+        reality_state.reality_fingerprint,
+    ):
+        _emit(
+            progress_cb,
+            f"[gtfs] railway corridor fingerprint unchanged; reusing {reality_state.reality_fingerprint}",
+        )
+        return
+
+    _emit(progress_cb, f"materializing railway corridors for {reality_state.reality_fingerprint}")
+    materialization = build_railway_corridor_materialization(
+        engine,
+        reality_fingerprint=reality_state.reality_fingerprint,
+        import_fingerprint=import_fingerprint,
+        transit_config_hash=reality_state.transit_config_hash,
+        feed_states=reality_state.feed_states,
+        progress_cb=progress_cb,
+    )
+    replace_transit_railway_corridors(
+        engine,
+        materialization=materialization,
+        progress_cb=progress_cb,
+    )
 
 
 def prepare_transit_reality_state(
@@ -115,6 +151,12 @@ def ensure_transit_reality(
     ):
         _emit(progress_cb, "[gtfs] combined fingerprint unchanged; transit refresh skipped")
         _emit(progress_cb, f"reusing transit reality {reality_state.reality_fingerprint}")
+        _ensure_railway_track_proximity(
+            engine,
+            import_fingerprint=import_fingerprint,
+            reality_state=reality_state,
+            progress_cb=progress_cb,
+        )
         if not export_zip_path.exists():
             existing_rows = [
                 GtfsStopReality(
@@ -204,5 +246,11 @@ def ensure_transit_reality(
         export_transport_reality_bundle(
             load_gtfs_stop_reality_models(artifacts_dir / "derived" / "gtfs_stop_reality.csv"),
             analysis_date=reality_state.analysis_date,
+        )
+        _ensure_railway_track_proximity(
+            engine,
+            import_fingerprint=import_fingerprint,
+            reality_state=reality_state,
+            progress_cb=progress_cb,
         )
     return reality_state

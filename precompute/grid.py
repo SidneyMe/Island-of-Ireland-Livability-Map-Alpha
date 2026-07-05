@@ -306,6 +306,7 @@ def score_cell(
     effective_area_ratio: float = 1.0,
     density_normalized_categories: tuple[str, ...] = _DENSITY_NORMALIZED_CATEGORIES,
     effective_units: dict[str, float] | None = None,
+    railway_proximity_penalty: float = 0.0,
 ) -> tuple[dict[str, float], float]:
     normalized_ratio = _normalized_area_ratio(effective_area_ratio)
     per_category: dict[str, float] = {}
@@ -321,7 +322,28 @@ def score_cell(
             if effective_units is not None:
                 effective_count = float(effective_units.get(category, 0.0)) / normalized_ratio
         per_category[category] = min(effective_count / cap, 1.0) * 25.0
-    return per_category, sum(per_category.values())
+    deduction = max(float(railway_proximity_penalty), 0.0)
+    per_category["railway_proximity"] = -deduction
+    return per_category, max(sum(per_category.values()), 0.0)
+
+
+def _railway_penalty_for_node(
+    railway_proximity_penalties_by_node,
+    node: Any,
+) -> float:
+    if railway_proximity_penalties_by_node is None:
+        return 0.0
+    node_index = int(node)
+    try:
+        if isinstance(railway_proximity_penalties_by_node, dict):
+            return max(float(railway_proximity_penalties_by_node.get(node_index, 0.0)), 0.0)
+        value = railway_proximity_penalties_by_node[node_index]
+    except (IndexError, KeyError, TypeError, ValueError):
+        return 0.0
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def score_cells(
@@ -330,6 +352,7 @@ def score_cells(
     cluster_counts_by_node,
     cell_nodes: list[Any],
     effective_units_by_node=None,
+    railway_proximity_penalties_by_node=None,
 ) -> None:
     if not cells:
         return
@@ -345,11 +368,16 @@ def score_cells(
                 for category, value in dict(effective_units_by_node.get(node, {})).items()
             }
         )
+        railway_proximity_penalty = _railway_penalty_for_node(
+            railway_proximity_penalties_by_node,
+            node,
+        )
         scores, total = score_cell(
             counts,
             cluster_counts=cluster_counts,
             effective_area_ratio=float(cell.get("effective_area_ratio", 1.0)),
             effective_units=effective_units,
+            railway_proximity_penalty=railway_proximity_penalty,
         )
         cell["counts"] = counts
         cell["cluster_counts"] = cluster_counts

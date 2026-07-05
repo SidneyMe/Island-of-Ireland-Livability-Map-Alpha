@@ -120,7 +120,7 @@ def _osm2pgsql_number_processes() -> int | None:
 OSM2PGSQL_NUMBER_PROCESSES = _osm2pgsql_number_processes()
 GTFS_DIR = BASE_DIR / "gtfs"
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
-TRANSIT_REALITY_ALGO_VERSION = 8
+TRANSIT_REALITY_ALGO_VERSION = 9
 AMENITY_MERGE_ALGO_VERSION = 4
 
 
@@ -382,7 +382,7 @@ SURFACE_SCORE_RAMP = [
     (100.0, "#fde725"),
 ]
 SURFACE_SHELL_SCHEMA_VERSION = 1
-FINE_SURFACE_SCHEMA_VERSION = 1
+FINE_SURFACE_SCHEMA_VERSION = 2
 ENABLE_FINE_RASTER_SURFACE = (
     os.getenv("LIVABILITY_FINE_RASTER_SURFACE", "1").strip().lower()
     not in {"0", "false", "no", "off"}
@@ -421,6 +421,11 @@ DISTANCE_DECAY_HALF_DISTANCE_M = {
     "healthcare": 300.0,
     "parks": 350.0,
 }
+
+RAILWAY_PROXIMITY_ACTIVE_MODES = ("rail", "tram")
+RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M = 50.0
+RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M = 200.0
+RAILWAY_PROXIMITY_MAX_PENALTY = 4.0
 
 
 CAPS = {"shops": 6, "transport": 5, "healthcare": 5, "parks": 5}
@@ -494,9 +499,9 @@ CATEGORY_COLORS = {
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
 OSM_EXTRACT_FINGERPRINT_CACHE_PATH = CACHE_DIR / "osm_extract_fingerprint_cache.json"
-PMTILES_SCHEMA_VERSION = 10
+PMTILES_SCHEMA_VERSION = 11
 GRID_GEOMETRY_SCHEMA_VERSION = 4
-CACHE_SCHEMA_VERSION = 12
+CACHE_SCHEMA_VERSION = 13
 FORCE_RECOMPUTE = False
 USE_COMPRESSED_CACHE = True
 MANIFEST_NAME = "manifest.json"
@@ -1106,6 +1111,10 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
         "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
         "fine_surface_schema_version": FINE_SURFACE_SCHEMA_VERSION,
+        "railway_proximity_active_modes": list(RAILWAY_PROXIMITY_ACTIVE_MODES),
+        "railway_proximity_full_penalty_distance_m": RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M,
+        "railway_proximity_zero_penalty_distance_m": RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
+        "railway_proximity_max_penalty": RAILWAY_PROXIMITY_MAX_PENALTY,
     }
     score_hash = hash_dict(score_params)
 

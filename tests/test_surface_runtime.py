@@ -37,7 +37,7 @@ def _write_score_manifest(score_dir: Path, *, shard_inventory: list[dict[str, ob
         score_dir,
         {
             "status": "complete",
-            "schema_version": 1,
+            "schema_version": config.FINE_SURFACE_SCHEMA_VERSION,
             "score_hash": "score-hash-123",
             "surface_shell_hash": "shell-hash-123",
             "base_resolution_m": 50,
@@ -143,6 +143,7 @@ class FineSurfaceRuntimeTests(TestCase):
         np.testing.assert_array_equal(actual["effective_units_matrix"], expected["effective_units_matrix"])
         np.testing.assert_allclose(actual["reference_scores"], expected["reference_scores"])
         np.testing.assert_allclose(actual["reference_total"], expected["reference_total"])
+        np.testing.assert_allclose(actual["railway_proximity_penalties"], expected["railway_proximity_penalties"])
 
     def test_render_tile_caches_png_and_reuses_cached_result(self) -> None:
         with TemporaryDirectory() as tmp_name:
@@ -158,8 +159,9 @@ class FineSurfaceRuntimeTests(TestCase):
                     "counts_matrix": np.zeros((1, 4), dtype=np.uint32),
                     "cluster_counts_matrix": np.zeros((1, 4), dtype=np.uint32),
                     "effective_units_matrix": np.zeros((1, 4), dtype=np.float32),
-                    "reference_scores": np.zeros((1, 4), dtype=np.float32),
+                    "reference_scores": np.zeros((1, 5), dtype=np.float32),
                     "reference_total": np.zeros(1, dtype=np.float32),
+                    "railway_proximity_penalties": np.zeros(1, dtype=np.float32),
                 },
             )
             _write_score_manifest(score_dir, shard_inventory=[])
@@ -203,8 +205,9 @@ class FineSurfaceRuntimeTests(TestCase):
                     "counts_matrix": np.zeros((4, 4), dtype=np.uint32),
                     "cluster_counts_matrix": np.zeros((4, 4), dtype=np.uint32),
                     "effective_units_matrix": np.zeros((4, 4), dtype=np.float32),
-                    "reference_scores": np.zeros((4, 4), dtype=np.float32),
+                    "reference_scores": np.zeros((4, 5), dtype=np.float32),
                     "reference_total": np.zeros(4, dtype=np.float32),
+                    "railway_proximity_penalties": np.zeros(4, dtype=np.float32),
                 },
             )
             _write_shell_manifest(
@@ -270,8 +273,9 @@ class FineSurfaceRuntimeTests(TestCase):
                     "counts_matrix": np.array([[1, 0, 0, 0]], dtype=np.uint32),
                     "cluster_counts_matrix": np.array([[1, 0, 0, 0]], dtype=np.uint32),
                     "effective_units_matrix": np.array([[6.0, 0.0, 0.0, 0.0]], dtype=np.float32),
-                    "reference_scores": np.array([[25.0, 0.0, 0.0, 0.0]], dtype=np.float32),
+                    "reference_scores": np.array([[25.0, 0.0, 0.0, 0.0, 0.0]], dtype=np.float32),
                     "reference_total": np.array([25.0], dtype=np.float32),
+                    "railway_proximity_penalties": np.array([0.0], dtype=np.float32),
                 },
             )
             _write_shell_manifest(
@@ -310,6 +314,7 @@ class FineSurfaceRuntimeTests(TestCase):
         self.assertEqual(payload["cluster_counts"], {"shops": 1})
         self.assertEqual(payload["effective_units"], {"shops": 6.0})
         self.assertEqual(payload["component_scores"]["shops"], 25.0)
+        self.assertEqual(payload["component_scores"]["railway_proximity"], 0.0)
         self.assertEqual(payload["total_score"], 25.0)
 
     @unittest.skipUnless(Path(config.WALKGRAPH_BIN).is_file(), "walkgraph binary is required for the integration fixture")

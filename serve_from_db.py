@@ -193,6 +193,7 @@ class RuntimeState:
     runtime_mode: str
     runtime_warning: str | None
     noise_proxy_metadata: dict[str, Any] | None
+    railway_proximity: dict[str, Any] | None
 
 
 class RuntimeService:
@@ -555,6 +556,36 @@ class RuntimeService:
             "actual_runway_geometry": False,
             "actual_geometry": False,
         }
+        raw_railway_summary = summary_json.get("railway_proximity")
+        if isinstance(raw_railway_summary, dict):
+            railway_proximity = dict(raw_railway_summary)
+        else:
+            railway_proximity = {}
+        if not railway_proximity:
+            railway_proximity = {
+                "enabled": bool(summary_json.get("railway_proximity_enabled")),
+                "data_present": bool(summary_json.get("railway_proximity_data_present")),
+                "hash": summary_json.get("railway_proximity_hash"),
+                "source_kind": summary_json.get("railway_proximity_source_kind"),
+                "active_feed_count": int(summary_json.get("railway_proximity_active_feed_count", 0) or 0),
+                "active_service_count": int(summary_json.get("railway_proximity_active_service_count", 0) or 0),
+                "active_trip_count": int(summary_json.get("railway_proximity_active_trip_count", 0) or 0),
+                "active_shape_count": int(summary_json.get("railway_proximity_active_shape_count", 0) or 0),
+                "warning_count": int(summary_json.get("railway_proximity_warning_count", 0) or 0),
+                "materialized_corridor_count": int(
+                    summary_json.get("railway_proximity_materialized_corridor_count", 0) or 0
+                ),
+                "full_penalty_distance_m": float(
+                    summary_json.get("railway_proximity_full_penalty_distance_m", 50.0) or 50.0
+                ),
+                "zero_penalty_distance_m": float(
+                    summary_json.get("railway_proximity_zero_penalty_distance_m", 200.0) or 200.0
+                ),
+                "max_penalty": float(
+                    summary_json.get("railway_proximity_max_penalty", 4.0) or 4.0
+                ),
+                "active_modes": list(summary_json.get("railway_proximity_active_modes") or ["rail", "tram"]),
+            }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -649,6 +680,7 @@ class RuntimeService:
             runtime_mode=runtime_mode,
             runtime_warning=runtime_warning,
             noise_proxy_metadata=noise_proxy_metadata,
+            railway_proximity=railway_proximity,
         )
 
     def state(self) -> RuntimeState:
@@ -704,6 +736,7 @@ class RuntimeService:
             "runtime_mode": state.runtime_mode,
             "runtime_warning": state.runtime_warning,
             "noise_proxy_metadata": state.noise_proxy_metadata,
+            "railway_proximity": state.railway_proximity,
         }
 
     def surface_runtime(self) -> _surface.FineSurfaceRuntime:

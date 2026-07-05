@@ -64,6 +64,7 @@ from .write_transit import (
     replace_gtfs_feed_rows,
     replace_service_desert_rows,
     replace_transit_reality_rows,
+    replace_transit_railway_corridors,
 )
 
 
