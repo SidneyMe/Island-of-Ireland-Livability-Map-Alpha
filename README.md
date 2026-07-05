@@ -221,7 +221,7 @@ GTFS_ANALYSIS_WINDOW_DAYS=30
 GTFS_SERVICE_DESERT_WINDOW_DAYS=7
 ```
 
-Optional `GTFS_NTA_URL` and `GTFS_TRANSLINK_URL` values can be set when you want `--refresh-transit` to refresh those local zip files before parsing.
+Optional `GTFS_NTA_URL` and `GTFS_TRANSLINK_URL` values can be set when you want `python main.py transit` to refresh those local zip files before parsing.
 
 ## Usage Commands
 
@@ -230,28 +230,28 @@ Each example shows `python` first and the `python3` POSIX alternative second. Us
 Refresh the raw local OSM import:
 
 ```text
-python main.py --refresh-import
-python3 main.py --refresh-import
+python main.py import
+python3 main.py import
 ```
 
 Refresh GTFS-derived transport reality and rebuild the standalone export bundle:
 
 ```text
-python main.py --refresh-transit
-python3 main.py --refresh-transit
+python main.py transit
+python3 main.py transit
 ```
 
-`--refresh-transit` now reuses the existing transit reality when the GTFS inputs and current OSM import fingerprint still match. Use `--force-transit-refresh` when you want a full rebuild anyway.
+`transit` now reuses the existing transit reality when the GTFS inputs and current OSM import fingerprint still match. Use `--force-transit-refresh` when you want a full rebuild anyway.
 The refreshed transport dataset now keeps one published stop row per GTFS stop, emits unscheduled boarding stops only when a `stops.txt` row has no `stop_times`, and carries weekly bus subtier plus frequency fields into the export bundle, PMTiles layer, and runtime JSON.
 
 Run precompute using an existing raw import:
 
 ```text
-python main.py --precompute
-python3 main.py --precompute
+python main.py precompute
+python3 main.py precompute
 ```
 
-`--precompute` now ensures GTFS transit reality exists before transport scoring runs. The publish step also writes:
+`precompute` now ensures GTFS transit reality exists before transport scoring runs. The publish step also writes:
 
 - `transport_reality` PMTiles/runtime layer
 - `service_deserts` PMTiles/runtime layer
@@ -260,15 +260,15 @@ python3 main.py --precompute
 Allow precompute to refresh the import if the raw import is missing:
 
 ```text
-python main.py --precompute --auto-refresh-import
-python3 main.py --precompute --auto-refresh-import
+python main.py precompute --auto-refresh-import
+python3 main.py precompute --auto-refresh-import
 ```
 
 Force a rebuild of the current PostGIS build:
 
 ```text
-python main.py --precompute --force-precompute
-python3 main.py --precompute --force-precompute
+python main.py precompute --force-precompute
+python3 main.py precompute --force-precompute
 ```
 
 ### Windows Noise Workflow (Fast Reuse, Smart Prepare, Explicit Force)
@@ -322,8 +322,8 @@ rows must be reimported.
 Serve the local web app:
 
 ```text
-python main.py --serve
-python3 main.py --serve
+python main.py serve
+python3 main.py serve
 ```
 
 The server defaults to:
@@ -335,11 +335,11 @@ http://127.0.0.1:8000/
 You can override the bind address:
 
 ```text
-python main.py --serve --host 127.0.0.1 --port 8080
-python3 main.py --serve --host 127.0.0.1 --port 8080
+python main.py serve --host 127.0.0.1 --port 8080
+python3 main.py serve --host 127.0.0.1 --port 8080
 ```
 
-`--render` still exists as a legacy alias for `--serve`.
+If you omit the subcommand entirely, `serve` is the default path.
 
 ## Testing
 

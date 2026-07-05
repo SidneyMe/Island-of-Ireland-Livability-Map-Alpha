@@ -622,12 +622,12 @@ def assert_import_payload_ready(engine: Engine, import_fingerprint: str, normali
     if not root._manifest_matches_scope(manifest, normalization_scope_hash):
         raise RuntimeError(
             "The raw OSM import manifest does not match the current normalization scope "
-            f"for import_fingerprint={import_fingerprint}. Re-run --precompute with "
+            f"for import_fingerprint={import_fingerprint}. Re-run python main.py precompute with "
             "--auto-refresh-import or refresh the import explicitly."
         )
     if not root.import_payload_ready(engine, import_fingerprint, normalization_scope_hash):
         raise RuntimeError(
             "The raw OSM import exists but amenity features are missing or empty "
-            f"for import_fingerprint={import_fingerprint}. Re-run --precompute with "
+            f"for import_fingerprint={import_fingerprint}. Re-run python main.py precompute with "
             "--force-precompute to refresh the import."
         )

@@ -112,7 +112,7 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 
 **How:**
 
-- Script that downloads the latest Ireland + NI extract from Geofabrik (or equivalent), runs `--refresh-import` then `--precompute`, and publishes the resulting PMTiles.
+- Script that downloads the latest Ireland + NI extract from Geofabrik (or equivalent), runs `python main.py import` then `python main.py precompute`, and publishes the resulting PMTiles.
 - Runs on a cron — weekly or monthly depending on how much OSM churn matters at the scoring granularity.
 - Emits a manifest with the extract date so the Phase 6 data-freshness indicator can pick it up.
 - Tolerates failures without clobbering the last good build.

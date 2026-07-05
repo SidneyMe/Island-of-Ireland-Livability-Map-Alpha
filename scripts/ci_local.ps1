@@ -88,7 +88,7 @@ try {
     }
 
     Invoke-Step "Precompute explain smoke" {
-        & python main.py --precompute-dev --explain
+        & python main.py precompute --profile dev --explain
     }
 
     Invoke-Step "Frontend tests" {

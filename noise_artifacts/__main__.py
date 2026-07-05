@@ -118,7 +118,7 @@ def _run_build(args) -> int:
     if getattr(args, "bake_pmtiles", False):
         print(
             "Standalone noise artifact PMTiles bake is not yet implemented. "
-            "Use `python main.py --precompute` to bake livability PMTiles from noise_polygons.",
+            "Use `python main.py precompute` to bake livability PMTiles from noise_polygons.",
             file=__import__("sys").stderr,
         )
         return 1

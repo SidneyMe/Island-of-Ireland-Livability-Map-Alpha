@@ -232,7 +232,7 @@ class LocalServerEndpointTests(TestCase):
         message = serve_from_db._missing_precompute_message(profile="test")
 
         self.assertIn("profile=test", message)
-        self.assertIn("Run --precompute-test first.", message)
+        self.assertIn("Run precompute --profile test first.", message)
 
     def test_root_serves_static_index_html(self) -> None:
         service = _FakeService()
@@ -1273,7 +1273,7 @@ class RenderAndCliTests(TestCase):
 
     def test_main_serve_flag_starts_local_app(self) -> None:
         with (
-            mock.patch.object(sys, "argv", ["main.py", "--serve"]),
+            mock.patch.object(sys, "argv", ["main.py", "serve"]),
             mock.patch("render_from_db.run_render_from_db", return_value="http://127.0.0.1:8000/") as render_mock,
         ):
             exit_code = main.main()
@@ -1287,7 +1287,7 @@ class RenderAndCliTests(TestCase):
 
     def test_main_serve_dev_flag_starts_dev_local_app(self) -> None:
         with (
-            mock.patch.object(sys, "argv", ["main.py", "--serve-dev"]),
+            mock.patch.object(sys, "argv", ["main.py", "serve", "--profile", "dev"]),
             mock.patch("render_from_db.run_render_from_db", return_value="http://127.0.0.1:8000/") as render_mock,
         ):
             exit_code = main.main()
@@ -1301,7 +1301,7 @@ class RenderAndCliTests(TestCase):
 
     def test_main_serve_test_flag_starts_test_local_app(self) -> None:
         with (
-            mock.patch.object(sys, "argv", ["main.py", "--serve-test"]),
+            mock.patch.object(sys, "argv", ["main.py", "serve", "--profile", "test"]),
             mock.patch("render_from_db.run_render_from_db", return_value="http://127.0.0.1:8000/") as render_mock,
         ):
             exit_code = main.main()

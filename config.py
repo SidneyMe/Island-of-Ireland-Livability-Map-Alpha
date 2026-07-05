@@ -604,11 +604,7 @@ def resolve_noise_max_zoom(profile: str | None = None) -> int:
 
 def precompute_flag_for_profile(profile: str | None = None) -> str:
     normalized_profile = normalize_build_profile(profile)
-    if normalized_profile == "dev":
-        return "--precompute-dev"
-    if normalized_profile == "test":
-        return "--precompute-test"
-    return "--precompute"
+    return f"precompute --profile {normalized_profile}"
 
 
 def pmtiles_filename(profile: str | None = None) -> str:
@@ -943,7 +939,7 @@ def validate_local_osm_extract(path: Path = OSM_EXTRACT_PATH) -> Path:
     if not path.exists():
         raise RuntimeError(
             f"Required local OSM extract was not found at '{path}'. Place the "
-            f"file there before running --precompute."
+            f"file there before running python main.py precompute."
         )
     return path
 

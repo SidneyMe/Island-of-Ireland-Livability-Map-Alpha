@@ -111,7 +111,7 @@ def _require_igraph():
     if ig is None:  # pragma: no cover - depends on local environment
         raise RuntimeError(
             "python-igraph is required to load walk graph sidecars. "
-            "Install requirements.txt before running --precompute."
+            "Install requirements.txt before running python main.py precompute."
         )
     return ig
 

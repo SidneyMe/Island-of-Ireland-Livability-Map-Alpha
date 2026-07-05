@@ -119,8 +119,8 @@ class ConfigHashTests(TestCase):
         self.assertEqual(
             state.feed_fingerprints,
             {
-                "nta": "fp-current.zip",
-                "translink": "fp-current.zip",
+                "nta": "fp-nta_gtfs.zip",
+                "translink": "fp-translink_gtfs.zip",
             },
         )
 
@@ -309,7 +309,7 @@ class SurfaceResolutionTests(TestCase):
         self.assertIsNone(test_settings.study_area_county_name)
         self.assertEqual(test_settings.study_area_bbox_wgs84, (-8.55, 51.87, -8.41, 51.93))
         self.assertEqual(config.pmtiles_filename("test"), "livability-test.pmtiles")
-        self.assertEqual(config.precompute_flag_for_profile("test"), "--precompute-test")
+        self.assertEqual(config.precompute_flag_for_profile("test"), "precompute --profile test")
 
     def test_test_profile_bbox_changes_geo_hash_from_previous_county_setting(self) -> None:
         bbox_hashes = config.build_config_hashes(profile="test")
@@ -748,70 +748,46 @@ class RunnerModuleTests(TestCase):
 
 
 class MainCliNoiseFlagsTests(TestCase):
-    """FIX 6: CLI flags --refresh-noise-artifact and --force-noise-artifact must be present."""
+    """CLI noise flags should parse under the precompute subcommand."""
 
     def _build_parser(self):
         import main as _main
-        return _main.build_parser()
+        return _main
 
     def test_refresh_noise_artifact_flag_exists(self) -> None:
-        parser = self._build_parser()
-        args = parser.parse_args(["--precompute", "--refresh-noise-artifact"])
+        main_module = self._build_parser()
+        args = main_module.parse_args(["precompute", "--refresh-noise-artifact"])
         self.assertTrue(args.refresh_noise_artifact)
 
     def test_force_noise_artifact_flag_exists(self) -> None:
-        parser = self._build_parser()
-        args = parser.parse_args(["--precompute", "--force-noise-artifact"])
+        main_module = self._build_parser()
+        args = main_module.parse_args(["precompute", "--force-noise-artifact"])
         self.assertTrue(args.force_noise_artifact)
 
     def test_reimport_noise_source_flag_exists(self) -> None:
-        parser = self._build_parser()
-        args = parser.parse_args(["--precompute", "--reimport-noise-source"])
+        main_module = self._build_parser()
+        args = main_module.parse_args(["precompute", "--reimport-noise-source"])
         self.assertTrue(args.reimport_noise_source)
 
     def test_force_noise_all_flag_exists(self) -> None:
-        parser = self._build_parser()
-        args = parser.parse_args(["--precompute", "--force-noise-all"])
+        main_module = self._build_parser()
+        args = main_module.parse_args(["precompute", "--force-noise-all"])
         self.assertTrue(args.force_noise_all)
 
     def test_noise_accurate_flag_exists(self) -> None:
-        parser = self._build_parser()
-        args = parser.parse_args(["--precompute", "--noise-accurate"])
+        main_module = self._build_parser()
+        args = main_module.parse_args(["precompute", "--noise-accurate"])
         self.assertTrue(args.noise_accurate)
 
     def test_require_active_noise_artifact_flag_exists(self) -> None:
-        parser = self._build_parser()
-        args = parser.parse_args(["--precompute", "--require-active-noise-artifact"])
+        main_module = self._build_parser()
+        args = main_module.parse_args(["precompute", "--require-active-noise-artifact"])
         self.assertTrue(args.require_active_noise_artifact)
 
-    def test_force_noise_artifact_requires_precompute_is_validated(self) -> None:
-        """main() must validate that --force-noise-artifact requires a precompute flag."""
-        import inspect
-        import main as _main
-        src = inspect.getsource(_main.main)
-        self.assertIn("force_noise_artifact", src)
-        self.assertIn("requires --precompute", src)
-
-    def test_refresh_noise_artifact_requires_precompute_is_validated(self) -> None:
-        """main() must validate that --refresh-noise-artifact requires a precompute flag."""
-        import inspect
-        import main as _main
-        src = inspect.getsource(_main.main)
-        self.assertIn("refresh_noise_artifact", src)
-
-    def test_reimport_noise_source_requires_precompute_is_validated(self) -> None:
-        import inspect
-        import main as _main
-        src = inspect.getsource(_main.main)
-        self.assertIn("reimport_noise_source", src)
-        self.assertIn("--reimport-noise-source requires --precompute", src)
-
-    def test_force_noise_all_requires_precompute_is_validated(self) -> None:
-        import inspect
-        import main as _main
-        src = inspect.getsource(_main.main)
-        self.assertIn("force_noise_all", src)
-        self.assertIn("--force-noise-all requires --precompute", src)
+    def test_precompute_profile_defaults_to_full(self) -> None:
+        main_module = self._build_parser()
+        args = main_module.parse_args(["precompute"])
+        self.assertEqual(args.profile, "full")
 
 
 class WorkflowNoiseAutoBuildsTests(TestCase):

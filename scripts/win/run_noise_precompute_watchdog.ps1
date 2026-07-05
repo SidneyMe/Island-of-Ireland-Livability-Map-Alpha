@@ -26,7 +26,9 @@ $baseArgs = @(
     "`"$geoCmd`"",
     $pythonExe,
     "main.py",
-    "--precompute-dev"
+    "precompute",
+    "--profile",
+    "dev"
 )
 
 switch ($Mode) {

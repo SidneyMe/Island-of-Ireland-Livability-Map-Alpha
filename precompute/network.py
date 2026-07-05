@@ -31,7 +31,7 @@ def _require_igraph():
     if ig is None:  # pragma: no cover - exercised when dependency is missing
         raise RuntimeError(
             "python-igraph is required for walk reachability fallback. "
-            "Install requirements.txt before running --precompute."
+            "Install requirements.txt before running python main.py precompute."
         )
     return ig
 

@@ -58,28 +58,23 @@
 
 ### `main.py`
 
-- Primary CLI entry point. (Confirmed, LOC: 153)
+- Primary CLI entry point. (Confirmed, LOC: 326)
 - Dispatches:
-  - `--refresh-import` -> `precompute.refresh_local_import()`
-  - `--refresh-gtfs` -> `transit_refresh_runner.refresh_gtfs()`
-  - `--refresh-gtfs --status` -> `transit_refresh_runner.gtfs_status()` diagnostics only (no download)
-  - `--auto-refresh-gtfs` -> only valid with `--refresh-transit`; refreshes stale/missing GTFS cache before transit preflight
-  - `--force-gtfs-refresh` -> only valid with `--refresh-gtfs` / `--refresh-transit`; forces GTFS ZIP re-download
-  - `--refresh-transit` -> `transit_refresh_runner.refresh_transit()`
-  - `--force-transit-refresh` -> same path, but only valid with `--refresh-transit`
-- `--refresh-transit` reuses the existing GTFS cache by default; automatic feed download only happens with `--auto-refresh-gtfs` or `--force-gtfs-refresh`, and a missing cache still fails fast. (Confirmed)
-- `--precompute` / `--precompute-dev` / `--precompute-test` -> `precompute.run_precompute(profile="full"|"dev"|"test")`
-  - `--explain` / `--precompute-explain` with a precompute profile -> prints the planner decision tree without entering the expensive execution phases
-  - `--force-precompute` -> only valid with `--precompute` / `--precompute-dev` / `--precompute-test`
-  - `--refresh-noise-artifact` -> refresh artifact during precompute when missing/stale
-  - `--force-noise-artifact` -> force resolved artifact rebuild while reusing existing source rows
-  - `--reimport-noise-source` -> force raw source re-import into `noise_normalized`
-  - `--force-noise-all` -> force both source re-import and resolved rebuild
-  - `--auto-refresh-import` -> only valid with `--precompute` / `--precompute-dev` / `--precompute-test`
-  - `--serve` / `--render` / `--serve-dev` / `--render-dev` / `--serve-test` / `--render-test` -> `render_from_db.run_render_from_db(...)`
-- `--render` is a legacy alias for `--serve`. `--render-dev` is a legacy alias for `--serve-dev`. `--render-test` is a legacy alias for `--serve-test`. (Confirmed)
-- If no action flag is supplied, serving is the default path. (Confirmed)
-- `--refresh-transit` now goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged, and can optionally auto-refresh GTFS cache first via `--auto-refresh-gtfs`. It still prints the explicit completion line plus the transit-phase `completed` tracker line. (Confirmed)
+  - `import` -> `precompute.refresh_local_import()`
+  - `gtfs status` -> `transit_refresh_runner.gtfs_status()` diagnostics only (no download)
+  - `gtfs refresh` -> `transit_refresh_runner.refresh_gtfs()`
+  - `transit` -> `transit_refresh_runner.refresh_transit()`
+  - `precompute --profile {full,dev,test}` -> `precompute.run_precompute(profile="full"|"dev"|"test")`
+    - `--explain` with a precompute profile -> prints the planner decision tree without entering the expensive execution phases
+    - `--force-precompute` -> rebuilds and replaces the current PostGIS build even if a complete manifest already exists
+    - `--refresh-noise-artifact` -> refresh artifact during precompute when missing/stale
+    - `--force-noise-artifact` -> force resolved artifact rebuild while reusing existing source rows
+    - `--reimport-noise-source` -> force raw source re-import into `noise_normalized`
+    - `--force-noise-all` -> force both source re-import and resolved rebuild
+    - `--auto-refresh-import` -> allow precompute to refresh raw OSM import state when missing
+  - `serve --profile {full,dev,test}` -> `render_from_db.run_render_from_db(...)`
+- If no subcommand is supplied, serving is the default path. (Confirmed)
+- `transit` now goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged, and can optionally auto-refresh GTFS cache first via `--auto-refresh-gtfs`. It still prints the explicit completion line plus the transit-phase `completed` tracker line. (Confirmed)
 
 ### `.github/workflows/scheduled_refresh.yml`
 
@@ -87,8 +82,8 @@
 - Uses workflow-level concurrency so scheduled and manual refresh runs do not overlap, and a 240-minute job timeout to keep long refresh/precompute runs bounded. The OSM force flag is expanded without bash-only syntax so the workflow stays portable across an undocumented self-hosted runner OS. (Confirmed)
 - Runs:
   - `python scripts/refresh_osm.py`
-  - `python main.py --refresh-transit`
-  - `python main.py --precompute --auto-refresh-import`
+  - `python main.py transit`
+  - `python main.py precompute --auto-refresh-import`
   - `python scripts/sanity_check.py --profile full`
 
 ### `.github/workflows/ci.yml`
@@ -106,7 +101,7 @@
 ### `scripts/ci_local.ps1`
 
 - Local Windows PowerShell CI runner for pre-push checks. (Confirmed)
-- Runs the practical developer-facing sequence: command availability checks for `python`, `npm.cmd`, and `git`; `python -m pytest -q`; `python -m alembic current`; `python -m alembic upgrade head`; `python scripts/db_integrity_check.py`; `python main.py --precompute-dev --explain`; `npm.cmd test --prefix frontend`; `npm.cmd run build --prefix frontend`; `git diff --exit-code -- static/dist`; and `git diff --check`. (Confirmed)
+- Runs the practical developer-facing sequence: command availability checks for `python`, `npm.cmd`, and `git`; `python -m pytest -q`; `python -m alembic current`; `python -m alembic upgrade head`; `python scripts/db_integrity_check.py`; `python main.py precompute --profile dev --explain`; `npm.cmd test --prefix frontend`; `npm.cmd run build --prefix frontend`; `git diff --exit-code -- static/dist`; and `git diff --check`. (Confirmed)
 - Stops on the first failure, prints section headers, and reports elapsed time per step. (Confirmed)
 
 ### `scripts/sanity_check.py`
@@ -136,18 +131,18 @@
    boundaries/*.geojson
 
 2. Raw import
-   python main.py --refresh-import
+   python main.py import
    -> local_osm_import/
    -> osm_raw.features + osm_raw.import_manifest
 
 3. Transit reality
-   python main.py --refresh-transit
+   python main.py transit
    -> transit/workflow.py
    -> walkgraph gtfs-refresh
    -> transit_raw.* + transit_derived.*
 
 4. Precompute
-   python main.py --precompute
+   python main.py precompute
    -> precompute/__init__.run_precompute()
    -> precompute/workflow.run_precompute_impl()
    -> geometry
@@ -176,7 +171,7 @@
    -> .livability_cache/noise[(-dev|-test)].pmtiles
 
 7. Runtime serve
-   python main.py --serve
+   python main.py serve
    -> render_from_db.run_render_from_db()
    -> serve_from_db.serve_livability_app()
    Endpoints:
@@ -283,7 +278,7 @@ Notes:
 
 ### `transit_refresh_runner.py`
 
-- Purpose: lightweight CLI-only GTFS refresh path used by `main.py --refresh-gtfs` and `main.py --refresh-transit`. (Confirmed)
+  - Purpose: lightweight CLI-only GTFS refresh path used by `main.py gtfs status`, `main.py gtfs refresh`, and `main.py transit`. (Confirmed)
 - Why it matters: avoids importing the whole `precompute` package before the first transit progress line, now starts the tracker before DB/schema checks and source-state resolution, and passes transit progress callbacks into OSM source-state fingerprinting so users can see `osm2pgsql --version` probes plus cached-vs-rehashed `.osm.pbf` resolution immediately in the console. (Confirmed)
 - Main functions: `refresh_gtfs()`, `gtfs_status()`, `refresh_transit()`, `_preflight_transit_rebuild()`
 
@@ -622,7 +617,7 @@ tests/test_server_behavior.py
 | `scripts/win/bootstrap_geo_env.cmd` | Windows first-time setup wrapper: activates conda base, creates `%GEO_CONDA_ENV%` from `environment.yml` via mamba when missing, then runs env checks |
 | `scripts/win/check_geo_env.cmd` | Windows GDAL driver sanity check wrapper (including PostgreSQL/PostGIS driver visibility) |
 | `scripts/win/selftest_geo_env.cmd` | Windows post-check smoke script for `ogr2ogr` path, GDAL/PROJ env vars, PostgreSQL GDAL driver, and core Python imports |
-| `scripts/win/precompute_dev.cmd` | Windows dev precompute wrapper that routes `python main.py --precompute-dev` through `geo_env.cmd` and the conda-backed `livability-gdal` Python |
+| `scripts/win/precompute_dev.cmd` | Windows dev precompute wrapper that routes `python main.py precompute --profile dev` through `geo_env.cmd` and the conda-backed `livability-gdal` Python |
 | `scripts/win/precompute_noise_dev.cmd` | Windows fast DevReuse wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevReuse`; requires an existing mode-matched resolved artifact and never passes `--force-precompute` |
 | `scripts/win/prepare_noise_artifact_dev.cmd` | Windows dev-fast cache-aware artifact refresh wrapper via `run_noise_precompute_watchdog.ps1 -Mode DevPrepare`; builds when missing/stale without forcing source reimport or amenities/grids |
 | `scripts/win/prepare_noise_artifact_accurate.cmd` | Windows accurate cache-aware artifact refresh wrapper via `run_noise_precompute_watchdog.ps1 -Mode AccuratePrepare`; builds when missing/stale without forcing source reimport or amenities/grids |
@@ -638,11 +633,11 @@ tests/test_server_behavior.py
 | Operation | Prerequisites |
 |---|---|
 | Any pipeline command | reachable PostGIS config |
-| `--refresh-import` | local OSM PBF + `osm2pgsql` available |
-| `--refresh-gtfs` | network access to configured public static GTFS ZIP URLs (unless custom local-only URL/path config is used) |
-| `--refresh-transit` | cached GTFS ZIP(s) by default; add `--auto-refresh-gtfs` or `--force-gtfs-refresh` to download/update feeds + compiled `walkgraph` with `gtfs-refresh` support |
-| `--precompute` | managed schema ready, raw import ready or `--auto-refresh-import`, preferred `ireland_main_island_shp` coastline or fallback boundaries present, compiled `walkgraph` |
-| `--serve` | completed precompute build and main PMTiles archive for the chosen profile; noise PMTiles is optional and advertised only when available |
+| `import` | local OSM PBF + `osm2pgsql` available |
+| `gtfs status` / `gtfs refresh` | network access to configured public static GTFS ZIP URLs (unless custom local-only URL/path config is used) |
+| `transit` | cached GTFS ZIP(s) by default; add `--auto-refresh-gtfs` or `--force-gtfs-refresh` to download/update feeds + compiled `walkgraph` with `gtfs-refresh` support |
+| `precompute` | managed schema ready, raw import ready or `--auto-refresh-import`, preferred `ireland_main_island_shp` coastline or fallback boundaries present, compiled `walkgraph` |
+| `serve` | completed precompute build and main PMTiles archive for the chosen profile; noise PMTiles is optional and advertised only when available |
 | Overture merge | `overture/ireland_places.geoparquet` present; otherwise it degrades gracefully |
 | Noise overlay | `noise_datasets/*.zip` present for published contours; ROI Round 4 road requires `pyogrio`/GDAL FileGDB support |
 

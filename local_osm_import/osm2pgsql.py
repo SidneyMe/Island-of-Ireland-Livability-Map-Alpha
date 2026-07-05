@@ -22,7 +22,7 @@ def detect_importer_version_impl(importer_bin: str, *, subprocess_module=subproc
     except FileNotFoundError as exc:
         raise RuntimeError(
             "osm2pgsql is required for local OSM import, but it was not found on PATH. "
-            "Install osm2pgsql or set OSM2PGSQL_BIN before running --precompute."
+            "Install osm2pgsql or set OSM2PGSQL_BIN before running python main.py precompute."
         ) from exc
     except subprocess_module.CalledProcessError as exc:
         stderr = (exc.stderr or "").strip()
@@ -245,7 +245,7 @@ def run_osm2pgsql_import_impl(
     except FileNotFoundError as exc:
         raise RuntimeError(
             "osm2pgsql is required for local OSM import, but it was not found on PATH. "
-            "Install osm2pgsql or set OSM2PGSQL_BIN before running --precompute."
+            "Install osm2pgsql or set OSM2PGSQL_BIN before running python main.py precompute."
         ) from exc
 
     recent_lines: list[str] = []
