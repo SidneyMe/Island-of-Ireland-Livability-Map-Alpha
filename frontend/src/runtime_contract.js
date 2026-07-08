@@ -1,3 +1,9 @@
+import {
+  buildLanduseContextLayerFilter,
+  defaultLanduseContextSelections,
+  landuseContextFillColorExpression
+} from "./landuse_filters.js";
+
 const BASEMAP_RASTER = "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png";
 const ACTIVE_GRID_FILL_LAYER_ID = "grid-fill-active";
 const ACTIVE_GRID_OUTLINE_LAYER_ID = "grid-outline-active";
@@ -5,6 +11,12 @@ const ACTIVE_DEBUG_GRID_LAYER_ID = "grid-fill-debug-active";
 const GRID_SOURCE_ID = "livability";
 const GRID_SOURCE_LAYER_ID = "grid";
 const GRID_INSERT_BEFORE_LAYER_ID = "noise-proxy-fill";
+const LANDUSE_CONTEXT_SOURCE_LAYER_ID = "landuse_context";
+const LANDUSE_CONTEXT_FILL_LAYER_ID = "landuse-context-fill";
+const LANDUSE_CONTEXT_OUTLINE_LAYER_ID = "landuse-context-outline";
+const LANDUSE_CONTEXT_DEFAULT_OPACITY = 0.28;
+const LANDUSE_CONTEXT_MIN_ZOOM = 5;
+const LANDUSE_CONTEXT_MAX_ZOOM = 11;
 const DEFAULT_NOISE_OPACITY = 0.45;
 const NOISE_OUTLINE_OPACITY_MULTIPLIER = 0.8;
 const MAX_NOISE_OUTLINE_OPACITY = 0.55;
@@ -53,6 +65,25 @@ function noiseOutlineOpacity(fillOpacity) {
     MAX_NOISE_OUTLINE_OPACITY,
     clampedFillOpacity * NOISE_OUTLINE_OPACITY_MULTIPLIER
   );
+}
+
+function landuseContextOpacity() {
+  return LANDUSE_CONTEXT_DEFAULT_OPACITY;
+}
+
+function landuseContextLayerMinZoom(runtime) {
+  const minZoom = Number(runtime && runtime.landuse_context_min_zoom);
+  return Number.isFinite(minZoom) && minZoom >= 0
+    ? minZoom
+    : LANDUSE_CONTEXT_MIN_ZOOM;
+}
+
+function landuseContextLayerMaxZoom(runtime) {
+  const maxZoom = Number(runtime && runtime.landuse_context_max_zoom);
+  const resolved = Number.isFinite(maxZoom) && maxZoom > 0
+    ? maxZoom
+    : LANDUSE_CONTEXT_MAX_ZOOM;
+  return resolved + 1;
 }
 
 function runtimeZoomBreaks(runtime) {
@@ -477,6 +508,16 @@ function buildStyle(runtime, options = {}) {
   if (noiseKinds.length === 0) {
     noiseKinds.push("road");
   }
+  const landuseContextClasses = (
+    runtime &&
+    runtime.landuse_context_enabled &&
+    Array.isArray(runtime.landuse_context_classes) &&
+    runtime.landuse_context_classes.length > 0
+      ? runtime.landuse_context_classes
+      : defaultLanduseContextSelections(runtime)
+  ).map(function (value) {
+    return String(value || "").trim();
+  }).filter(Boolean);
   const noiseProxyFilter = [
     "all",
     ["in", ["get", "kind"], ["literal", noiseKinds]],
@@ -488,6 +529,50 @@ function buildStyle(runtime, options = {}) {
     ]
   ];
   const layers = [{ id: "basemap", type: "raster", source: "basemap" }];
+  if (runtime.landuse_context_enabled && landuseContextClasses.length > 0) {
+    const landuseFilter = buildLanduseContextLayerFilter({
+      selectedClasses: landuseContextClasses
+    });
+    const landuseFillLayer = {
+      id: LANDUSE_CONTEXT_FILL_LAYER_ID,
+      type: "fill",
+      source: "livability",
+      "source-layer": LANDUSE_CONTEXT_SOURCE_LAYER_ID,
+      minzoom: landuseContextLayerMinZoom(runtime),
+      maxzoom: landuseContextLayerMaxZoom(runtime),
+      layout: { visibility: "none" },
+      paint: {
+        "fill-color": landuseContextFillColorExpression(),
+        "fill-opacity": landuseContextOpacity()
+      }
+    };
+    const landuseOutlineLayer = {
+      id: LANDUSE_CONTEXT_OUTLINE_LAYER_ID,
+      type: "line",
+      source: "livability",
+      "source-layer": LANDUSE_CONTEXT_SOURCE_LAYER_ID,
+      minzoom: landuseContextLayerMinZoom(runtime),
+      maxzoom: landuseContextLayerMaxZoom(runtime),
+      layout: { visibility: "none" },
+      paint: {
+        "line-color": "#6b7280",
+        "line-opacity": 0.18,
+        "line-width": [
+          "interpolate", ["linear"], ["zoom"],
+          8, 0.25,
+          12, 0.4,
+          15, 0.6,
+          19, 0.85
+        ]
+      }
+    };
+    if (landuseFilter) {
+      landuseFillLayer.filter = landuseFilter;
+      landuseOutlineLayer.filter = landuseFilter;
+    }
+    layers.push(landuseFillLayer);
+    layers.push(landuseOutlineLayer);
+  }
   buildActiveGridLayers(
     runtime,
     activeGridResolution(runtime, Number(runtime.default_zoom || 0)),
@@ -620,6 +705,10 @@ export {
   GRID_INSERT_BEFORE_LAYER_ID,
   GRID_SOURCE_ID,
   GRID_SOURCE_LAYER_ID,
+  LANDUSE_CONTEXT_DEFAULT_OPACITY,
+  LANDUSE_CONTEXT_FILL_LAYER_ID,
+  LANDUSE_CONTEXT_OUTLINE_LAYER_ID,
+  LANDUSE_CONTEXT_SOURCE_LAYER_ID,
   MAX_NOISE_OUTLINE_OPACITY,
   NOISE_OUTLINE_OPACITY_MULTIPLIER,
   activeDebugGridFilter,
@@ -648,7 +737,10 @@ export {
   gridLayerIds,
   noiseOutlineOpacity,
   normalizeGridScoreLayer,
+  landuseContextLayerMinZoom,
+  landuseContextLayerMaxZoom,
   resolutionForZoom,
+  landuseContextOpacity,
   runtimeFineResolutions,
   runtimeZoomBreaks,
   zoomBoundsForResolution

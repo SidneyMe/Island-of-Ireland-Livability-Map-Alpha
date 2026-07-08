@@ -54,7 +54,7 @@ TRANSIT_RAW_SCHEMA = "transit_raw"
 TRANSIT_DERIVED_SCHEMA = "transit_derived"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
 OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
-IMPORTER_CONFIG_VERSION = "2026-04-08"
+IMPORTER_CONFIG_VERSION = "2026-07-06-landuse-context-1"
 
 
 def _osm2pgsql_flat_nodes_path() -> str:
@@ -122,6 +122,9 @@ GTFS_DIR = BASE_DIR / "gtfs"
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
 TRANSIT_REALITY_ALGO_VERSION = 9
 AMENITY_MERGE_ALGO_VERSION = 4
+LANDUSE_CONTEXT_ALGO_VERSION = 1
+LANDUSE_CONTEXT_MIN_ZOOM = 5
+LANDUSE_CONTEXT_MAX_ZOOM = 11
 
 
 def _optional_positive_int_env(name: str) -> int | None:
@@ -488,6 +491,15 @@ TAGS = {
     },
 }
 
+LANDUSE_CONTEXT_CLASSES = (
+    "residential",
+    "commercial",
+    "industrial",
+    "retail",
+    "farmland",
+    "forest",
+)
+
 
 CATEGORY_COLORS = {
     "shops": "#2166ac",
@@ -499,7 +511,7 @@ CATEGORY_COLORS = {
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
 OSM_EXTRACT_FINGERPRINT_CACHE_PATH = CACHE_DIR / "osm_extract_fingerprint_cache.json"
-PMTILES_SCHEMA_VERSION = 11
+PMTILES_SCHEMA_VERSION = 12
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 13
 FORCE_RECOMPUTE = False

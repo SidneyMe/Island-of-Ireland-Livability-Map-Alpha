@@ -23,12 +23,22 @@ import {
   noiseSourceOptions
 } from "./noise_filters.js";
 import {
+  LANDUSE_CONTEXT_CLASS_COLORS,
+  buildLanduseContextLayerFilter,
+  defaultLanduseContextSelections,
+  landuseContextOptions
+} from "./landuse_filters.js";
+import {
   CLICK_ACTIONS,
   resolveMapClickAction
 } from "./click_priority.js";
 import {
   DEFAULT_NOISE_OPACITY as runtimeDefaultNoiseOpacity,
   GRID_INSERT_BEFORE_LAYER_ID as runtimeGridInsertBeforeLayerId,
+  LANDUSE_CONTEXT_DEFAULT_OPACITY as runtimeLanduseContextDefaultOpacity,
+  LANDUSE_CONTEXT_FILL_LAYER_ID as runtimeLanduseContextFillLayerId,
+  LANDUSE_CONTEXT_OUTLINE_LAYER_ID as runtimeLanduseContextOutlineLayerId,
+  landuseContextLayerMinZoom as runtimeLanduseContextLayerMinZoom,
   noiseOutlineOpacity as runtimeNoiseOutlineOpacity,
   activeGridLifecycle as runtimeActiveGridLifecycle,
   activeDebugGridLayerId as runtimeActiveDebugGridLayerId,
@@ -57,6 +67,7 @@ import {
 } from "./grid_debug.js";
 import { transportRealityPopupHtml } from "./transport_reality_popup.js";
 import { fetchWithTimeout } from "./api_client.js";
+import { sourceLoaded as mapSourceLoaded } from "./map_source_guard.js";
 import { amenityPopupHtml } from "./popups/amenity_popup.js";
 import { noisePopupHtml } from "./popups/noise_popup.js";
 import { inspectPopupHtml, coarseGridPopupHtml } from "./popups/grid_popup.js";
@@ -91,6 +102,8 @@ const elements = {
   gridToggle: document.getElementById("grid-toggle"),
   gridLayerControls: document.getElementById("grid-layer-controls"),
   gridLayerNote: document.getElementById("grid-layer-note"),
+  landuseControls: document.getElementById("landuse-controls"),
+  landuseNote: document.getElementById("landuse-note"),
   map: document.getElementById("map"),
   mapStage: document.getElementById("map-stage"),
   gridDebug: {
@@ -127,6 +140,9 @@ const state = {
   selectedGridLayer: "combined",
   enabledAmenityCategories: new Set(),
   enabledAmenityTiers: new Map(),
+  landuseVisible: false,
+  selectedLanduseClasses: new Set(),
+  landuseOpacity: runtimeLanduseContextDefaultOpacity,
   gridVisible: true,
   activeGridResolutionM: null,
   debugGridVisible: false,
@@ -360,18 +376,11 @@ function removeLayerIfPresent(layerId) {
 }
 
 function livabilitySourceLoaded() {
-  if (!state.map || typeof state.map.isSourceLoaded !== "function") {
-    return Boolean(state.gridDebug.sourceLoaded);
-  }
-  try {
-    return Boolean(state.map.isSourceLoaded("livability"));
-  } catch (error) {
-    return Boolean(state.gridDebug.sourceLoaded);
-  }
+  return mapSourceLoaded(state.map, "livability", state.gridDebug.sourceLoaded);
 }
 
 function queryGridSourceCount(filter) {
-  if (!state.map) return 0;
+  if (!state.map || !livabilitySourceLoaded()) return 0;
   try {
     return state.map.querySourceFeatures("livability", {
       sourceLayer: "grid",
@@ -383,7 +392,7 @@ function queryGridSourceCount(filter) {
 }
 
 function queryGridSourceResolutionCounts() {
-  if (!state.map) return {};
+  if (!state.map || !livabilitySourceLoaded()) return {};
   try {
     const features = state.map.querySourceFeatures("livability", {
       sourceLayer: "grid"
@@ -418,6 +427,7 @@ function refreshGridDebugCard(overrides = {}) {
   const zoom = state.map
     ? state.map.getZoom()
     : Number(state.runtime && state.runtime.default_zoom || 0);
+  const sourceLoaded = livabilitySourceLoaded();
   const lifecycle = runtimeActiveGridLifecycle(
     state.runtime || {},
     state.activeGridResolutionM,
@@ -435,9 +445,9 @@ function refreshGridDebugCard(overrides = {}) {
     activeFillLayerId: activeFillLayer,
     activeOutlineLayerId: activeOutlineLayer,
     activeFilter: formatGridDebugFilter(lifecycle.filter),
-    sourceCount: queryGridSourceCount(lifecycle.filter),
+    sourceCount: sourceLoaded ? queryGridSourceCount(lifecycle.filter) : 0,
     renderedCount: queryGridRenderedCount(activeFillLayer),
-    sourceResolutions: queryGridSourceResolutionCounts(),
+    sourceResolutions: sourceLoaded ? queryGridSourceResolutionCounts() : {},
     fillLayerPresent: fillLayerPresent,
     outlineLayerPresent: outlineLayerPresent,
     fillVisibility: fillLayerPresent
@@ -446,7 +456,7 @@ function refreshGridDebugCard(overrides = {}) {
     outlineVisibility: outlineLayerPresent
       ? String(state.map.getLayoutProperty(activeOutlineLayer, "visibility") || "visible")
       : "none",
-    sourceLoaded: livabilitySourceLoaded()
+    sourceLoaded: sourceLoaded
   }, overrides);
   state.gridDebug = nextGridDebug;
   renderGridDebugCard(elements.gridDebug, state.runtime, state.gridDebug, {
@@ -571,6 +581,74 @@ function applyServiceDesertVisibility() {
     "visibility",
     state.serviceDesertsVisible ? "visible" : "none"
   );
+}
+
+function landuseFilterSummary() {
+  const options = landuseContextOptions(state.runtime);
+  const selectedCount = state.selectedLanduseClasses.size;
+  const totalCount = options.length;
+  return selectedCount === totalCount
+    ? "all classes selected"
+    : selectedCount + " of " + totalCount + " selected";
+}
+
+function updateLanduseNote() {
+  if (!elements.landuseNote) return;
+  if (!state.runtime.landuse_context_enabled) {
+    elements.landuseNote.textContent = "No land-use context overlay in this build";
+    return;
+  }
+  const minZoom = Number(runtimeLanduseContextLayerMinZoom(state.runtime));
+  const maxZoom = Number(state.runtime.landuse_context_max_zoom || 11);
+  const caveat = "Phase 2 land-use context overlay. Visible at z" + minZoom + "-z" + maxZoom + ". Residential, commercial, industrial, retail, farmland, forest. Not yet used in scoring.";
+  elements.landuseNote.textContent = state.landuseVisible
+    ? caveat
+    : caveat + " Off until enabled.";
+}
+
+function applyLanduseFilter() {
+  if (!state.map) return;
+  if (!state.map.getLayer(runtimeLanduseContextFillLayerId)) return;
+  const filter = buildLanduseContextLayerFilter({
+    selectedClasses: state.selectedLanduseClasses
+  });
+  state.map.setFilter(runtimeLanduseContextFillLayerId, filter);
+  if (state.map.getLayer(runtimeLanduseContextOutlineLayerId)) {
+    state.map.setFilter(runtimeLanduseContextOutlineLayerId, filter);
+  }
+}
+
+function applyLanduseOpacity() {
+  if (!state.map) return;
+  if (!state.map.getLayer(runtimeLanduseContextFillLayerId)) return;
+  const fillOpacity = Number(state.landuseOpacity ?? runtimeLanduseContextDefaultOpacity);
+  state.map.setPaintProperty(runtimeLanduseContextFillLayerId, "fill-opacity", fillOpacity);
+  if (state.map.getLayer(runtimeLanduseContextOutlineLayerId)) {
+    state.map.setPaintProperty(
+      runtimeLanduseContextOutlineLayerId,
+      "line-opacity",
+      Math.max(0, Math.min(0.35, fillOpacity * 0.65))
+    );
+  }
+}
+
+function applyLanduseVisibility() {
+  if (!state.map) return;
+  if (!state.map.getLayer(runtimeLanduseContextFillLayerId)) return;
+  state.map.setLayoutProperty(
+    runtimeLanduseContextFillLayerId,
+    "visibility",
+    state.landuseVisible ? "visible" : "none"
+  );
+  if (state.map.getLayer(runtimeLanduseContextOutlineLayerId)) {
+    state.map.setLayoutProperty(
+      runtimeLanduseContextOutlineLayerId,
+      "visibility",
+      state.landuseVisible ? "visible" : "none"
+    );
+  }
+  applyLanduseFilter();
+  applyLanduseOpacity();
 }
 
 function noiseFilterSummary() {
@@ -1052,6 +1130,171 @@ function buildAmenityControls() {
   updateAmenityNote();
 }
 
+function buildLanduseControls() {
+  if (!elements.landuseControls) return;
+  elements.landuseControls.replaceChildren();
+  if (!state.runtime.landuse_context_enabled) {
+    updateLanduseNote();
+    return;
+  }
+
+  const overlayLabel = document.createElement("label");
+  overlayLabel.className = "toggle-row";
+  overlayLabel.htmlFor = "landuse-toggle";
+
+  const overlayTextWrap = document.createElement("span");
+  overlayTextWrap.className = "toggle-label";
+
+  const overlayTitle = document.createElement("strong");
+  overlayTitle.textContent = "Show land-use context";
+
+  const overlaySubtitle = document.createElement("span");
+  const minZoom = Number(runtimeLanduseContextLayerMinZoom(state.runtime));
+  const maxZoom = Number(state.runtime.landuse_context_max_zoom || 11);
+  overlaySubtitle.textContent = "Phase 2 context overlay (z" + minZoom + "-z" + maxZoom + ")";
+
+  const overlayInput = document.createElement("input");
+  overlayInput.type = "checkbox";
+  overlayInput.id = "landuse-toggle";
+  overlayInput.checked = state.landuseVisible;
+
+  overlayTextWrap.appendChild(overlayTitle);
+  overlayTextWrap.appendChild(overlaySubtitle);
+  overlayLabel.appendChild(overlayTextWrap);
+  overlayLabel.appendChild(overlayInput);
+  elements.landuseControls.appendChild(overlayLabel);
+
+  const filterDetails = document.createElement("details");
+  filterDetails.className = "amenity-tier-details";
+
+  const filterSummary = document.createElement("summary");
+  filterSummary.className = "amenity-tier-summary";
+
+  const filterSummaryLabel = document.createElement("span");
+  filterSummaryLabel.textContent = "Classes";
+
+  const filterMeta = document.createElement("span");
+  filterMeta.className = "amenity-tier-meta";
+  filterMeta.textContent = landuseFilterSummary();
+
+  filterSummary.appendChild(filterSummaryLabel);
+  filterSummary.appendChild(filterMeta);
+  filterDetails.appendChild(filterSummary);
+
+  const filterList = document.createElement("div");
+  filterList.className = "amenity-tier-list";
+  const filterRows = [];
+
+  function syncLanduseInputs() {
+    filterRows.forEach(function (entry) {
+      entry.input.checked = state.selectedLanduseClasses.has(entry.value);
+      entry.input.disabled = !state.landuseVisible;
+    });
+    filterMeta.textContent = landuseFilterSummary();
+    filterDetails.classList.toggle("is-disabled", !state.landuseVisible);
+    if (!state.landuseVisible) {
+      filterDetails.open = false;
+    }
+    updateLanduseNote();
+  }
+
+  function appendFilterRow(option) {
+    const row = document.createElement("label");
+    row.className = "amenity-tier-row";
+    row.htmlFor = "landuse-" + option.value;
+
+    const textWrap = document.createElement("span");
+    textWrap.className = "toggle-label";
+
+    const color = LANDUSE_CONTEXT_CLASS_COLORS[option.value] || "#d9d9d9";
+    const titleRow = document.createElement("span");
+    titleRow.className = "landuse-class-title";
+
+    const swatch = document.createElement("span");
+    swatch.className = "landuse-class-swatch";
+    swatch.style.backgroundColor = color;
+    swatch.setAttribute("aria-hidden", "true");
+
+    const title = document.createElement("strong");
+    title.textContent = option.label;
+
+    const subtitle = document.createElement("span");
+    subtitle.textContent = String(option.count || 0) + " mapped";
+
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = "landuse-" + option.value;
+    input.checked = state.selectedLanduseClasses.has(option.value);
+    input.style.accentColor = color;
+    input.addEventListener("change", function () {
+      if (input.checked) {
+        state.selectedLanduseClasses.add(option.value);
+      } else {
+        state.selectedLanduseClasses.delete(option.value);
+      }
+      syncLanduseInputs();
+      applyLanduseFilter();
+    });
+
+    filterRows.push({ value: option.value, input: input });
+    titleRow.appendChild(swatch);
+    titleRow.appendChild(title);
+    textWrap.appendChild(titleRow);
+    textWrap.appendChild(subtitle);
+    row.appendChild(textWrap);
+    row.appendChild(input);
+    filterList.appendChild(row);
+  }
+
+  landuseContextOptions(state.runtime).forEach(function (option) {
+    appendFilterRow(option);
+  });
+
+  const opacityRow = document.createElement("label");
+  opacityRow.className = "amenity-tier-row";
+  opacityRow.htmlFor = "landuse-opacity";
+
+  const opacityTextWrap = document.createElement("span");
+  opacityTextWrap.className = "toggle-label";
+
+  const opacityTitle = document.createElement("strong");
+  opacityTitle.textContent = "Context opacity";
+
+  const opacitySubtitle = document.createElement("span");
+  opacitySubtitle.textContent = "0 to 1 (default 0.28)";
+
+  const opacityInput = document.createElement("input");
+  opacityInput.type = "range";
+  opacityInput.min = "0";
+  opacityInput.max = "1";
+  opacityInput.step = "0.05";
+  opacityInput.id = "landuse-opacity";
+  opacityInput.value = String(state.landuseOpacity.toFixed(2));
+  opacityInput.addEventListener("input", function () {
+    const nextOpacity = Number(opacityInput.value);
+    if (!Number.isFinite(nextOpacity)) return;
+    state.landuseOpacity = Math.max(0, Math.min(1, nextOpacity));
+    applyLanduseOpacity();
+    filterMeta.textContent = landuseFilterSummary();
+  });
+
+  opacityTextWrap.appendChild(opacityTitle);
+  opacityTextWrap.appendChild(opacitySubtitle);
+  opacityRow.appendChild(opacityTextWrap);
+  opacityRow.appendChild(opacityInput);
+  filterList.appendChild(opacityRow);
+
+  filterDetails.appendChild(filterList);
+  elements.landuseControls.appendChild(filterDetails);
+
+  overlayInput.addEventListener("change", function () {
+    state.landuseVisible = overlayInput.checked;
+    syncLanduseInputs();
+    applyLanduseVisibility();
+  });
+  syncLanduseInputs();
+}
+
 function buildNoiseControls() {
   if (!elements.noiseControls) return;
   elements.noiseControls.replaceChildren();
@@ -1431,6 +1674,7 @@ function initializeMap() {
     applyGridVisibility();
     applyDebugGridVisibility();
     applyAmenityFilter();
+    applyLanduseVisibility();
     applyTransportRealityVisibility();
     applyServiceDesertVisibility();
     applyNoiseVisibility();
@@ -1594,6 +1838,9 @@ function initializeApp(runtime) {
       return [entry[0], new Set(entry[1])];
     })
   );
+  state.landuseVisible = false;
+  state.selectedLanduseClasses = new Set(defaultLanduseContextSelections(runtime));
+  state.landuseOpacity = runtimeLanduseContextDefaultOpacity;
   state.selectedTransportSubtiers = new Set();
   state.selectedTransportBusFrequencies = new Set();
   state.selectedTransportModes = new Set(["bus", "rail", "tram"]);
@@ -1610,6 +1857,7 @@ function initializeApp(runtime) {
   state.selectedNoiseBands = new Set(noiseDefaults.bands || []);
   buildGridLayerControls();
   buildAmenityControls();
+  buildLanduseControls();
   buildNoiseControls();
   buildTransitControls();
   maybeBuildDebugGridControl();

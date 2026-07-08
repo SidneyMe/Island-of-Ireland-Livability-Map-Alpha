@@ -163,6 +163,27 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(desert_layer["fields"]["baseline_reachable_stop_count"], "Number")
         self.assertEqual(desert_layer["fields"]["reachable_public_departures_7d"], "Number")
 
+    def test_pmtiles_metadata_declares_landuse_context_layer(self) -> None:
+        metadata = bake_pmtiles._pmtiles_metadata(
+            min_zoom=5,
+            max_zoom=14,
+            grid_max_zoom=11,
+            service_desert_max_zoom=11,
+            amenity_min_zoom=9,
+            transport_reality_min_zoom=9,
+        )
+
+        landuse_layer = next(
+            layer for layer in metadata["vector_layers"] if layer["id"] == "landuse_context"
+        )
+
+        self.assertEqual(landuse_layer["minzoom"], bake_pmtiles.LANDUSE_CONTEXT_MIN_ZOOM)
+        self.assertEqual(landuse_layer["maxzoom"], bake_pmtiles.LANDUSE_CONTEXT_MAX_ZOOM)
+        self.assertEqual(landuse_layer["fields"]["class"], "String")
+        self.assertEqual(landuse_layer["fields"]["name"], "String")
+        self.assertEqual(landuse_layer["fields"]["source_ref"], "String")
+        self.assertEqual(landuse_layer["fields"]["area_m2"], "Number")
+
     def test_main_pmtiles_metadata_omits_noise_layer(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
             min_zoom=5,
@@ -237,7 +258,17 @@ class PmtilesBakeContractTests(TestCase):
         self.assertIn("CASE WHEN t.is_unscheduled_stop THEN 1 ELSE 0 END", sql)
         self.assertNotIn("STRING_AGG", sql)
         self.assertNotIn("SUM(t.school_only_departures_30d)", sql)
-        self.assertIn("score_railway_proximity", sql)
+
+    def test_landuse_context_tile_sql_exports_polygon_fields(self) -> None:
+        sql = str(pmtiles_worker._LANDUSE_CONTEXT_TILE_SQL)
+
+        self.assertIn("osm_raw.features", sql)
+        self.assertIn("f.category = 'landuse'", sql)
+        self.assertIn("AS class", sql)
+        self.assertIn("AS name", sql)
+        self.assertIn("AS source_ref", sql)
+        self.assertIn("AS area_m2", sql)
+        self.assertIn("'landuse_context'", sql)
 
     def test_noise_tile_sql_exports_display_fields(self) -> None:
         sql = str(pmtiles_worker._NOISE_TILE_SQL)

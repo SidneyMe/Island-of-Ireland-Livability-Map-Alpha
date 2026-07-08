@@ -29,6 +29,10 @@ _NON_OPERATIONAL_TAG_PREFIXES = (
 _CATEGORY_STATE_TAG_KEYS = frozenset(
     {"amenity", "shop", "healthcare", "leisure", "landuse", "natural", "tourism"}
 )
+_AMENITY_CATEGORY_VALUES = frozenset({"shops", "transport", "healthcare", "parks"})
+_LANDUSE_CONTEXT_VALUES = frozenset(
+    {"residential", "commercial", "industrial", "retail", "farmland", "forest"}
+)
 
 
 def _is_non_operational_amenity(tags_json: dict[str, Any]) -> bool:
@@ -295,7 +299,7 @@ def load_source_amenity_rows(
             footprint_area_m2,
         )
         .where(features.c.import_fingerprint == import_fingerprint)
-        .where(features.c.category != "transport")
+        .where(features.c.category.in_(tuple(sorted(_AMENITY_CATEGORY_VALUES))))
         .where(func.ST_Intersects(features.c.geom, study_area))
         .order_by(features.c.category, features.c.osm_type, features.c.osm_id)
     )
@@ -331,6 +335,57 @@ def load_source_amenity_rows(
             )
         )
     return amenity_rows
+
+
+def load_landuse_context_rows(
+    engine: Engine,
+    import_fingerprint: str,
+    study_area_wgs84,
+) -> list[dict[str, Any]]:
+    root = root_module()
+    study_area = root.from_shape(study_area_wgs84, srid=4326)
+    landuse_class = func.COALESCE(func.NULLIF(features.c.tags_json["landuse"].astext, ""), "").label(
+        "landuse_class"
+    )
+    area_m2 = case(
+        (
+            func.ST_Dimension(features.c.geom) == 2,
+            func.COALESCE(func.ST_Area(func.ST_Transform(features.c.geom, 2157)), 0.0),
+        ),
+        else_=0.0,
+    ).label("area_m2")
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                features.c.name,
+                features.c.osm_type,
+                features.c.osm_id,
+                landuse_class,
+                features.c.tags_json,
+                func.ST_Transform(features.c.geom, 4326).label("geom"),
+                area_m2,
+            )
+            .where(features.c.import_fingerprint == import_fingerprint)
+            .where(features.c.category == "landuse")
+            .where(func.NULLIF(features.c.tags_json["landuse"].astext, "").isnot(None))
+            .where(features.c.tags_json["landuse"].astext.in_(tuple(sorted(_LANDUSE_CONTEXT_VALUES))))
+            .where(func.ST_Dimension(features.c.geom) == 2)
+            .where(func.ST_Intersects(features.c.geom, study_area))
+            .order_by(features.c.osm_type, features.c.osm_id)
+        ).mappings().all()
+
+    return [
+        {
+            "source": "osm_local_pbf",
+            "source_ref": f"{row['osm_type']}/{row['osm_id']}",
+            "name": row["name"],
+            "landuse_class": str(row["landuse_class"] or ""),
+            "tags_json": dict(row.get("tags_json") or {}),
+            "geom": root.to_shape(row["geom"]),
+            "area_m2": float(row.get("area_m2") or 0.0),
+        }
+        for row in rows
+    ]
 
 
 def load_walk_rows(engine: Engine, build_key: str) -> list[dict[str, Any]]:

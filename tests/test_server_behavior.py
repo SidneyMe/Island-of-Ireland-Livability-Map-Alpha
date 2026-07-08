@@ -63,6 +63,25 @@ class _FakeService:
             "default_zoom": 6,
             "max_zoom": 19,
             "pmtiles_url": "/tiles/livability.pmtiles",
+            "landuse_context_enabled": True,
+            "landuse_context_counts": {
+                "residential": 4,
+                "commercial": 2,
+                "industrial": 1,
+                "retail": 3,
+                "farmland": 6,
+                "forest": 5,
+            },
+            "landuse_context_classes": [
+                "residential",
+                "commercial",
+                "industrial",
+                "retail",
+                "farmland",
+                "forest",
+            ],
+            "landuse_context_min_zoom": 5,
+            "landuse_context_max_zoom": 11,
             "transport_reality_enabled": True,
             "service_deserts_enabled": True,
             "transport_reality_download_url": "/exports/transport-reality.zip",
@@ -225,6 +244,8 @@ class LocalServerEndpointTests(TestCase):
 
         self.assertEqual(payload["build_key"], "build-123")
         self.assertEqual(payload["pmtiles_url"], "/tiles/livability.pmtiles")
+        self.assertEqual(payload["landuse_context_min_zoom"], 5)
+        self.assertEqual(payload["landuse_context_max_zoom"], 11)
         self.assertNotIn("surface_tile_url_template", payload)
         self.assertEqual(service.calls, [("runtime",)])
 
@@ -773,6 +794,25 @@ class RenderAndCliTests(TestCase):
                     "has_daily_bus_service": 2,
                 },
                 "transport_mode_counts": {"tram": 4, "rail": 6},
+                "landuse_context_enabled": True,
+                "landuse_context_counts": {
+                    "residential": 4,
+                    "commercial": 2,
+                    "industrial": 1,
+                    "retail": 3,
+                    "farmland": 6,
+                    "forest": 5,
+                },
+                "landuse_context_classes": [
+                    "residential",
+                    "commercial",
+                    "industrial",
+                    "retail",
+                    "farmland",
+                    "forest",
+                ],
+                "landuse_context_min_zoom": 5,
+                "landuse_context_max_zoom": 11,
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "transport_reality_download_url": "/exports/transport-reality.zip",
@@ -835,6 +875,8 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["grid_sizes_m"], [20000, 10000, 5000])
         self.assertEqual(payload["build_profile"], "full")
         self.assertEqual(payload["pmtiles_url"], "/tiles/livability.pmtiles")
+        self.assertEqual(payload["landuse_context_min_zoom"], 5)
+        self.assertEqual(payload["landuse_context_max_zoom"], 11)
         self.assertEqual(payload["default_zoom"], 6)
         self.assertEqual(payload["max_zoom"], 19)
         self.assertTrue(payload["fine_surface_enabled"])
@@ -1024,6 +1066,25 @@ class RenderAndCliTests(TestCase):
                     "has_any_bus_service": 2,
                     "has_daily_bus_service": 2,
                 },
+                "landuse_context_enabled": True,
+                "landuse_context_counts": {
+                    "residential": 4,
+                    "commercial": 2,
+                    "industrial": 1,
+                    "retail": 3,
+                    "farmland": 6,
+                    "forest": 5,
+                },
+                "landuse_context_classes": [
+                    "residential",
+                    "commercial",
+                    "industrial",
+                    "retail",
+                    "farmland",
+                    "forest",
+                ],
+                "landuse_context_min_zoom": 5,
+                "landuse_context_max_zoom": 11,
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "fine_resolutions_m": [],
@@ -1082,6 +1143,25 @@ class RenderAndCliTests(TestCase):
                     "has_any_bus_service": 2,
                     "has_daily_bus_service": 2,
                 },
+                "landuse_context_enabled": True,
+                "landuse_context_counts": {
+                    "residential": 4,
+                    "commercial": 2,
+                    "industrial": 1,
+                    "retail": 3,
+                    "farmland": 6,
+                    "forest": 5,
+                },
+                "landuse_context_classes": [
+                    "residential",
+                    "commercial",
+                    "industrial",
+                    "retail",
+                    "farmland",
+                    "forest",
+                ],
+                "landuse_context_min_zoom": 5,
+                "landuse_context_max_zoom": 11,
                 "transport_reality_enabled": True,
                 "service_deserts_enabled": True,
                 "fine_resolutions_m": [2500, 1000, 500, 250, 100, 50],

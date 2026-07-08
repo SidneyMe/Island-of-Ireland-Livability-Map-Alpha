@@ -19,6 +19,8 @@ from config import (
     CATEGORY_COLORS,
     DEFAULT_SERVER_HOST,
     DEFAULT_SERVER_PORT,
+    LANDUSE_CONTEXT_MIN_ZOOM,
+    LANDUSE_CONTEXT_MAX_ZOOM,
     OSM_EXTRACT_PATH,
     SURFACE_DEFAULT_ZOOM,
     SURFACE_MAX_ZOOM,
@@ -178,6 +180,11 @@ class RuntimeState:
     noise_metric_counts: dict[str, int]
     noise_band_counts: dict[str, int]
     noise_band_counts_by_metric: dict[str, dict[str, int]]
+    landuse_context_enabled: bool
+    landuse_context_counts: dict[str, int]
+    landuse_context_classes: list[str]
+    landuse_context_min_zoom: int
+    landuse_context_max_zoom: int
     noise_pmtiles_url: str | None
     fine_surface_enabled: bool
     surface_shell_dir: Path | None
@@ -493,6 +500,29 @@ class RuntimeService:
                 }
                 if normalized_counts:
                     noise_band_counts_by_metric[metric_key] = normalized_counts
+        raw_landuse_context_counts = summary_json.get("landuse_context_counts", {}) or {}
+        landuse_context_counts = {
+            str(key): int(value)
+            for key, value in (
+                raw_landuse_context_counts.items()
+                if isinstance(raw_landuse_context_counts, dict)
+                else ()
+            )
+            if str(key)
+        }
+        landuse_context_classes = [
+            str(value)
+            for value in summary_json.get("landuse_context_classes", [])
+            if str(value).strip()
+        ]
+        if not landuse_context_classes:
+            landuse_context_classes = sorted(landuse_context_counts)
+        landuse_context_min_zoom = int(
+            summary_json.get("landuse_context_min_zoom") or LANDUSE_CONTEXT_MIN_ZOOM
+        )
+        landuse_context_max_zoom = int(
+            summary_json.get("landuse_context_max_zoom") or LANDUSE_CONTEXT_MAX_ZOOM
+        )
         noise_rows_available = bool(summary_json.get("noise_enabled")) or bool(noise_source_counts)
         noise_pmtiles_available = noise_rows_available and self._noise_pmtiles_path.exists()
         ordered_metrics = [
@@ -645,6 +675,12 @@ class RuntimeService:
             noise_metric_counts=noise_metric_counts,
             noise_band_counts=noise_band_counts,
             noise_band_counts_by_metric=noise_band_counts_by_metric,
+            landuse_context_enabled=bool(summary_json.get("landuse_context_enabled"))
+            or bool(landuse_context_counts),
+            landuse_context_counts=landuse_context_counts,
+            landuse_context_classes=landuse_context_classes,
+            landuse_context_min_zoom=landuse_context_min_zoom,
+            landuse_context_max_zoom=landuse_context_max_zoom,
             noise_pmtiles_url=self._noise_pmtiles_url if noise_pmtiles_available else None,
             fine_surface_enabled=fine_surface_enabled,
             surface_shell_dir=surface_shell_dir,
@@ -720,6 +756,11 @@ class RuntimeService:
             "noise_metric_counts": state.noise_metric_counts,
             "noise_band_counts": state.noise_band_counts,
             "noise_band_counts_by_metric": state.noise_band_counts_by_metric,
+            "landuse_context_enabled": state.landuse_context_enabled,
+            "landuse_context_counts": state.landuse_context_counts,
+            "landuse_context_classes": state.landuse_context_classes,
+            "landuse_context_min_zoom": state.landuse_context_min_zoom,
+            "landuse_context_max_zoom": state.landuse_context_max_zoom,
             "noise_pmtiles_url": state.noise_pmtiles_url,
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,

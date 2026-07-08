@@ -26,6 +26,15 @@ local park_values = {
     nature_reserve = true,
 }
 
+local landuse_values = {
+    residential = true,
+    commercial = true,
+    industrial = true,
+    retail = true,
+    farmland = true,
+    forest = true,
+}
+
 local transport_rail_values = {
     station = true,
     tram_stop = true,
@@ -47,6 +56,9 @@ local function feature_category(tags)
     end
     if tags.leisure and park_values[tags.leisure] then
         return 'parks'
+    end
+    if tags.landuse and landuse_values[tags.landuse] then
+        return 'landuse'
     end
     return nil
 end
@@ -94,9 +106,14 @@ function osm2pgsql.process_way(object)
         return
     end
 
-    local feature_geom = object:as_polygon()
-    if not feature_geom then
-        feature_geom = object:as_linestring()
+    local feature_geom
+    if category == 'landuse' then
+        feature_geom = object:as_polygon()
+    else
+        feature_geom = object:as_polygon()
+        if not feature_geom then
+            feature_geom = object:as_linestring()
+        end
     end
     insert_feature(object, feature_geom)
 end
@@ -106,7 +123,12 @@ function osm2pgsql.process_relation(object)
     if not category then
         return
     end
-    local feature_geom = object:as_multipolygon()
+    local feature_geom
+    if category == 'landuse' then
+        feature_geom = object:as_multipolygon()
+    else
+        feature_geom = object:as_multipolygon()
+    end
     if feature_geom then
         insert_feature(object, feature_geom)
     end

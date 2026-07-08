@@ -28,6 +28,10 @@ import {
   noiseOutlineOpacity,
   normalizeGridScoreLayer,
   resolutionForZoom,
+  LANDUSE_CONTEXT_FILL_LAYER_ID,
+  LANDUSE_CONTEXT_OUTLINE_LAYER_ID,
+  LANDUSE_CONTEXT_SOURCE_LAYER_ID,
+  landuseContextOpacity,
   zoomBoundsForResolution
 } from "./runtime_contract.js";
 
@@ -60,6 +64,18 @@ const fullRuntime = {
   noise_enabled: true,
   noise_pmtiles_url: "/tiles/noise.pmtiles",
   noise_proxy_metadata: { default_metric: "Lden", kinds: ["road", "rail", "airport", "industry"] },
+  landuse_context_enabled: true,
+  landuse_context_counts: {
+    residential: 4,
+    commercial: 2,
+    industrial: 1,
+    retail: 3,
+    farmland: 6,
+    forest: 5
+  },
+  landuse_context_classes: ["residential", "commercial", "industrial", "retail", "farmland", "forest"],
+  landuse_context_min_zoom: 5,
+  landuse_context_max_zoom: 11,
   max_zoom: 19
 };
 
@@ -86,6 +102,18 @@ const devRuntime = {
   noise_enabled: true,
   noise_pmtiles_url: "/tiles/noise-dev.pmtiles",
   noise_proxy_metadata: { default_metric: "Lden", kinds: ["road"] },
+  landuse_context_enabled: true,
+  landuse_context_counts: {
+    residential: 4,
+    commercial: 2,
+    industrial: 1,
+    retail: 3,
+    farmland: 6,
+    forest: 5
+  },
+  landuse_context_classes: ["residential", "commercial", "industrial", "retail", "farmland", "forest"],
+  landuse_context_min_zoom: 5,
+  landuse_context_max_zoom: 11,
   max_zoom: 19
 };
 
@@ -285,6 +313,12 @@ const devRuntime = {
   const transportRealityLayer = style.layers.find(function (layer) {
     return layer.id === "transport-reality-circle";
   });
+  const landuseFillLayer = style.layers.find(function (layer) {
+    return layer.id === LANDUSE_CONTEXT_FILL_LAYER_ID;
+  });
+  const landuseOutlineLayer = style.layers.find(function (layer) {
+    return layer.id === LANDUSE_CONTEXT_OUTLINE_LAYER_ID;
+  });
   const noiseLayer = style.layers.find(function (layer) {
     return layer.id === "noise-proxy-fill";
   });
@@ -305,6 +339,15 @@ const devRuntime = {
   assert.equal(gridOutlineLayers.length, 1);
   assert.equal(gridLayerIds(fullRuntime).length, gridFillLayerIds(fullRuntime).length);
   assert.deepEqual(gridLayerIds(fullRuntime), ["grid-fill-active"]);
+  assert.equal(landuseFillLayer.source, "livability");
+  assert.equal(landuseFillLayer["source-layer"], LANDUSE_CONTEXT_SOURCE_LAYER_ID);
+  assert.equal(landuseFillLayer.minzoom, 5);
+  assert.equal(landuseFillLayer.maxzoom, 12);
+  assert.equal(landuseFillLayer.layout.visibility, "none");
+  assert.equal(Object.hasOwn(landuseFillLayer, "filter"), false);
+  assert.deepEqual(landuseFillLayer.paint["fill-opacity"], landuseContextOpacity());
+  assert.equal(landuseOutlineLayer.id, LANDUSE_CONTEXT_OUTLINE_LAYER_ID);
+  assert.equal(Object.hasOwn(landuseOutlineLayer, "filter"), false);
   assert.equal(gridFillLayerId(2500), "grid-fill-active");
   assert.equal(gridOutlineLayerId(2500), "grid-outline-active");
   assert.equal(resolutionForZoom(fullRuntime, 12), 2500);

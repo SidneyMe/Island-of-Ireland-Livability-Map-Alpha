@@ -29,7 +29,14 @@ from pmtiles.tile import Compression, TileType, tileid_to_zxy, zxy_to_tileid
 from pmtiles.writer import Writer
 from sqlalchemy import text
 
-from config import BAKE_PMTILES_WORKERS, CACHE_DIR, database_url, zoom_bounds_for_resolution
+from config import (
+    BAKE_PMTILES_WORKERS,
+    CACHE_DIR,
+    LANDUSE_CONTEXT_MIN_ZOOM,
+    LANDUSE_CONTEXT_MAX_ZOOM,
+    database_url,
+    zoom_bounds_for_resolution,
+)
 from . import surface as _surface
 from fine_vector_pmtiles_worker import (  # noqa: E402
     FineGridTileContext,
@@ -49,6 +56,7 @@ from pmtiles_bake_worker import (  # noqa: E402  (intentional top-level worker)
     _GRID_TILE_SQL,
     _LAYER_AMENITIES,
     _LAYER_FINE_GRID,
+    _LAYER_LANDUSE_CONTEXT,
     _LAYER_GRID,
     _LAYER_SERVICE_DESERTS,
     _LAYER_TRANSPORT_REALITY,
@@ -135,6 +143,8 @@ def _pmtiles_metadata(
     service_desert_max_zoom: int,
     amenity_min_zoom: int,
     transport_reality_min_zoom: int,
+    landuse_context_min_zoom: int = LANDUSE_CONTEXT_MIN_ZOOM,
+    landuse_context_max_zoom: int = LANDUSE_CONTEXT_MAX_ZOOM,
 ) -> dict[str, object]:
     return {
         "name": "livability",
@@ -192,6 +202,17 @@ def _pmtiles_metadata(
                     "has_exception_only_service": "Number",
                     "has_any_bus_service": "Number",
                     "has_daily_bus_service": "Number",
+                },
+            },
+            {
+                "id": "landuse_context",
+                "minzoom": landuse_context_min_zoom,
+                "maxzoom": landuse_context_max_zoom,
+                "fields": {
+                    "class": "String",
+                    "name": "String",
+                    "source_ref": "String",
+                    "area_m2": "Number",
                 },
             },
             {
@@ -408,6 +429,8 @@ def _iter_tile_specs(
     coarse_grid_max_zoom: int,
     amenity_min_zoom: int,
     transport_reality_min_zoom: int,
+    landuse_context_min_zoom: int = LANDUSE_CONTEXT_MIN_ZOOM,
+    landuse_context_max_zoom: int = LANDUSE_CONTEXT_MAX_ZOOM,
     fine_grid_tile_coords_by_zoom: dict[int, list[tuple[int, int]]] | None = None,
 ) -> Iterator[tuple[int, int, int, int]]:
     """Yield ``(z, x, y, layer_bitmask)`` tuples for every tile that will be baked.
@@ -420,6 +443,7 @@ def _iter_tile_specs(
     for zoom in range(min_zoom, max_zoom + 1):
         include_amenities = zoom >= amenity_min_zoom
         include_transport_reality = zoom >= transport_reality_min_zoom
+        include_landuse_context = landuse_context_min_zoom <= zoom <= landuse_context_max_zoom
         include_grid = zoom <= coarse_grid_max_zoom
         include_fine_grid = zoom in fine_grid_tile_coords_by_zoom
         include_service_deserts = zoom <= coarse_grid_max_zoom
@@ -433,12 +457,14 @@ def _iter_tile_specs(
             layers |= _LAYER_AMENITIES
         if include_transport_reality:
             layers |= _LAYER_TRANSPORT_REALITY
+        if include_landuse_context:
+            layers |= _LAYER_LANDUSE_CONTEXT
         if include_service_deserts:
             layers |= _LAYER_SERVICE_DESERTS
         if layers == 0:
             continue
 
-        if include_grid or include_service_deserts:
+        if include_grid or include_service_deserts or include_landuse_context:
             x_min, x_max, y_min, y_max = _tile_range_for_bbox(zoom, bbox)
             for x in range(x_min, x_max + 1):
                 for y in range(y_min, y_max + 1):
@@ -629,6 +655,8 @@ def bake_pmtiles(
     max_zoom: int = DEFAULT_MAX_ZOOM,
     amenity_min_zoom: int = AMENITY_MIN_ZOOM,
     transport_reality_min_zoom: int = TRANSPORT_REALITY_MIN_ZOOM,
+    landuse_context_min_zoom: int = LANDUSE_CONTEXT_MIN_ZOOM,
+    landuse_context_max_zoom: int = LANDUSE_CONTEXT_MAX_ZOOM,
     noise_min_zoom: int = NOISE_MIN_ZOOM,
     noise_max_zoom: int = NOISE_MAX_ZOOM_DEFAULT,
     workers: int | None = None,
@@ -701,6 +729,8 @@ def bake_pmtiles(
                 coarse_grid_max_zoom=coarse_grid_max_zoom,
                 amenity_min_zoom=amenity_min_zoom,
                 transport_reality_min_zoom=transport_reality_min_zoom,
+                landuse_context_min_zoom=landuse_context_min_zoom,
+                landuse_context_max_zoom=landuse_context_max_zoom,
                 fine_grid_tile_coords_by_zoom=fine_grid_tile_coords_by_zoom,
             )
         )
@@ -736,6 +766,8 @@ def bake_pmtiles(
         service_desert_max_zoom=coarse_grid_max_zoom,
         amenity_min_zoom=amenity_min_zoom,
         transport_reality_min_zoom=transport_reality_min_zoom,
+        landuse_context_min_zoom=landuse_context_min_zoom,
+        landuse_context_max_zoom=landuse_context_max_zoom,
     )
 
     if temp_output_path.exists():

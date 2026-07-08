@@ -6,7 +6,7 @@
   "scripts": {
     "build": "vite build --configLoader native",
     "dev": "vite",
-    "test": "node src/runtime_contract.test.js && node src/grid_debug.test.js && node src/grid_popup.test.js && node src/amenity_filters.test.js && node src/transport_filters.test.js && node src/noise_filters.test.js && node src/noise_proxy_controls.test.js && node src/transport_reality_popup.test.js && node src/click_priority.test.js"
+    "test": "node src/runtime_contract.test.js && node src/grid_debug.test.js && node src/grid_popup.test.js && node src/map_source_guard.test.js && node src/amenity_filters.test.js && node src/landuse_filters.test.js && node src/landuse_context_controls.test.js && node src/transport_filters.test.js && node src/noise_filters.test.js && node src/noise_proxy_controls.test.js && node src/transport_reality_popup.test.js && node src/click_priority.test.js"
   },
   "dependencies": {
     "maplibre-gl": "^4.7.1",

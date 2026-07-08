@@ -32,6 +32,7 @@ _LAYER_TRANSPORT_REALITY = 1 << 2
 _LAYER_SERVICE_DESERTS = 1 << 3
 _LAYER_FINE_GRID = 1 << 4
 _LAYER_NOISE = 1 << 5
+_LAYER_LANDUSE_CONTEXT = 1 << 6
 
 
 # ── Per-tile SQL (one ST_AsMVT call per layer) ──────────────────────────────
@@ -281,6 +282,52 @@ _NOISE_TILE_SQL = text(
 )
 
 
+_LANDUSE_CONTEXT_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            COALESCE(NULLIF(f.tags_json ->> 'landuse', ''), 'unknown') AS class,
+            COALESCE(NULLIF(BTRIM(f.name), ''), '') AS name,
+            CONCAT(f.osm_type, '/', f.osm_id) AS source_ref,
+            COALESCE(
+                ST_Area(ST_Transform(f.geom, 2157)),
+                0.0
+            ) AS area_m2,
+            ST_AsMVTGeom(
+                ST_Transform(f.geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM osm_raw.features AS f
+        JOIN build_manifest AS bm
+          ON bm.build_key = :build_key
+        CROSS JOIN tile
+        WHERE f.import_fingerprint = bm.import_fingerprint
+          AND f.category = 'landuse'
+          AND COALESCE(NULLIF(f.tags_json ->> 'landuse', ''), '') IN (
+            'residential',
+            'commercial',
+            'industrial',
+            'retail',
+            'farmland',
+            'forest'
+          )
+          AND ST_Dimension(f.geom) = 2
+          AND f.geom && tile.env_4326
+          AND ST_Intersects(f.geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'landuse_context', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
 def _resolution_for_zoom(zoom: int) -> int:
     if zoom >= 10:
         return 5000
@@ -362,6 +409,15 @@ def _tile_mvt_bytes_by_flags(
             or b""
         )
         chunks.append(bytes(noise_bytes))
+    if layers & _LAYER_LANDUSE_CONTEXT:
+        landuse_bytes = (
+            connection.execute(
+                _LANDUSE_CONTEXT_TILE_SQL,
+                {"z": z, "x": x, "y": y, "build_key": build_key},
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(landuse_bytes))
     return b"".join(chunks)
 
 
@@ -453,11 +509,13 @@ __all__ = [
     "_LAYER_SERVICE_DESERTS",
     "_LAYER_FINE_GRID",
     "_LAYER_NOISE",
+    "_LAYER_LANDUSE_CONTEXT",
     "_GRID_TILE_SQL",
     "_AMENITY_TILE_SQL",
     "_TRANSPORT_REALITY_TILE_SQL",
     "_SERVICE_DESERT_TILE_SQL",
     "_NOISE_TILE_SQL",
+    "_LANDUSE_CONTEXT_TILE_SQL",
     "_resolution_for_zoom",
     "_tile_mvt_bytes_by_flags",
     "_noise_tile_mvt_bytes",

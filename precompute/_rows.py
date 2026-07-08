@@ -9,6 +9,8 @@ from config import (
     CACHE_DIR,
     GTFS_ANALYSIS_WINDOW_DAYS,
     GTFS_SERVICE_DESERT_WINDOW_DAYS,
+    LANDUSE_CONTEXT_MIN_ZOOM,
+    LANDUSE_CONTEXT_MAX_ZOOM,
     NOISE_BACKGROUND_DISPATCH,
     NOISE_MODE,
     OSM_EXTRACT_PATH,
@@ -20,6 +22,7 @@ from config import (
 )
 from db_postgis import (
     load_railway_corridor_rows,
+    load_landuse_context_rows,
     load_service_desert_rows,
     load_transport_reality_points,
     load_transit_railway_corridor_manifest,
@@ -432,6 +435,26 @@ def _summary_json(
         service_deserts_enabled=True,
         overture_dataset=_overture.dataset_info(),
     )
+    if engine is not None:
+        try:
+            landuse_rows = load_landuse_context_rows(
+                engine,
+                _STATE.hashes.import_fingerprint,
+                study_area_wgs84,
+            )
+        except Exception:
+            landuse_rows = []
+        landuse_counts: dict[str, int] = {}
+        for row in landuse_rows:
+            landuse_class = str(row.get("landuse_class") or "").strip()
+            if not landuse_class:
+                continue
+            landuse_counts[landuse_class] = int(landuse_counts.get(landuse_class, 0)) + 1
+        payload["landuse_context_enabled"] = bool(landuse_counts)
+        payload["landuse_context_counts"] = landuse_counts
+        payload["landuse_context_classes"] = sorted(landuse_counts)
+        payload["landuse_context_min_zoom"] = LANDUSE_CONTEXT_MIN_ZOOM
+        payload["landuse_context_max_zoom"] = LANDUSE_CONTEXT_MAX_ZOOM
     if engine is not None and _STATE.transit_reality_state is not None:
         reality_fingerprint = _STATE.transit_reality_state.reality_fingerprint
         try:

@@ -14,6 +14,7 @@
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
 - Current live transit config in `config.py` now wires the active `nta` and `translink` GTFS feeds, matching the README/tests and restoring Northern Ireland transport coverage in the published transport layer. (Confirmed)
 - Adds a display-only transport/industry noise overlay (Phase E: roads + rail + airport + industry, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport/industry use resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
+- Adds a display-only land-use context overlay from OSM `landuse` polygons (`residential`, `commercial`, `industrial`, `retail`, `farmland`, `forest`) as a lower-zoom contextual layer for the frontend, now baked and rendered from z5 through z11; it is not used in livability scoring yet. (Confirmed)
 - Uses layered content hashes so changes to geometry, scoring params, GTFS feeds, Overture data, or importer config only invalidate the affected cache tiers. (Confirmed)
 - Alpha-stage: amenity tiering, Overture merge, service deserts, and the new fine vector grid / inspect-backed surface path are still moving. (Inference from recent migrations, tests, and docs)
 
@@ -46,8 +47,9 @@
 - **Runtime HTTP server**: `serve_from_db.py`
 - **Runtime route helper**: `serve_routes.py`
 - **Runtime request logging**: `serve_from_db.py` emits compact route-aware GET/HEAD logs with status, duration, response size, and disconnect hints.
+- **Land-use context overlay**: `db_postgis/reads.py`, `precompute/_rows.py`, `precompute/bake_pmtiles.py`, `pmtiles_bake_worker.py`, `frontend/src/landuse_filters.js`; frontend initial style construction omits the `filter` property when all land-use classes are selected because MapLibre rejects `filter: null` in layer JSON.
 - **Alembic schema-hardening migration**: `db_postgis/migrations/versions/20260617_000021_add_candidate_key_constraints.py`
-- **Frontend source**: `frontend/src/`
+- **Frontend source**: `frontend/src/` (including the land-use context controls with palette-matched swatches/checkbox accents, note text, layer filter helpers, runtime land-use zoom bounds, a `map_source_guard.js` helper that avoids asking MapLibre about `livability` load state before the source exists and delays source feature queries until the vector source has actually loaded, and cache-busted asset loading via `static/index.html`)
 - **Frontend grid diagnostics helper**: `frontend/src/grid_debug.js`
 - **Served frontend bundle**: `static/dist/`
 - **Human docs / design notes**: `README.md`, `docs/*.md`
@@ -721,6 +723,7 @@ Representative tests confirmed present:
 | `tests/test_db_integrity_check.py` | duplicate detection, NULL key validation, missing-table handling, and ambiguous-key skipping for future constraint preflight |
 | `frontend/src/runtime_contract.test.js` | frontend runtime contract parsing, score-layer label/expression mapping, separate noise vector source wiring, active fill/outline grid layer definitions, lifecycle rebuild decisions, explicit visibility plans, the transport rail/tram styling priority, and the single active debug-grid filter path |
 | `frontend/src/grid_debug.test.js` | persistent grid debug card rendering, diagnosis states, resolution display updates, and copyable snapshot formatting |
+| `frontend/src/map_source_guard.test.js` | MapLibre source guard behavior so missing `livability` sources are treated as not loaded without calling `isSourceLoaded()` and emitting the "no source with ID" error |
 | `frontend/src/transport_filters.test.js` | public transport filter logic including weekly bus tiers, exact rail/tram mode matching, and exception-only intersection logic |
 | `frontend/src/noise_filters.test.js` | noise metric/source/band options and MapLibre filter expression construction |
 | `frontend/src/noise_proxy_controls.test.js` | noise overlay control wiring, opacity slider range, synced fill/outline opacity paint updates, and default/reset opacity handling |

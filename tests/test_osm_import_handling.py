@@ -823,6 +823,65 @@ class DbReadTests(TestCase):
         )
         self.assertEqual(stats_out["excluded_non_operational_osm_rows"], 2)
 
+    def test_load_landuse_context_rows_keeps_polygon_classes(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.mappings.return_value.all.return_value = [
+            {
+                "name": "Green Belt",
+                "osm_type": "way",
+                "osm_id": 201,
+                "landuse_class": "farmland",
+                "tags_json": {"landuse": "farmland"},
+                "geom": "landuse-geom",
+                "area_m2": 12_000.0,
+            },
+            {
+                "name": "Forest Park",
+                "osm_type": "way",
+                "osm_id": 202,
+                "landuse_class": "forest",
+                "tags_json": {"landuse": "forest"},
+                "geom": "forest-geom",
+                "area_m2": 34_000.0,
+            },
+        ]
+        root = SimpleNamespace(
+            from_shape=mock.Mock(return_value="study-area"),
+            to_shape=lambda geom: geom,
+        )
+
+        with mock.patch.object(db_reads, "root_module", return_value=root):
+            rows = db_postgis.load_landuse_context_rows(
+                engine,
+                "import-fingerprint",
+                mock.sentinel.study_area_wgs84,
+            )
+
+        self.assertEqual(
+            rows,
+            [
+                {
+                    "source": "osm_local_pbf",
+                    "source_ref": "way/201",
+                    "name": "Green Belt",
+                    "landuse_class": "farmland",
+                    "tags_json": {"landuse": "farmland"},
+                    "geom": "landuse-geom",
+                    "area_m2": 12_000.0,
+                },
+                {
+                    "source": "osm_local_pbf",
+                    "source_ref": "way/202",
+                    "name": "Forest Park",
+                    "landuse_class": "forest",
+                    "tags_json": {"landuse": "forest"},
+                    "geom": "forest-geom",
+                    "area_m2": 34_000.0,
+                },
+            ],
+        )
+
     def test_load_transport_reality_rows_for_scoring_keeps_gtfs_direct_active_rows(self) -> None:
         engine = mock.MagicMock()
         connection = engine.connect.return_value.__enter__.return_value
