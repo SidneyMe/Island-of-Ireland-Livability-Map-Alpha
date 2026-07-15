@@ -7,6 +7,7 @@ import {
   transportBusFrequencyOptions,
   transportFlagCounts,
   transportModeOptions,
+  transportModeTierLabel,
   transportSubtierLabel,
   transportTierOptions
 } from "./transport_filters.js";
@@ -39,6 +40,8 @@ assert.equal(transportSubtierLabel("single_day_only"), "Single-day only");
 assert.equal(transportSubtierLabel(null), "No recent public transport tier");
 assert.equal(transportBusFrequencyLabel("frequent"), "Frequent (<=15 min)");
 assert.equal(transportBusFrequencyLabel("very_low_frequency"), "Very low frequency (61-120 min)");
+assert.equal(transportModeTierLabel("bus_rail"), "Bus + Rail");
+assert.equal(transportModeTierLabel("rail_tram"), "Rail + Tram");
 
 assert.deepEqual(
   transportTierOptions(runtime).map(function (entry) {

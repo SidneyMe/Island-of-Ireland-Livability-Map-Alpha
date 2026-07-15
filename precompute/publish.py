@@ -162,6 +162,7 @@ def _amenity_merge_summary(
 class _TransportSummaryCounts:
     subtier: dict[str, int] = field(default_factory=dict)
     bus_frequency: dict[str, int] = field(default_factory=dict)
+    mode_tier: dict[str, int] = field(default_factory=dict)
     flags: dict[str, int] = field(default_factory=dict)
     modes: dict[str, int] = field(default_factory=dict)
 
@@ -183,6 +184,8 @@ def _transport_summary_counts(
             c.subtier[subtier] = c.subtier.get(subtier, 0) + 1
         if tier := str(row.get("bus_frequency_tier") or "").strip():
             c.bus_frequency[tier] = c.bus_frequency.get(tier, 0) + 1
+        if mode_tier := str(row.get("transport_mode_tier") or "").strip():
+            c.mode_tier[mode_tier] = c.mode_tier.get(mode_tier, 0) + 1
         for flag_name in _TRANSPORT_FLAG_NAMES:
             if bool(row.get(flag_name, False)):
                 c.flags[flag_name] += 1
@@ -483,6 +486,7 @@ def summary_json_impl(
                 "transport_reality_download_url": transport_reality_download_url,
                 "transport_subtier_counts": _tc.subtier,
                 "transport_bus_frequency_counts": _tc.bus_frequency,
+                "transport_mode_tier_counts": _tc.mode_tier,
                 "transport_flag_counts": _tc.flags,
                 "transport_mode_counts": _tc.modes,
             }

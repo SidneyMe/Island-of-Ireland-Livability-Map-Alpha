@@ -39,7 +39,7 @@ from transit.rust_gtfs import load_gtfs_stop_reality_models, run_walkgraph_gtfs_
 from transit.service import (
     expand_service_windows,
     summarize_gtfs_stops,
-    transport_score_units_from_frequency,
+    transport_mode_tier_from_route_modes,
 )
 
 
@@ -466,7 +466,19 @@ class TransitRealityRewriteTests(TestCase):
                 self.assertEqual(row.bus_frequency_score_units, expected_units)
                 self.assertEqual(row.transport_score_units, expected_units)
 
-    def test_rail_only_rows_keep_existing_frequency_score_without_bus_tier(self) -> None:
+    def test_transport_mode_tier_helper_covers_route_mode_boundaries(self) -> None:
+        self.assertEqual(transport_mode_tier_from_route_modes(("bus",)), ("bus_only", 0))
+        self.assertEqual(transport_mode_tier_from_route_modes(("rail",)), ("rail", 4))
+        self.assertEqual(transport_mode_tier_from_route_modes(("tram",)), ("tram", 5))
+        self.assertEqual(transport_mode_tier_from_route_modes(("rail", "tram")), ("rail_tram", 5))
+        self.assertEqual(transport_mode_tier_from_route_modes(("bus", "rail")), ("bus_rail", 4))
+        self.assertEqual(transport_mode_tier_from_route_modes(("bus", "tram")), ("bus_tram", 5))
+        self.assertEqual(
+            transport_mode_tier_from_route_modes(("bus", "rail", "tram")),
+            ("bus_rail_tram", 5),
+        )
+
+    def test_rail_only_rows_use_explicit_mode_tier(self) -> None:
         dataset = _single_stop_dataset(
             service_start=date(2026, 4, 1),
             service_end=date(2026, 4, 30),
@@ -485,22 +497,39 @@ class TransitRealityRewriteTests(TestCase):
             import_fingerprint="import-123",
         )[0]
 
-        expected_score = transport_score_units_from_frequency(
-            weekday_morning_peak_deps=row.weekday_morning_peak_deps,
-            weekday_evening_peak_deps=row.weekday_evening_peak_deps,
-            weekday_offpeak_deps=row.weekday_offpeak_deps,
-            saturday_deps=row.saturday_deps,
-            sunday_deps=row.sunday_deps,
-            friday_evening_deps=row.friday_evening_deps,
-            public_departures_30d=row.public_departures_30d,
-        )
         self.assertEqual(row.route_modes, ("rail",))
+        self.assertEqual(row.transport_mode_tier, "rail")
         self.assertIsNone(row.bus_frequency_tier)
         self.assertEqual(row.bus_frequency_score_units, 0)
         self.assertEqual(row.bus_daytime_deps, 0)
-        self.assertEqual(row.transport_score_units, expected_score)
+        self.assertEqual(row.transport_score_units, 4)
 
-    def test_mixed_bus_rail_rows_expose_bus_tier_but_keep_existing_score(self) -> None:
+    def test_tram_only_rows_use_explicit_mode_tier(self) -> None:
+        dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+        )
+        dataset.stop_service_occurrences = {("S1", "SVC1", "R1", "tram"): 1}
+        dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "tram", 5 * 3600): 16,
+            ("S1", "SVC1", "R1", "tram", 17 * 3600): 16,
+        }
+        dataset.service_route_modes = {"SVC1": {"tram"}}
+
+        row = derive_gtfs_stop_reality(
+            [dataset],
+            _summaries_for_dataset(dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+
+        self.assertEqual(row.route_modes, ("tram",))
+        self.assertEqual(row.transport_mode_tier, "tram")
+        self.assertIsNone(row.bus_frequency_tier)
+        self.assertEqual(row.bus_frequency_score_units, 0)
+        self.assertEqual(row.transport_score_units, 5)
+
+    def test_mixed_bus_rail_rows_use_mode_tier_and_keep_bus_frequency_metadata(self) -> None:
         dataset = _single_stop_dataset(
             service_start=date(2026, 4, 1),
             service_end=date(2026, 4, 30),
@@ -524,19 +553,42 @@ class TransitRealityRewriteTests(TestCase):
             import_fingerprint="import-123",
         )[0]
 
-        expected_score = transport_score_units_from_frequency(
-            weekday_morning_peak_deps=row.weekday_morning_peak_deps,
-            weekday_evening_peak_deps=row.weekday_evening_peak_deps,
-            weekday_offpeak_deps=row.weekday_offpeak_deps,
-            saturday_deps=row.saturday_deps,
-            sunday_deps=row.sunday_deps,
-            friday_evening_deps=row.friday_evening_deps,
-            public_departures_30d=row.public_departures_30d,
-        )
         self.assertEqual(row.route_modes, ("bus", "rail"))
+        self.assertEqual(row.transport_mode_tier, "bus_rail")
         self.assertEqual(row.bus_frequency_tier, "low_frequency")
         self.assertEqual(row.bus_frequency_score_units, 3)
-        self.assertEqual(row.transport_score_units, expected_score)
+        self.assertEqual(row.transport_score_units, 4)
+        self.assertNotEqual(row.transport_score_units, row.bus_frequency_score_units)
+
+    def test_mixed_bus_tram_rows_use_tram_mode_tier(self) -> None:
+        dataset = _single_stop_dataset(
+            service_start=date(2026, 4, 1),
+            service_end=date(2026, 4, 30),
+        )
+        dataset.stop_service_occurrences = {
+            ("S1", "SVC1", "R1", "bus"): 1,
+            ("S1", "SVC1", "R2", "tram"): 1,
+        }
+        dataset.stop_service_time_occurrences = {
+            ("S1", "SVC1", "R1", "bus", 12 * 3600): 14,
+            ("S1", "SVC1", "R2", "tram", 5 * 3600): 16,
+            ("S1", "SVC1", "R2", "tram", 17 * 3600): 16,
+        }
+        dataset.service_route_ids = {"SVC1": {"R1", "R2"}}
+        dataset.service_route_modes = {"SVC1": {"bus", "tram"}}
+
+        row = derive_gtfs_stop_reality(
+            [dataset],
+            _summaries_for_dataset(dataset),
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+        )[0]
+
+        self.assertEqual(row.route_modes, ("bus", "tram"))
+        self.assertEqual(row.transport_mode_tier, "bus_tram")
+        self.assertEqual(row.bus_frequency_tier, "low_frequency")
+        self.assertEqual(row.bus_frequency_score_units, 3)
+        self.assertEqual(row.transport_score_units, 5)
         self.assertNotEqual(row.transport_score_units, row.bus_frequency_score_units)
 
     def test_friday_evening_counts_through_saturday_2am_without_dominating(self) -> None:

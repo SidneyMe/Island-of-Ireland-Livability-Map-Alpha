@@ -43,6 +43,7 @@ def _feature_properties(row: GtfsStopReality) -> dict[str, object]:
         "sunday_deps": row.sunday_deps,
         "friday_evening_deps": row.friday_evening_deps,
         "transport_score_units": row.transport_score_units,
+        "transport_mode_tier": row.transport_mode_tier,
         "bus_daytime_deps": row.bus_daytime_deps,
         "bus_daytime_headway_min": row.bus_daytime_headway_min,
         "bus_frequency_tier": row.bus_frequency_tier,
@@ -97,6 +98,7 @@ def _readme_text() -> str:
                 "Weekly bus subtier fields use the stop-level union of base "
                 "calendar.txt weekday flags for bus trips only."
             ),
+            "Rail/tram-bearing rows also carry a transport_mode_tier field for mode-specific interpretation.",
             "Exception-added dates do not alter the published weekly bus tier.",
             "Legacy active/inactive/school-only status is still included for compatibility and scoring.",
             "",

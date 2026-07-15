@@ -163,6 +163,7 @@ def load_gtfs_stop_reality_models(csv_path: Path) -> list[GtfsStopReality]:
                     sunday_deps=float(row.get("sunday_deps") or 0.0),
                     friday_evening_deps=float(row.get("friday_evening_deps") or 0.0),
                     transport_score_units=int(row.get("transport_score_units") or 0),
+                    transport_mode_tier=(row.get("transport_mode_tier") or None),
                     bus_daytime_deps=float(row.get("bus_daytime_deps") or 0.0),
                     bus_daytime_headway_min=(
                         None

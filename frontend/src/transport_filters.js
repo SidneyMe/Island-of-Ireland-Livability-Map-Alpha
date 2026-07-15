@@ -27,6 +27,16 @@ const TRANSPORT_MODE_LABELS = {
   rail: "Rail"
 };
 
+const TRANSPORT_MODE_TIER_LABELS = {
+  bus_only: "Bus only",
+  rail: "Rail",
+  tram: "Tram",
+  rail_tram: "Rail + Tram",
+  bus_rail: "Bus + Rail",
+  bus_tram: "Bus + Tram",
+  bus_rail_tram: "Bus + Rail + Tram"
+};
+
 const TRANSPORT_BUS_FREQUENCY_ORDER = [
   "frequent",
   "moderate",
@@ -73,6 +83,10 @@ function transportTierOptions(runtime) {
 
 function transportModeLabel(value) {
   return TRANSPORT_MODE_LABELS[String(value || "").trim()] || String(value || "").trim();
+}
+
+function transportModeTierLabel(value) {
+  return TRANSPORT_MODE_TIER_LABELS[String(value || "").trim()] || String(value || "").trim();
 }
 
 function transportModeOptions(runtime) {
@@ -211,6 +225,7 @@ export {
   transportFlagCounts,
   transportModeLabel,
   transportModeOptions,
+  transportModeTierLabel,
   transportSubtierLabel,
   transportTierOptions
 };

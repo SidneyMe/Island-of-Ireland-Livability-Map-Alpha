@@ -104,6 +104,7 @@ def load_transport_reality_rows_for_scoring(
                 transit_gtfs_stop_reality.c.sunday_deps,
                 transit_gtfs_stop_reality.c.friday_evening_deps,
                 transit_gtfs_stop_reality.c.transport_score_units,
+                transit_gtfs_stop_reality.c.transport_mode_tier,
                 transit_gtfs_stop_reality.c.bus_daytime_deps,
                 transit_gtfs_stop_reality.c.bus_daytime_headway_min,
                 transit_gtfs_stop_reality.c.bus_frequency_tier,
@@ -135,6 +136,7 @@ def load_transport_reality_rows_for_scoring(
             "sunday_deps": float(row["sunday_deps"] or 0.0),
             "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
             "transport_score_units": int(row["transport_score_units"] or 0),
+            "transport_mode_tier": row["transport_mode_tier"],
             "bus_daytime_deps": float(row["bus_daytime_deps"] or 0.0),
             "bus_daytime_headway_min": (
                 None
@@ -181,6 +183,7 @@ def load_transport_reality_points(
                 "sunday_deps": float(row["sunday_deps"] or 0.0),
                 "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
                 "transport_score_units": int(row["transport_score_units"] or 0),
+                "transport_mode_tier": row["transport_mode_tier"],
                 "bus_daytime_deps": float(row["bus_daytime_deps"] or 0.0),
                 "bus_daytime_headway_min": (
                     None

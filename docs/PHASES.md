@@ -334,19 +334,19 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 - Migration `20260423_000010_transport_frequency_scoring.py` persists the frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
 - Migration `20260424_000011_bus_frequency_tiers.py` persists weekday daytime bus frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
 - `transport_score_units` plus bus frequency metadata now flows through DB reads, scoring amenity rows, PMTiles metadata, runtime summaries, frontend filters, the standalone export bundle, and transport popups.
-- `TRANSIT_REALITY_ALGO_VERSION = 9`, `CACHE_SCHEMA_VERSION = 13`, `FINE_SURFACE_SCHEMA_VERSION = 2`, and `PMTILES_SCHEMA_VERSION = 11` invalidate stale transport, cache, surface, and tile outputs.
+- `TRANSIT_REALITY_ALGO_VERSION = 10`, `CACHE_SCHEMA_VERSION = 14`, `FINE_SURFACE_SCHEMA_VERSION = 2`, and `PMTILES_SCHEMA_VERSION = 13` invalidate stale transport, cache, surface, and tile outputs.
 
-### Deferred mode tiering
+### Mode tiering
 
-**What:** Rail/tram interpretation, deferred until the rail model is ready.
+**What:** Explicit rail/tram interpretation layered on top of the existing bus-frequency model.
 
 **How:**
 
 - Bus-only stops now use simple weekday daytime frequency buckets, with no rural/urban distinction.
-- Rail/tram-only and mixed stops deliberately keep the existing formula until the rail model is designed.
-- **Luas:** anywhere on the Green or Red line gets a significant bonus — high frequency, high capacity, high reliability.
-- **Rail:** strong bonus for cells within walking distance of an active station.
-- **High-frequency bus:** ≥4 departures per hour during the day.
+- Rail/tram-bearing stops now use explicit mode tiers so the legacy blended commute/off-peak/weekend fallback no longer drives those rows.
+- **Luas:** anywhere on the Green or Red line gets the strongest mode tier.
+- **Rail:** strong bonus for rail-bearing stops.
+- **High-frequency bus:** >=4 departures per hour during the day.
 
 ### Rail proximity sweet spot
 

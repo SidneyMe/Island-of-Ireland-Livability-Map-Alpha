@@ -82,6 +82,7 @@ def derive_gtfs_stop_reality(
                 sunday_deps=summary.sunday_deps,
                 friday_evening_deps=summary.friday_evening_deps,
                 transport_score_units=summary.transport_score_units,
+                transport_mode_tier=summary.transport_mode_tier,
                 bus_daytime_deps=summary.bus_daytime_deps,
                 bus_daytime_headway_min=summary.bus_daytime_headway_min,
                 bus_frequency_tier=summary.bus_frequency_tier,

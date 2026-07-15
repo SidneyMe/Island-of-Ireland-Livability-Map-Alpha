@@ -2,6 +2,7 @@ import {
   TRANSPORT_MODE_ORDER,
   transportBusFrequencyLabel,
   transportModeLabel,
+  transportModeTierLabel,
   transportSubtierLabel
 } from "./transport_filters.js";
 
@@ -54,6 +55,10 @@ function _routeModesText(properties) {
 }
 
 function _modeTierText(properties) {
+  const explicitTier = String(properties.transport_mode_tier || "").trim();
+  if (explicitTier && explicitTier !== "bus_only") {
+    return transportModeTierLabel(explicitTier);
+  }
   const modes = new Set(_routeModesList(properties));
   for (const mode of TRANSPORT_MODE_ORDER) {
     if (mode === "bus") continue;

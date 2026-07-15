@@ -191,6 +191,7 @@ def _pmtiles_metadata(
                     "sunday_deps": "Number",
                     "friday_evening_deps": "Number",
                     "transport_score_units": "Number",
+                    "transport_mode_tier": "String",
                     "bus_daytime_deps": "Number",
                     "bus_daytime_headway_min": "Number",
                     "bus_frequency_tier": "String",

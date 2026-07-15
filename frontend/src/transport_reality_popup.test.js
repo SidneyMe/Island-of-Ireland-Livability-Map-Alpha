@@ -41,6 +41,7 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
 {
   const html = transportRealityPopupHtml({
     stop_name: "Heuston",
+    transport_mode_tier: "tram",
     bus_service_subtier: null,
     public_departures_30d: 6150,
     route_modes: "tram",
@@ -55,6 +56,7 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
 {
   const html = transportRealityPopupHtml({
     stop_name: "Dublin Heuston",
+    transport_mode_tier: "rail",
     bus_service_subtier: null,
     public_departures_30d: 3196,
     route_modes: "rail",
@@ -69,13 +71,14 @@ import { transportRealityPopupHtml } from "./transport_reality_popup.js";
 {
   const html = transportRealityPopupHtml({
     stop_name: "Mixed interchange",
+    transport_mode_tier: "bus_rail_tram",
     bus_service_subtier: "mon_sun",
     bus_frequency_tier: "frequent",
     public_departures_30d: 120,
     route_modes: "bus,rail,tram"
   });
 
-  assert.match(html, /Public transport tier:<\/strong> Tram/);
+  assert.match(html, /Public transport tier:<\/strong> Bus \+ Rail \+ Tram/);
   assert.doesNotMatch(html, /Public transport tier:<\/strong> Whole week/);
 }
 

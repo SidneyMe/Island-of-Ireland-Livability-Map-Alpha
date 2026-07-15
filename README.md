@@ -202,7 +202,7 @@ If your app `DATABASE_URL` uses the SQLAlchemy driver form `postgresql+psycopg:/
 
 The transport reality and scoring pipeline uses local GTFS zip files first and only downloads feeds when you explicitly configure feed URLs.
 The active pipeline ingests NTA and Translink only; the standalone TFI Local Link feed is intentionally not configured because current NTA GTFS is treated as the Republic-side source of truth.
-The transport overlay is snapshot-based scheduled GTFS, not live GTFS-RT. Legacy `active_confirmed` / `inactive_confirmed` status still exists for compatibility. Bus-only stops now use weekday daytime bus frequency tiers for `transport_score_units`: `frequent` (<=15 min), `moderate` (16-30 min), `low_frequency` (31-60 min), `very_low_frequency` (61-120 min), and `token_skeletal` (>120 min). Rail/tram-only and mixed bus plus rail/tram stops keep the earlier commute/off-peak/weekend formula for now, but still expose bus frequency metadata when bus service is present. The UI keeps retrospective 7-day bus subtiers such as `Whole week`, `Mon-Sat`, `Weekdays only`, and `Unscheduled`, and popups expose bus headway, commute, Friday-evening, and score-unit fields.
+The transport overlay is snapshot-based scheduled GTFS, not live GTFS-RT. Legacy `active_confirmed` / `inactive_confirmed` status still exists for compatibility. Bus-only stops now use weekday daytime bus frequency tiers for `transport_score_units`: `frequent` (<=15 min), `moderate` (16-30 min), `low_frequency` (31-60 min), `very_low_frequency` (61-120 min), and `token_skeletal` (>120 min). Rail/tram-bearing stops now use explicit mode tiers instead of the older blended commute/off-peak/weekend fallback, while still exposing bus frequency metadata when bus service is present. The UI keeps retrospective 7-day bus subtiers such as `Whole week`, `Mon-Sat`, `Weekdays only`, and `Unscheduled`, and popups expose bus headway, commute, Friday-evening, mode-tier, and score-unit fields.
 
 Default local zip paths:
 
@@ -435,7 +435,7 @@ The current model now tiers shops, healthcare, and parks by type or size, then c
 
 ### Service reality check
 
-Implemented as the GTFS-first transport reality layer. Stops are sourced from scheduled NTA and Translink feeds, school-only service is excluded from public scoring, and bus-only transport scoring now consumes weekday daytime frequency tiers rather than flat stop presence.
+Implemented as the GTFS-first transport reality layer. Stops are sourced from scheduled NTA and Translink feeds, school-only service is excluded from public scoring, bus-only transport scoring now consumes weekday daytime frequency tiers rather than flat stop presence, and rail/tram-bearing stops now use explicit mode tiers.
 
 - [x] GTFS-first transport reality: stops are sourced directly from NTA + Translink feeds, and stops with zero scheduled services in the last 30 days are flagged as inactive and excluded from scoring.
 - [x] Separate public services from school-only routes so the latter don't count toward general transit access.
@@ -446,13 +446,13 @@ Implemented as the GTFS-first transport reality layer. Stops are sourced from sc
 
 ### Transport scoring overhaul
 
-Builds on the service reality layer above. Bus-only transport scoring now uses scheduled public daytime frequency, with remaining work focused on rail/tram interpretation and nuisance tradeoffs.
+Builds on the service reality layer above. Bus-only transport scoring now uses scheduled public daytime frequency, and rail/tram-bearing stops now use explicit mode tiers; remaining work is focused on the rail-proximity sweet spot and nuisance tradeoffs.
 
 - [x] Pull GTFS feeds (NTA + Translink) and compute commute, off-peak, weekend, and Friday-evening departures per stop.
 - [x] Replace flat stop-count scoring with frequency-derived `transport_score_units`.
 - [x] Cap low-frequency stops through the 1-5 `transport_score_units` scale so a single rare-service stop cannot match frequent urban transit access.
 - [x] Use bus weekday daytime headway as the scoring driver for bus-only stops, with no rural/urban distinction.
-- [ ] Design rail/tram-specific scoring without touching the bus frequency model.
+- [x] Add explicit rail/tram mode tiers without changing the bus frequency model.
 - [ ] Rail proximity sweet spot: reward walking distance to a station, penalize immediate adjacency (noise, dust).
 
 ### Noise and nuisance penalty layer

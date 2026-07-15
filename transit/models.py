@@ -102,6 +102,7 @@ class StopServiceSummary:
     sunday_deps: float = 0.0
     friday_evening_deps: float = 0.0
     transport_score_units: int = 0
+    transport_mode_tier: str | None = None
     bus_daytime_deps: float = 0.0
     bus_daytime_headway_min: float | None = None
     bus_frequency_tier: str | None = None
@@ -142,6 +143,7 @@ class GtfsStopReality:
     sunday_deps: float = 0.0
     friday_evening_deps: float = 0.0
     transport_score_units: int = 0
+    transport_mode_tier: str | None = None
     bus_daytime_deps: float = 0.0
     bus_daytime_headway_min: float | None = None
     bus_frequency_tier: str | None = None

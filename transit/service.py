@@ -157,6 +157,28 @@ def bus_frequency_tier_from_headway(headway_minutes: float | None) -> tuple[str 
     return tier, BUS_FREQUENCY_TIER_UNITS[tier]
 
 
+def transport_mode_tier_from_route_modes(route_modes: tuple[str, ...]) -> tuple[str | None, int]:
+    mode_set = {str(mode or "").strip() for mode in route_modes if str(mode or "").strip()}
+    if not mode_set:
+        return None, 0
+    if mode_set == {"bus"}:
+        return "bus_only", 0
+
+    has_bus = "bus" in mode_set
+    has_rail = "rail" in mode_set
+    has_tram = "tram" in mode_set
+
+    if has_rail and has_tram:
+        return ("bus_rail_tram" if has_bus else "rail_tram"), 5
+    if has_tram:
+        return ("bus_tram" if has_bus else "tram"), 5
+    if has_rail:
+        return ("bus_rail" if has_bus else "rail"), 4
+    if has_bus:
+        return "bus_only", 0
+    return None, 0
+
+
 def transport_score_units_from_frequency(
     *,
     weekday_morning_peak_deps: float,
@@ -470,6 +492,10 @@ def summarize_gtfs_stops(
         bus_frequency_tier, bus_frequency_score_units = bus_frequency_tier_from_headway(
             bus_daytime_headway_min
         )
+        route_modes = tuple(sorted(payload["route_modes"]))
+        transport_mode_tier, transport_mode_tier_score_units = transport_mode_tier_from_route_modes(
+            route_modes
+        )
         legacy_transport_score_units = transport_score_units_from_frequency(
             weekday_morning_peak_deps=weekday_morning_peak_deps,
             weekday_evening_peak_deps=weekday_evening_peak_deps,
@@ -479,12 +505,11 @@ def summarize_gtfs_stops(
             friday_evening_deps=friday_evening_deps,
             public_departures_30d=int(payload["public_departures_30d"]),
         )
-        route_modes = tuple(sorted(payload["route_modes"]))
-        transport_score_units = (
-            bus_frequency_score_units
-            if route_modes == ("bus",)
-            else legacy_transport_score_units
-        )
+        transport_score_units = legacy_transport_score_units
+        if route_modes == ("bus",):
+            transport_score_units = bus_frequency_score_units
+        elif transport_mode_tier_score_units > 0:
+            transport_score_units = max(bus_frequency_score_units, transport_mode_tier_score_units)
         summaries.append(
             StopServiceSummary(
                 reality_fingerprint=reality_fingerprint,
@@ -500,6 +525,7 @@ def summarize_gtfs_stops(
                 sunday_deps=sunday_deps,
                 friday_evening_deps=friday_evening_deps,
                 transport_score_units=transport_score_units,
+                transport_mode_tier=transport_mode_tier,
                 bus_daytime_deps=bus_daytime_deps,
                 bus_daytime_headway_min=bus_daytime_headway_min,
                 bus_frequency_tier=bus_frequency_tier,

@@ -59,6 +59,7 @@ class _FakeService:
                 "has_daily_bus_service": 2,
             },
             "transport_mode_counts": {"tram": 1, "rail": 1},
+            "transport_mode_tier_counts": {"bus_only": 1, "bus_rail": 1},
             "category_colors": config.CATEGORY_COLORS,
             "default_zoom": 6,
             "max_zoom": 19,
@@ -246,6 +247,7 @@ class LocalServerEndpointTests(TestCase):
         self.assertEqual(payload["pmtiles_url"], "/tiles/livability.pmtiles")
         self.assertEqual(payload["landuse_context_min_zoom"], 5)
         self.assertEqual(payload["landuse_context_max_zoom"], 11)
+        self.assertEqual(payload["transport_mode_tier_counts"], {"bus_only": 1, "bus_rail": 1})
         self.assertNotIn("surface_tile_url_template", payload)
         self.assertEqual(service.calls, [("runtime",)])
 

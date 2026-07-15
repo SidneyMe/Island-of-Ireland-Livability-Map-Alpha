@@ -179,6 +179,7 @@ def ensure_transit_reality(
                     sunday_deps=row.get("sunday_deps", 0.0),
                     friday_evening_deps=row.get("friday_evening_deps", 0.0),
                     transport_score_units=row.get("transport_score_units", 0),
+                    transport_mode_tier=row.get("transport_mode_tier"),
                     bus_daytime_deps=row.get("bus_daytime_deps", 0.0),
                     bus_daytime_headway_min=row.get("bus_daytime_headway_min"),
                     bus_frequency_tier=row.get("bus_frequency_tier"),

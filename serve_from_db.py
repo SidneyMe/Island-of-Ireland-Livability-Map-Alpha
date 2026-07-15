@@ -172,6 +172,7 @@ class RuntimeState:
     amenity_tier_counts: dict[str, dict[str, int]]
     transport_subtier_counts: dict[str, int]
     transport_bus_frequency_counts: dict[str, int]
+    transport_mode_tier_counts: dict[str, int]
     transport_flag_counts: dict[str, int]
     transport_mode_counts: dict[str, int]
     noise_enabled: bool
@@ -248,6 +249,7 @@ class RuntimeService:
                       AND (
                         COALESCE((bm.summary_json -> 'transport_subtier_counts')::text, '{}') NOT IN ('{}', 'null')
                         OR COALESCE((bm.summary_json -> 'transport_bus_frequency_counts')::text, '{}') NOT IN ('{}', 'null')
+                        OR COALESCE((bm.summary_json -> 'transport_mode_tier_counts')::text, '{}') NOT IN ('{}', 'null')
                         OR COALESCE((bm.summary_json -> 'transport_flag_counts')::text, '{}') NOT IN ('{}', 'null')
                         OR COALESCE((bm.summary_json -> 'transport_mode_counts')::text, '{}') NOT IN ('{}', 'null')
                         OR EXISTS (
@@ -257,6 +259,7 @@ class RuntimeService:
                             AND (
                               COALESCE(t.bus_service_subtier, '') <> ''
                               OR COALESCE(t.bus_frequency_tier, '') <> ''
+                              OR COALESCE(t.transport_mode_tier, '') <> ''
                               OR t.has_any_bus_service
                               OR t.has_daily_bus_service
                             )
@@ -280,6 +283,7 @@ class RuntimeService:
         for key in (
             "transport_subtier_counts",
             "transport_bus_frequency_counts",
+            "transport_mode_tier_counts",
             "transport_flag_counts",
             "transport_mode_counts",
         ):
@@ -303,6 +307,7 @@ class RuntimeService:
                         OR COALESCE(t.bus_frequency_tier, '') <> ''
                         OR t.has_any_bus_service
                         OR t.has_daily_bus_service
+                        OR COALESCE(t.transport_mode_tier, '') <> ''
                       )
                     """,
                     {"build_key": str(build_key)},
@@ -425,6 +430,16 @@ class RuntimeService:
                 else ()
             )
             if str(tier)
+        }
+        raw_transport_mode_tier_counts = summary_json.get("transport_mode_tier_counts", {}) or {}
+        transport_mode_tier_counts = {
+            str(mode_tier): int(value)
+            for mode_tier, value in (
+                raw_transport_mode_tier_counts.items()
+                if isinstance(raw_transport_mode_tier_counts, dict)
+                else ()
+            )
+            if str(mode_tier)
         }
         raw_transport_flag_counts = summary_json.get("transport_flag_counts", {}) or {}
         transport_flag_counts = {
@@ -667,6 +682,7 @@ class RuntimeService:
             amenity_tier_counts=amenity_tier_counts,
             transport_subtier_counts=transport_subtier_counts,
             transport_bus_frequency_counts=transport_bus_frequency_counts,
+            transport_mode_tier_counts=transport_mode_tier_counts,
             transport_flag_counts=transport_flag_counts,
             transport_mode_counts=transport_mode_counts,
             noise_enabled=noise_pmtiles_available,
@@ -748,6 +764,7 @@ class RuntimeService:
             "amenity_tier_counts": state.amenity_tier_counts,
             "transport_subtier_counts": state.transport_subtier_counts,
             "transport_bus_frequency_counts": state.transport_bus_frequency_counts,
+            "transport_mode_tier_counts": state.transport_mode_tier_counts,
             "transport_flag_counts": state.transport_flag_counts,
             "transport_mode_counts": state.transport_mode_counts,
             "noise_enabled": state.noise_enabled,

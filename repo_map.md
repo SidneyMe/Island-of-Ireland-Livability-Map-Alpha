@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-07-06. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-07-08. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -11,7 +11,7 @@
 - Ingests local OSM PBF via `osm2pgsql`, cache-managed public static GTFS ZIP feeds (default active transit inputs: `nta` and `translink`), and optionally an Overture Places geoparquet dataset. (Confirmed)
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
-- Builds a GTFS-first transit reality layer, bus daytime frequency tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
+- Builds a GTFS-first transit reality layer, bus daytime frequency tiers, explicit rail/tram mode tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
 - Current live transit config in `config.py` now wires the active `nta` and `translink` GTFS feeds, matching the README/tests and restoring Northern Ireland transport coverage in the published transport layer. (Confirmed)
 - Adds a display-only transport/industry noise overlay (Phase E: roads + rail + airport + industry, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport/industry use resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
 - Adds a display-only land-use context overlay from OSM `landuse` polygons (`residential`, `commercial`, `industrial`, `retail`, `farmland`, `forest`) as a lower-zoom contextual layer for the frontend, now baked and rendered from z5 through z11; it is not used in livability scoring yet. (Confirmed)
@@ -246,12 +246,12 @@ Notes:
   - `PARK_TIER_UNITS = {"pocket": 1, "neighbourhood": 2, "district": 3, "regional": 4}`
   - `VARIETY_CLUSTER_RADIUS_M = 25.0`
   - `DISTANCE_DECAY_HALF_DISTANCE_M = {"shops": 150.0, "transport": 250.0, "healthcare": 300.0, "parks": 350.0}`
-  - `TRANSIT_REALITY_ALGO_VERSION = 9`
+  - `TRANSIT_REALITY_ALGO_VERSION = 10`
   - `AMENITY_MERGE_ALGO_VERSION = 4`
   - `FINE_SURFACE_SCHEMA_VERSION = 2`
-  - `PMTILES_SCHEMA_VERSION = 11`
+  - `PMTILES_SCHEMA_VERSION = 13`
   - `GRID_GEOMETRY_SCHEMA_VERSION = 4`
-  - `CACHE_SCHEMA_VERSION = 13` (unchanged by display-only noise)
+  - `CACHE_SCHEMA_VERSION = 14`
   - `WALKGRAPH_FORMAT_VERSION = 3`
   - `IMPORTER_CONFIG_VERSION = "2026-04-08"`
   - `RAILWAY_PROXIMITY_ACTIVE_MODES = ("rail", "tram")`
@@ -360,7 +360,7 @@ Notes:
 - Why it matters: owns `GRID_AMENITY_CATEGORIES`, `_pmtiles_metadata()`, the z15 source-zoom cap, and the sparse fine-grid tile-spec planner that stitches coarse SQL tiles together with fine vector grid tiles. Noise is no longer declared or baked into the main livability archive. It also bounds parallel in-flight work, clamps fine-grid bakes to 4 workers, retries once at half workers after `BrokenProcessPool`, and only replaces the final PMTiles archive after a successful temp-file finalize. Tests import these directly. (Confirmed)
 - Windows can still fail here with `could not load library "postgis-3.dll": The paging file is too small for this operation to complete` when too many parallel bake workers hit PostGIS at once; that is an OS memory/pagefile limit, not a missing DLL. (Confirmed)
 - The amenities layer metadata declares `category`, `tier`, `name`, and `conflict_class`. (Confirmed from tests and code)
-- The transport layer metadata now declares weekly bus subtier / mask fields, bus daytime frequency fields, comma-separated `route_modes`, numeric `0/1` transport flags, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`; the frontend uses `route_modes` for exact rail/tram filtering and `bus_frequency_tier` for bus-frequency filtering, and the worker SQL emits one feature per published `transport_reality` row instead of grouping same-name same-coordinate stops. (Confirmed from code and tests)
+- The transport layer metadata now declares weekly bus subtier / mask fields, bus daytime frequency fields, `transport_mode_tier`, comma-separated `route_modes`, numeric `0/1` transport flags, commute/off-peak/weekend/Friday-evening departure averages, and `transport_score_units`; the frontend uses `route_modes` for exact rail/tram filtering and `bus_frequency_tier` for bus-frequency filtering, and the worker SQL emits one feature per published `transport_reality` row instead of grouping same-name same-coordinate stops. (Confirmed from code and tests)
 - The `grid` source-layer now carries both coarse and fine features, with fine rows padded with zero-valued popup numerics so metadata and popup consumers stay schema-stable. (Confirmed from code and tests)
 - LOC: 818
 
