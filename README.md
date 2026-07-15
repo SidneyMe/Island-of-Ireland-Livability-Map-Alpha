@@ -446,14 +446,14 @@ Implemented as the GTFS-first transport reality layer. Stops are sourced from sc
 
 ### Transport scoring overhaul
 
-Builds on the service reality layer above. Bus-only transport scoring now uses scheduled public daytime frequency, and rail/tram-bearing stops now use explicit mode tiers; remaining work is focused on the rail-proximity sweet spot and nuisance tradeoffs.
+Builds on the service reality layer above. Bus-only transport scoring now uses scheduled public daytime frequency, and rail/tram-bearing stops now use explicit mode tiers; remaining work is focused on the rail-proximity sweet spot, where station access should peak at a comfortable walk while track-adjacent cells stay damped, plus the broader nuisance tradeoffs.
 
 - [x] Pull GTFS feeds (NTA + Translink) and compute commute, off-peak, weekend, and Friday-evening departures per stop.
 - [x] Replace flat stop-count scoring with frequency-derived `transport_score_units`.
 - [x] Cap low-frequency stops through the 1-5 `transport_score_units` scale so a single rare-service stop cannot match frequent urban transit access.
 - [x] Use bus weekday daytime headway as the scoring driver for bus-only stops, with no rural/urban distinction.
 - [x] Add explicit rail/tram mode tiers without changing the bus frequency model.
-- [ ] Rail proximity sweet spot: reward walking distance to a station, penalize immediate adjacency (noise, dust).
+- [ ] Rail proximity sweet spot: reward comfortable station access, but keep the immediate track-adjacent zone damped for noise/dust.
 
 ### Noise and nuisance penalty layer
 

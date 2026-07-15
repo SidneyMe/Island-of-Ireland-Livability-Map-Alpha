@@ -229,7 +229,7 @@ Notes:
 | Runtime request logging | `serve_from_db.py`, `serve_routes.py` | `LivabilityRequestHandler.do_GET()` / `do_HEAD()` | Route-aware log lines include method, path, route name, status, duration, bytes, and disconnect hints without changing HTTP responses. |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` |
 | Progress / ETA behavior | `progress_tracker.py` | `precompute/workflow.py`, `precompute/__init__.py` | `.livability_cache/precompute_timing_stats.json` |
-| Product / methodology docs | `README.md`, `docs/PHASES.md`, `docs/*.md` | Humans only; README roadmap and phase notes distinguish display-only noise overlay from future scoring penalties | None |
+| Product / methodology docs | `README.md`, `docs/PHASES.md`, `docs/*.md` | Humans only; README roadmap and phase notes distinguish display-only noise overlay from future scoring penalties and now spell out the rail-proximity sweet spot as a station-access plateau plus separate track-adjacency damping | None |
 
 ---
 

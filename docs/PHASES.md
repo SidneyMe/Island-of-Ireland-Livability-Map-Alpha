@@ -300,6 +300,12 @@ The original v1 model counted features by presence. A corner shop scored the sam
 
 - Bonus and penalty curves need a design note. Over-eager penalties will mislabel genuine mixed-use neighbourhoods as industrial hellholes.
 
+**Done so far:**
+
+- OSM `landuse` polygons for `residential`, `commercial`, `industrial`, `retail`, `farmland`, and `forest` are now imported, exposed in runtime metadata, and baked as a separate `landuse_context` PMTiles layer from z5 through z11.
+- The frontend exposes a default-off contextual overlay with class filters, matched colour swatches, opacity control, and a note that the layer is contextual only.
+- The overlay is not yet used in livability scoring: concentration penalties, industrial penalties, and green-buffer bonuses remain future work pending the design note.
+
 ---
 
 ## Phase 3 — Transport scoring overhaul
@@ -336,7 +342,7 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 - `transport_score_units` plus bus frequency metadata now flows through DB reads, scoring amenity rows, PMTiles metadata, runtime summaries, frontend filters, the standalone export bundle, and transport popups.
 - `TRANSIT_REALITY_ALGO_VERSION = 10`, `CACHE_SCHEMA_VERSION = 14`, `FINE_SURFACE_SCHEMA_VERSION = 2`, and `PMTILES_SCHEMA_VERSION = 13` invalidate stale transport, cache, surface, and tile outputs.
 
-### Mode tiering
+### ~~Mode tiering~~
 
 **What:** Explicit rail/tram interpretation layered on top of the existing bus-frequency model.
 
@@ -350,12 +356,26 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 
 ### Rail proximity sweet spot
 
-**What:** Reward walking distance to a station, penalize direct adjacency to the tracks.
+**What:** Reward walkable access to rail/tram stations, but suppress the "right beside the tracks" case.
 
 **How:**
 
-- Distance-decay bonus centred ~300–500 m from the station — close enough to walk, far enough to avoid track noise.
-- Overlaps with the Phase 4 railway-track noise penalty; the net effect is a sweet-spot curve with a rewarding plateau.
+- Treat this as a station-access bonus layered on top of the rail/tram mode tier, not as a new transport category.
+- Use the nearest active rail/tram stop from the GTFS reality layer, reusing the existing school-only / inactive-stop filtering.
+- Shape the bonus as a broad plateau: no meaningful reward within the immediate track-adjacent zone, rising to a peak around 300-500 m, then tapering off toward zero once the walk becomes inconvenient.
+- Keep the Phase 4 railway-track penalty separate. The bonus handles "easy to walk to", the penalty handles "too close to the tracks", and the combined curve should feel like a plateau with a dip at the origin rather than two unrelated effects.
+- Let the peak amplitude inherit from the existing mode tier so rail and Luas can still feel stronger than a generic bus stop without letting a station next to a track dominate the score.
+
+**Open questions:**
+
+- Should the plateau center stay at 300-500 m, or shift slightly outward if the sanity fixture says the sweet spot is less forgiving?
+- Should we measure raw geometry distance to the station, or a walk-network distance from the scored cell to the station stop?
+- Should rail and Luas share the same peak bonus, or should rail keep a slightly higher ceiling than tram?
+
+**Done so far:**
+
+- The track-adjacent damping half of the curve is implemented through the Phase 4 GTFS-shapes-backed railway proximity penalty and is threaded through grid scoring, fine-surface inspection, PMTiles, and popup breakdowns.
+- The station-access plateau/bonus around a comfortable walking distance is not implemented yet, so this item remains partial.
 
 ### ~~Rural bus minimal weight~~ Deferred
 
