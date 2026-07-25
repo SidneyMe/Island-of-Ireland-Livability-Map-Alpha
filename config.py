@@ -54,7 +54,7 @@ TRANSIT_RAW_SCHEMA = "transit_raw"
 TRANSIT_DERIVED_SCHEMA = "transit_derived"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
 OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
-IMPORTER_CONFIG_VERSION = "2026-07-06-landuse-context-1"
+IMPORTER_CONFIG_VERSION = "2026-07-15-road-proximity-1"
 
 
 def _osm2pgsql_flat_nodes_path() -> str:
@@ -429,6 +429,30 @@ RAILWAY_PROXIMITY_ACTIVE_MODES = ("rail", "tram")
 RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M = 50.0
 RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M = 200.0
 RAILWAY_PROXIMITY_MAX_PENALTY = 4.0
+
+ROAD_PROXIMITY_ALGORITHM_VERSION = 1
+ROAD_PROXIMITY_CLASS_SETTINGS = {
+    "motorway": {
+        "fallback_speed_kmh": 120.0,
+        "full_penalty_distance_m": 75.0,
+        "zero_penalty_distance_m": 300.0,
+        "max_penalty": 4.0,
+    },
+    "trunk": {
+        "fallback_speed_kmh": 100.0,
+        "full_penalty_distance_m": 60.0,
+        "zero_penalty_distance_m": 250.0,
+        "max_penalty": 3.0,
+    },
+    "primary": {
+        "fallback_speed_kmh": 80.0,
+        "full_penalty_distance_m": 40.0,
+        "zero_penalty_distance_m": 150.0,
+        "max_penalty": 2.0,
+    },
+}
+ROAD_PROXIMITY_MIN_SPEED_MULTIPLIER = 0.75
+ROAD_PROXIMITY_MAX_SPEED_MULTIPLIER = 1.25
 
 
 CAPS = {"shops": 6, "transport": 5, "healthcare": 5, "parks": 5}
@@ -1127,6 +1151,10 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "railway_proximity_full_penalty_distance_m": RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M,
         "railway_proximity_zero_penalty_distance_m": RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
         "railway_proximity_max_penalty": RAILWAY_PROXIMITY_MAX_PENALTY,
+        "road_proximity_algorithm_version": ROAD_PROXIMITY_ALGORITHM_VERSION,
+        "road_proximity_class_settings": ROAD_PROXIMITY_CLASS_SETTINGS,
+        "road_proximity_min_speed_multiplier": ROAD_PROXIMITY_MIN_SPEED_MULTIPLIER,
+        "road_proximity_max_speed_multiplier": ROAD_PROXIMITY_MAX_SPEED_MULTIPLIER,
     }
     score_hash = hash_dict(score_params)
 
@@ -1303,6 +1331,10 @@ def build_hashes_for_import(
             "surface_shard_size_m": SURFACE_SHARD_SIZE_M,
             "grid_geometry_schema_version": GRID_GEOMETRY_SCHEMA_VERSION,
             "fine_surface_schema_version": FINE_SURFACE_SCHEMA_VERSION,
+            "road_proximity_algorithm_version": ROAD_PROXIMITY_ALGORITHM_VERSION,
+            "road_proximity_class_settings": ROAD_PROXIMITY_CLASS_SETTINGS,
+            "road_proximity_min_speed_multiplier": ROAD_PROXIMITY_MIN_SPEED_MULTIPLIER,
+            "road_proximity_max_speed_multiplier": ROAD_PROXIMITY_MAX_SPEED_MULTIPLIER,
         }
     )
     build_key = hash_dict(

@@ -132,6 +132,7 @@ def _grid_layer_fields() -> dict[str, str]:
         fields[f"effective_units_{category}"] = "Number"
         fields[f"score_{category}"] = "Number"
     fields["score_railway_proximity"] = "Number"
+    fields["score_road_proximity"] = "Number"
     return fields
 
 

@@ -41,6 +41,12 @@ local transport_rail_values = {
     halt = true,
 }
 
+local road_values = {
+    motorway = true,
+    trunk = true,
+    primary = true,
+}
+
 local function feature_category(tags)
     if tags.shop then
         return 'shops'
@@ -77,6 +83,39 @@ local features = osm2pgsql.define_table({
     },
 })
 
+local roads = osm2pgsql.define_table({
+    name = 'roads',
+    schema = schema_name,
+    ids = { type = 'any', id_column = 'osm_id', type_column = 'osm_type' },
+    columns = {
+        { column = 'import_fingerprint', type = 'text', not_null = true },
+        { column = 'highway', type = 'text', not_null = true },
+        { column = 'maxspeed', type = 'text' },
+        { column = 'tags_json', type = 'jsonb', not_null = true },
+        { column = 'geom', type = 'geometry', projection = 4326, not_null = true },
+        { column = 'created_at', sql_type = 'timestamptz', not_null = true },
+    },
+})
+
+local function insert_road(object)
+    local highway = object.tags.highway
+    if not road_values[highway] then
+        return
+    end
+    local geom = object:as_linestring()
+    if not geom then
+        return
+    end
+    roads:insert({
+        import_fingerprint = import_fingerprint,
+        highway = highway,
+        maxspeed = object.tags.maxspeed,
+        tags_json = object.tags,
+        geom = geom,
+        created_at = created_at,
+    })
+end
+
 local function insert_feature(object, geom)
     local category = feature_category(object.tags)
     if not category or not geom then
@@ -101,6 +140,10 @@ function osm2pgsql.process_node(object)
 end
 
 function osm2pgsql.process_way(object)
+    if road_values[object.tags.highway] then
+        insert_road(object)
+        return
+    end
     local category = feature_category(object.tags)
     if not category then
         return

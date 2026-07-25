@@ -23,6 +23,7 @@ from config import (
 from db_postgis import (
     load_railway_corridor_rows,
     load_landuse_context_rows,
+    load_road_rows,
     load_service_desert_rows,
     load_transport_reality_points,
     load_transit_railway_corridor_manifest,
@@ -33,6 +34,7 @@ import study_area as _study_area
 
 from . import grid as _grid
 from . import publish as _publish
+from .road_proximity import road_proximity_summary
 from ._state import _STATE
 
 
@@ -504,4 +506,21 @@ def _summary_json(
         }
         payload.update(railway_summary)
         payload["railway_proximity"] = railway_summary
+    if engine is not None and _STATE.source_state is not None:
+        try:
+            road_rows = load_road_rows(
+                engine,
+                _STATE.source_state.import_fingerprint,
+            )
+        except Exception:
+            road_rows = []
+        road_summary = road_proximity_summary(road_rows)
+        payload.update(
+            {
+                "road_proximity_enabled": bool(road_summary["enabled"]),
+                "road_proximity_data_present": bool(road_summary["data_present"]),
+                "road_proximity_row_count": int(road_summary["row_count"]),
+                "road_proximity": road_summary,
+            }
+        )
     return payload

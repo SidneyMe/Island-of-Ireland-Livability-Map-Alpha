@@ -446,7 +446,7 @@ The implementation below is the earlier design note. The landed code now uses GT
 - The hidden railway-proximity penalty is wired into the shared scoring core, so `grid_walk`, fine-surface inspect, PMTiles, and popup breakdowns all stay in sync.
 - Runtime/build diagnostics now record whether corridor data was present, how many corridors were materialized, and the rail proximity hash/settings.
 
-### Motorway and major-road noise
+### ~~Motorway and major-road noise~~
 
 **What:** Penalty for cells directly adjacent to motorways and primary roads.
 
@@ -455,6 +455,11 @@ The implementation below is the earlier design note. The landed code now uses GT
 - Buffer `highway=motorway`, `highway=trunk`, `highway=primary` by class-specific distances (motorway buffer > primary buffer).
 - Penalty weighted by the road's speed class.
 - Stacks additively with the over-concentration penalty below.
+
+**Done so far:**
+
+- OSM `motorway`, `trunk`, and `primary` ways are imported into a dedicated raw roads table.
+- Class- and maxspeed-weighted proximity penalties use strongest-nearby-road selection and are threaded through coarse grids, fine-surface inspection, PMTiles, and score popups.
 
 ### Flight paths and airport proximity
 

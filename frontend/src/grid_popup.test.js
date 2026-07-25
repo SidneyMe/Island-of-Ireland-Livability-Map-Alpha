@@ -16,7 +16,8 @@ import { coarseGridPopupHtml, inspectPopupHtml } from "./popups/grid_popup.js";
       transport: 4.5,
       healthcare: 0,
       parks: 12.5,
-      railway_proximity: -3.8
+      railway_proximity: -3.8,
+      road_proximity: -2.1
     },
     total_score: 29.4
   });
@@ -25,6 +26,8 @@ import { coarseGridPopupHtml, inspectPopupHtml } from "./popups/grid_popup.js";
   assert.match(html, /Shops/);
   assert.match(html, /Railway proximity/);
   assert.match(html, /-3\.8 points/);
+  assert.match(html, /Road proximity/);
+  assert.match(html, /-2\.1 points/);
 }
 
 {
@@ -47,11 +50,14 @@ import { coarseGridPopupHtml, inspectPopupHtml } from "./popups/grid_popup.js";
     cluster_parks: 3,
     effective_units_parks: 4,
     score_parks: 10.2,
-    score_railway_proximity: -2.5
+    score_railway_proximity: -2.5,
+    score_road_proximity: -1.4
   });
 
   assert.match(html, /Railway proximity/);
   assert.match(html, /-2\.5 points/);
+  assert.match(html, /Road proximity/);
+  assert.match(html, /-1\.4 points/);
 }
 
 console.log("grid popup checks passed");

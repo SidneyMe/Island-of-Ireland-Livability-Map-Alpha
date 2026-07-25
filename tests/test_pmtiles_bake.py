@@ -125,6 +125,7 @@ class PmtilesBakeContractTests(TestCase):
                 self.assertEqual(grid_layer["fields"][f"effective_units_{category}"], "Number")
                 self.assertEqual(grid_layer["fields"][f"score_{category}"], "Number")
         self.assertEqual(grid_layer["fields"]["score_railway_proximity"], "Number")
+        self.assertEqual(grid_layer["fields"]["score_road_proximity"], "Number")
 
     def test_pmtiles_metadata_declares_transit_reality_and_service_desert_layers(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(

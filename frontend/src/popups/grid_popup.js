@@ -1,8 +1,9 @@
 import { formatResolutionLabel } from "../grid_debug.js";
 
-const SCORE_SECTIONS = ["shops", "transport", "healthcare", "parks", "railway_proximity"];
+const SCORE_SECTIONS = ["shops", "transport", "healthcare", "parks", "railway_proximity", "road_proximity"];
 const SCORE_LABELS = {
-  railway_proximity: "Railway proximity"
+  railway_proximity: "Railway proximity",
+  road_proximity: "Road proximity"
 };
 
 function scoreLabel(category) {
@@ -38,7 +39,7 @@ export function inspectPopupHtml(payload) {
     const clusterCount = Number((payload.cluster_counts || {})[category] || 0);
     const effectiveUnits = formatEffectiveUnits((payload.effective_units || {})[category] || 0);
     const score = Number((payload.component_scores || {})[category] || 0).toFixed(1);
-    if (category === "railway_proximity") {
+    if (category === "railway_proximity" || category === "road_proximity") {
       return (
         "<li><strong>" + title + "</strong>: " +
         score + " points</li>"
@@ -71,7 +72,7 @@ export function coarseGridPopupHtml(properties, fallbackResolutionM = 50) {
     const clusterCount = Number(properties["cluster_" + category] || 0);
     const effectiveUnits = formatEffectiveUnits(properties["effective_units_" + category] || 0);
     const score = Number(properties["score_" + category] || 0).toFixed(1);
-    if (category === "railway_proximity") {
+    if (category === "railway_proximity" || category === "road_proximity") {
       return (
         "<li><strong>" + title + "</strong>: " +
         score + " points</li>"

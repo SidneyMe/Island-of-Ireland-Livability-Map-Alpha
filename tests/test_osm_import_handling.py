@@ -564,7 +564,7 @@ class DbPostgisImportStateTests(TestCase):
         self.assertNotIn("walk_edges", joined)
         self.assertNotIn("drive_edges", joined)
 
-    def test_drop_importer_owned_raw_tables_only_targets_features(self) -> None:
+    def test_drop_importer_owned_raw_tables_targets_features_and_roads(self) -> None:
         engine = mock.MagicMock()
         connection = engine.begin.return_value.__enter__.return_value
 
@@ -573,7 +573,10 @@ class DbPostgisImportStateTests(TestCase):
         statements = [str(call.args[0]) for call in connection.execute.call_args_list]
         self.assertEqual(
             statements,
-            [f'DROP TABLE IF EXISTS "{OSM_IMPORT_SCHEMA}"."features"'],
+            [
+                f'DROP TABLE IF EXISTS "{OSM_IMPORT_SCHEMA}"."features"',
+                f'DROP TABLE IF EXISTS "{OSM_IMPORT_SCHEMA}"."roads"',
+            ],
         )
 
     def test_ensure_managed_raw_support_tables_creates_import_manifest_support_only(self) -> None:
@@ -932,6 +935,7 @@ class DbReadTests(TestCase):
                     "sunday_deps": 8.0,
                     "friday_evening_deps": 9.0,
                     "transport_score_units": 3,
+                    "transport_mode_tier": None,
                     "bus_daytime_deps": 28.0,
                     "bus_daytime_headway_min": 30.0,
                     "bus_frequency_tier": "moderate",
@@ -1044,6 +1048,13 @@ class DbReadTests(TestCase):
 
 
 class TextCleanupTests(TestCase):
+    def test_lua_defines_dedicated_major_roads_table(self) -> None:
+        text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")
+        self.assertIn("name = 'roads'", text)
+        for highway in ("motorway", "trunk", "primary"):
+            self.assertIn(f"    {highway} = true,", text)
+        self.assertIn("object:as_linestring()", text)
+
     def test_lua_no_network_ways(self) -> None:
         text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")
         self.assertNotIn("network_ways", text)

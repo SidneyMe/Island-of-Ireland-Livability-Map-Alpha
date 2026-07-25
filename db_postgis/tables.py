@@ -189,6 +189,20 @@ features = Table(
     schema=OSM_IMPORT_SCHEMA,
 )
 
+roads = Table(
+    "roads",
+    metadata,
+    Column("import_fingerprint", Text, nullable=False),
+    Column("osm_type", Text, nullable=False),
+    Column("osm_id", BigInteger, nullable=False),
+    Column("highway", Text, nullable=False),
+    Column("maxspeed", Text, nullable=True),
+    Column("tags_json", JSONB, nullable=False),
+    Column("geom", Geometry("LINESTRING", srid=4326), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    schema=OSM_IMPORT_SCHEMA,
+)
+
 transit_feed_manifest = Table(
     "feed_manifest",
     metadata,
@@ -611,7 +625,7 @@ REQUIRED_MANAGED_SCHEMA_TABLES = (
     (TRANSIT_DERIVED_SCHEMA, REQUIRED_TRANSIT_DERIVED_TABLES),
 )
 
-OPTIONAL_IMPORTED_TABLES: set[str] = {"features"}
+OPTIONAL_IMPORTED_TABLES: set[str] = {"features", "roads"}
 
 MANAGED_RAW_SUPPORT_TABLES = (
     import_manifest,
@@ -631,7 +645,7 @@ MANAGED_RAW_SUPPORT_TABLES = (
     transit_service_desert_cells,
 )
 
-IMPORTER_OWNED_RAW_TABLES = ("features",)
+IMPORTER_OWNED_RAW_TABLES = ("features", "roads")
 
 GEOMETRY_FIELDS = {
     _table_key(grid_walk): ("centre_geom", "cell_geom"),
@@ -640,6 +654,7 @@ GEOMETRY_FIELDS = {
     _table_key(service_deserts): ("cell_geom",),
     _table_key(noise_polygons): ("geom",),
     _table_key(features): ("geom",),
+    _table_key(roads): ("geom",),
     _table_key(transit_railway_corridors): ("geom",),
     _table_key(transit_stops): ("geom",),
     _table_key(transit_gtfs_stop_reality): ("geom",),

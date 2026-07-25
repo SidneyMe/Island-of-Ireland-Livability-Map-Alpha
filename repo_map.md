@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-07-08. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-07-15. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -12,6 +12,7 @@
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, explicit rail/tram mode tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
+- Applies a hidden, explainable road-proximity penalty from OSM `motorway`, `trunk`, and `primary` ways, with class-specific distance decay and safe maxspeed weighting; strongest nearby-road selection avoids junction double-counting. (Confirmed)
 - Current live transit config in `config.py` now wires the active `nta` and `translink` GTFS feeds, matching the README/tests and restoring Northern Ireland transport coverage in the published transport layer. (Confirmed)
 - Adds a display-only transport/industry noise overlay (Phase E: roads + rail + airport + industry, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport/industry use resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
 - Adds a display-only land-use context overlay from OSM `landuse` polygons (`residential`, `commercial`, `industrial`, `retail`, `farmland`, `forest`) as a lower-zoom contextual layer for the frontend, now baked and rendered from z5 through z11; it is not used in livability scoring yet. (Confirmed)
@@ -28,6 +29,7 @@
 - **OSM ingest**: `local_osm_import/` + `osm2pgsql_livability.lua`
 - **GTFS ingest and transit reality**: `transit/`
 - **GTFS rail-corridor proxy**: `transit/railway_corridors.py`
+- **Major-road proximity penalty**: `precompute/road_proximity.py`
 - **Overture integration and dedupe**: `overture/loader.py`, `overture/merge.py`, `db_postgis/amenity_merge.py`
 - **Amenity merge observability**: `db_postgis/amenity_merge.py`, `precompute/phases.py`, `precompute/_rows.py`, `precompute/publish.py`
 - **Noise overlay ingestion**: `noise/loader.py`
@@ -214,6 +216,7 @@ Notes:
 | Config and hash chain | `config.py` | Imported almost everywhere | None |
 | Schema history | `db_postgis/migrations/versions/` | `db_postgis/tables.py` | `schema.sql` |
 | OSM ingest rules | `osm2pgsql_livability.lua`, `local_osm_import/` | `config.IMPORTER_CONFIG_VERSION` | None |
+| Major-road proximity scoring | `osm2pgsql_livability.lua`, `db_postgis/reads.py`, `precompute/road_proximity.py` | `grid_walk.scores_json`, fine-surface score arrays, `/api/runtime` road diagnostics, grid popups | OSM `osm_raw.roads` importer-owned table |
 | Transit reality | `transit/workflow.py`, `transit/rust_gtfs.py`, `transit/railway_corridors.py` | `config.transit_config_hash()` | None |
 | Amenity tiering | `config.py` tier constants, `precompute/amenity_tiers.py` | `precompute/phases.py`, `precompute/publish.py` | None |
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
@@ -301,6 +304,12 @@ Notes:
 - Purpose: shapes-backed rail/tram corridor materialization and hidden railway proximity penalty helper. (Confirmed)
 - Why it matters: GTFS shapes are the current service-backed geometry source for rail/tram proximity, so this module hashes, dissolves, caches, and scores the corridor layer without changing the public overlay surface. (Confirmed)
 - Main functions: `build_railway_corridor_materialization()`, `compute_railway_proximity_penalties()`, `railway_proximity_penalty_for_distance()`
+
+### `precompute/road_proximity.py`
+
+- Purpose: parse OSM maxspeed values and compute the strongest class- and speed-weighted motorway/trunk/primary proximity penalty for walkgraph nodes. (Confirmed)
+- Uses linear class-specific distance decay, capped speed multipliers, metric CRS geometry, and STRtree candidate lookup. (Confirmed)
+- Main functions: `parse_maxspeed_kmh()`, `road_penalty_for_distance()`, `compute_road_proximity_penalties()`
 
 ### `precompute/workflow.py`
 
@@ -706,10 +715,11 @@ Representative tests confirmed present:
 | `tests/test_amenity_tiers.py` | shop / healthcare / park tier classification |
 | `tests/test_overture_loader.py` | Overture category filtering and park handling |
 | `tests/test_osm_import_handling.py` | osm2pgsql wrapper and import manifest behavior |
+| `tests/test_road_proximity.py` | maxspeed parsing, class calibration, distance decay, strongest-road selection, and empty/invalid geometry handling |
 | `tests/test_precompute_behavior.py` | phase sequencing, cache / hash behavior, service-desert publish summaries |
 | `tests/test_precompute_planner.py` | pure precompute import / noise-artifact / build planning decisions |
 | `tests/test_precompute_cache.py` | tier cache read / write / invalidation helpers |
-| `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier` exposure, bounded parallel scheduling, retry behavior, temp-output cleanup, and old-archive preservation on failure |
+| `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier` exposure, road/rail score fields, bounded parallel scheduling, retry behavior, temp-output cleanup, and old-archive preservation on failure |
 | `tests/test_noise_loader.py` | ROI dB field normalization plus round-aware NI mapping (Round 1 class-code handling, Round 2/3 threshold mapping, unknown-code errors), and newest-round fallback geometry |
 | `tests/test_noise_artifacts.py` | manifest SQL safety checks (`CAST(:error_detail AS text)`), ingest pre-validation diagnostics, streaming ingest behavior, deterministic dev-fast grid cache identity, and non-mutating accurate simplification |
 | `tests/test_fine_vector_pmtiles_worker.py` | fine-grid shard aggregation, degenerate buffered-ring rejection, encoded per-zoom resolutions, mixed z15 resolutions, invalid-land skipping, buffered border-cell continuity, bounded worker LRU cache behavior across chunks |

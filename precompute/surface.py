@@ -44,7 +44,7 @@ SURFACE_TILE_CACHE_DIRNAME = "tiles"
 SURFACE_SCORE_SCHEMA_VERSION = FINE_SURFACE_SCHEMA_VERSION
 SURFACE_TILE_SCHEMA_VERSION = 1
 _CATEGORY_ORDER = tuple(CAPS)
-_SCORE_COMPONENT_ORDER = _CATEGORY_ORDER + ("railway_proximity",)
+_SCORE_COMPONENT_ORDER = _CATEGORY_ORDER + ("railway_proximity", "road_proximity")
 _CATEGORY_TO_INDEX = {category: index for index, category in enumerate(_CATEGORY_ORDER)}
 _DENSITY_NORMALIZED_CATEGORIES = {"shops", "transport", "healthcare"}
 _MIN_DENSITY_AREA_RATIO = 0.25
@@ -340,6 +340,7 @@ def component_scores_for_nodes(
     effective_units_matrix: np.ndarray,
     effective_area_ratio: np.ndarray,
     railway_proximity_penalties: np.ndarray | None = None,
+    road_proximity_penalties: np.ndarray | None = None,
 ) -> np.ndarray:
     ratios = _normalized_area_ratio_array(effective_area_ratio).astype(np.float32, copy=False)
     row_count = int(ratios.shape[0])
@@ -357,6 +358,13 @@ def component_scores_for_nodes(
             raise ValueError(
                 "railway_proximity_penalties must match the number of scored nodes"
             )
+        scores[:, -2] = -np.maximum(penalty_values, 0.0)
+    if road_proximity_penalties is not None:
+        penalty_values = np.asarray(road_proximity_penalties, dtype=np.float32)
+        if penalty_values.shape[0] != row_count:
+            raise ValueError(
+                "road_proximity_penalties must match the number of scored nodes"
+            )
         scores[:, -1] = -np.maximum(penalty_values, 0.0)
     return scores
 
@@ -367,6 +375,7 @@ def build_node_score_arrays(
     walk_cluster_counts_by_node,
     walk_effective_units_by_node,
     railway_proximity_penalties: np.ndarray | None = None,
+    road_proximity_penalties: np.ndarray | None = None,
 ) -> dict[str, Any]:
     node_count = int(walk_graph.vcount())
     counts_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.uint32)
@@ -378,6 +387,12 @@ def build_node_score_arrays(
         railway_proximity_penalties = np.asarray(railway_proximity_penalties, dtype=np.float32)
         if railway_proximity_penalties.shape != (node_count,):
             raise ValueError("railway_proximity_penalties must match walk_graph.vcount()")
+    if road_proximity_penalties is None:
+        road_proximity_penalties = np.zeros(node_count, dtype=np.float32)
+    else:
+        road_proximity_penalties = np.asarray(road_proximity_penalties, dtype=np.float32)
+        if road_proximity_penalties.shape != (node_count,):
+            raise ValueError("road_proximity_penalties must match walk_graph.vcount()")
 
     def _copy_reachability_matrix(source, target: np.ndarray) -> bool:
         if not isinstance(source, ReachabilityMatrix):
@@ -434,6 +449,7 @@ def build_node_score_arrays(
         effective_units_matrix,
         np.ones(node_count, dtype=np.float32),
         railway_proximity_penalties=railway_proximity_penalties,
+        road_proximity_penalties=road_proximity_penalties,
     )
     reference_total = reference_scores.sum(axis=1, dtype=np.float32)
     return {
@@ -444,6 +460,7 @@ def build_node_score_arrays(
         "reference_scores": reference_scores.astype(np.float32, copy=False),
         "reference_total": reference_total.astype(np.float32, copy=False),
         "railway_proximity_penalties": railway_proximity_penalties.astype(np.float32, copy=False),
+        "road_proximity_penalties": road_proximity_penalties.astype(np.float32, copy=False),
     }
 
 
@@ -460,6 +477,13 @@ def save_node_score_arrays(score_dir: Path, payload: dict[str, Any]) -> None:
         railway_proximity_penalties=np.asarray(
             payload["railway_proximity_penalties"], dtype=np.float32
         ),
+        road_proximity_penalties=np.asarray(
+            payload.get(
+                "road_proximity_penalties",
+                np.zeros(len(payload["reference_total"]), dtype=np.float32),
+            ),
+            dtype=np.float32,
+        ),
     )
 
 
@@ -472,8 +496,11 @@ def load_node_score_arrays(score_dir: Path) -> dict[str, Any]:
             "effective_units_matrix": np.asarray(data["effective_units_matrix"], dtype=np.float32),
             "reference_scores": np.asarray(data["reference_scores"], dtype=np.float32),
             "reference_total": np.asarray(data["reference_total"], dtype=np.float32),
-            "railway_proximity_penalties": np.asarray(
-                data["railway_proximity_penalties"],
+            "railway_proximity_penalties": np.asarray(data["railway_proximity_penalties"], dtype=np.float32),
+            "road_proximity_penalties": np.asarray(
+                data["road_proximity_penalties"]
+                if "road_proximity_penalties" in data.files
+                else np.zeros(len(data["reference_total"]), dtype=np.float32),
                 dtype=np.float32,
             ),
         }
@@ -635,11 +662,13 @@ def _canonical_total_scores_for_shard(
     counts_matrix = node_scores["counts_matrix"][node_ids]
     effective_units_matrix = node_scores["effective_units_matrix"][node_ids]
     railway_proximity_penalties = node_scores["railway_proximity_penalties"][node_ids]
+    road_proximity_penalties = node_scores["road_proximity_penalties"][node_ids]
     component_scores = component_scores_for_nodes(
         counts_matrix,
         effective_units_matrix,
         weights.ravel()[valid_flat].astype(np.float32),
         railway_proximity_penalties=railway_proximity_penalties,
+        road_proximity_penalties=road_proximity_penalties,
     )
     total_scores.ravel()[valid_flat] = component_scores.sum(axis=1, dtype=np.float32)
     return total_scores
@@ -788,6 +817,7 @@ def ensure_surface_score_cache(
     walk_cluster_counts_by_node: dict[int, dict[str, int]],
     walk_effective_units_by_node: dict[int, dict[str, float]],
     railway_proximity_penalties: np.ndarray | None = None,
+    road_proximity_penalties: np.ndarray | None = None,
     tracker=None,
 ) -> dict[str, Any]:
     shell_manifest = load_surface_manifest(shell_dir)
@@ -825,6 +855,7 @@ def ensure_surface_score_cache(
         walk_cluster_counts_by_node,
         walk_effective_units_by_node,
         railway_proximity_penalties=railway_proximity_penalties,
+        road_proximity_penalties=road_proximity_penalties,
     )
     save_node_score_arrays(score_dir, node_scores)
     if tracker is not None:
@@ -1190,12 +1221,14 @@ class FineSurfaceRuntime:
             if float(effective_units_row[index]) > 0.0
         }
         railway_proximity_penalty = float(node_scores["railway_proximity_penalties"][node_idx])
+        road_proximity_penalty = float(node_scores["road_proximity_penalties"][node_idx])
         component_scores, total_score = score_cell(
             counts,
             cluster_counts=cluster_counts,
             effective_area_ratio=effective_area_ratio,
             effective_units=effective_units,
             railway_proximity_penalty=railway_proximity_penalty,
+            road_proximity_penalty=road_proximity_penalty,
         )
         payload.update(
             {

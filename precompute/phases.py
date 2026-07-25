@@ -12,8 +12,9 @@ from config import (
     TAGS,
     VARIETY_CLUSTER_RADIUS_M,
 )
-from db_postgis import load_railway_corridor_rows
+from db_postgis import load_railway_corridor_rows, load_road_rows
 from transit import compute_railway_proximity_penalties
+from .road_proximity import compute_road_proximity_penalties
 
 from .amenity_clusters import build_amenity_clusters
 from .amenity_tiers import annotate_amenity_row
@@ -1101,6 +1102,7 @@ def phase_grids_impl(
 
     walk_graph = phase_networks(engine, tracker)
     railway_proximity_penalties = np.zeros(int(walk_graph.vcount()), dtype=np.float32)
+    road_proximity_penalties = np.zeros(int(walk_graph.vcount()), dtype=np.float32)
     if getattr(_STATE, "transit_reality_state", None) is not None:
         try:
             corridor_rows = load_railway_corridor_rows(
@@ -1113,6 +1115,18 @@ def phase_grids_impl(
             )
         except Exception as exc:
             print(f"  [score] railway proximity penalties unavailable ({exc})")
+    if getattr(_STATE, "source_state", None) is not None:
+        try:
+            road_rows = load_road_rows(
+                engine,
+                _STATE.source_state.import_fingerprint,
+            )
+            road_proximity_penalties = compute_road_proximity_penalties(
+                walk_graph,
+                road_rows,
+            )
+        except Exception as exc:
+            print(f"  [score] road proximity penalties unavailable ({exc})")
 
     did_build_score = False
 
@@ -1206,6 +1220,7 @@ def phase_grids_impl(
             walk_cluster_counts_by_node=walk_cluster_counts_by_node,
             walk_effective_units_by_node=walk_effective_units_by_node,
             railway_proximity_penalties=railway_proximity_penalties,
+            road_proximity_penalties=road_proximity_penalties,
             tracker=tracker,
         )
 
@@ -1240,6 +1255,7 @@ def phase_grids_impl(
             walk_cell_nodes_by_size[size],
             walk_effective_units_by_node,
             railway_proximity_penalties,
+            road_proximity_penalties,
         )
         walk_scores = [cell["total"] for cell in walk_cells]
         print(f"{_score_summary(walk_scores)} {elapsed(started_at)}")

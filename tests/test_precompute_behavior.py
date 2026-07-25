@@ -1577,6 +1577,23 @@ class PrecomputeReachabilityTests(TestCase):
         self.assertEqual(cell["effective_units"], {"shops": 1.0})
         self.assertAlmostEqual(cell["scores"]["shops"], (1.0 / 6.0) * 25.0)
 
+    def test_score_cells_add_road_and_railway_penalties(self) -> None:
+        cell = _grid_cell("road-rail-cell", effective_area_ratio=1.0)
+
+        precompute.score_cells(
+            [cell],
+            {1: {"shops": 6}},
+            {1: {"shops": 1}},
+            [1],
+            effective_units_by_node={1: {"shops": 6}},
+            railway_proximity_penalties_by_node={1: 2.0},
+            road_proximity_penalties_by_node={1: 3.0},
+        )
+
+        self.assertEqual(cell["scores"]["railway_proximity"], -2.0)
+        self.assertEqual(cell["scores"]["road_proximity"], -3.0)
+        self.assertEqual(cell["total"], 20.0)
+
     def test_score_cells_accepts_reachability_lookup_without_output_changes(self) -> None:
         cell = _grid_cell("lookup-shop-cell", effective_area_ratio=1.0)
 
@@ -1604,7 +1621,14 @@ class PrecomputeReachabilityTests(TestCase):
         self.assertEqual(cells[0]["counts"], {})
         self.assertEqual(cells[0]["cluster_counts"], {})
         self.assertEqual(cells[0]["effective_units"], {})
-        self.assertEqual(cells[0]["scores"], {category: 0.0 for category in precompute.CAPS})
+        self.assertEqual(
+            cells[0]["scores"],
+            {
+                **{category: 0.0 for category in precompute.CAPS},
+                "railway_proximity": 0.0,
+                "road_proximity": 0.0,
+            },
+        )
         self.assertEqual(cells[0]["total"], 0.0)
 
     def test_score_cells_preserve_inland_behavior_when_effective_area_is_full(self) -> None:

@@ -202,6 +202,7 @@ class RuntimeState:
     runtime_warning: str | None
     noise_proxy_metadata: dict[str, Any] | None
     railway_proximity: dict[str, Any] | None
+    road_proximity: dict[str, Any] | None
 
 
 class RuntimeService:
@@ -631,6 +632,15 @@ class RuntimeService:
                 ),
                 "active_modes": list(summary_json.get("railway_proximity_active_modes") or ["rail", "tram"]),
             }
+        raw_road_summary = summary_json.get("road_proximity")
+        if isinstance(raw_road_summary, dict):
+            road_proximity = dict(raw_road_summary)
+        else:
+            road_proximity = {
+                "enabled": bool(summary_json.get("road_proximity_enabled")),
+                "data_present": bool(summary_json.get("road_proximity_data_present")),
+                "row_count": int(summary_json.get("road_proximity_row_count", 0) or 0),
+            }
         profile_name = str(summary_json.get("build_profile") or self._profile)
         fine_resolutions = self._resolution_list(
             summary_json.get("fine_resolutions_m"),
@@ -733,6 +743,7 @@ class RuntimeService:
             runtime_warning=runtime_warning,
             noise_proxy_metadata=noise_proxy_metadata,
             railway_proximity=railway_proximity,
+            road_proximity=road_proximity,
         )
 
     def state(self) -> RuntimeState:
@@ -795,6 +806,7 @@ class RuntimeService:
             "runtime_warning": state.runtime_warning,
             "noise_proxy_metadata": state.noise_proxy_metadata,
             "railway_proximity": state.railway_proximity,
+            "road_proximity": state.road_proximity,
         }
 
     def surface_runtime(self) -> _surface.FineSurfaceRuntime:

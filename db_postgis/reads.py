@@ -10,10 +10,42 @@ from .tables import (
     features,
     grid_walk,
     import_manifest,
+    roads,
     transit_gtfs_stop_reality,
     transit_railway_corridors,
     transit_service_desert_cells,
 )
+
+
+def load_road_rows(
+    engine: Engine,
+    import_fingerprint: str,
+) -> list[dict[str, Any]]:
+    root = root_module()
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(
+                roads.c.osm_type,
+                roads.c.osm_id,
+                roads.c.highway,
+                roads.c.maxspeed,
+                roads.c.geom,
+            )
+            .where(roads.c.import_fingerprint == import_fingerprint)
+            .where(roads.c.highway.in_(("motorway", "trunk", "primary")))
+            .order_by(roads.c.highway, roads.c.osm_type, roads.c.osm_id)
+        ).mappings().all()
+
+    return [
+        {
+            "source_ref": f"{row['osm_type']}/{row['osm_id']}",
+            "highway": str(row["highway"]),
+            "maxspeed": row.get("maxspeed"),
+            "geom": root.to_shape(row["geom"]),
+        }
+        for row in rows
+        if row.get("geom") is not None
+    ]
 
 _NON_OPERATIONAL_CATEGORY_VALUES = frozenset(
     {"vacant", "disused", "abandoned", "construction", "proposed"}
@@ -136,7 +168,7 @@ def load_transport_reality_rows_for_scoring(
             "sunday_deps": float(row["sunday_deps"] or 0.0),
             "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
             "transport_score_units": int(row["transport_score_units"] or 0),
-            "transport_mode_tier": row["transport_mode_tier"],
+            "transport_mode_tier": row.get("transport_mode_tier"),
             "bus_daytime_deps": float(row["bus_daytime_deps"] or 0.0),
             "bus_daytime_headway_min": (
                 None
@@ -183,7 +215,7 @@ def load_transport_reality_points(
                 "sunday_deps": float(row["sunday_deps"] or 0.0),
                 "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
                 "transport_score_units": int(row["transport_score_units"] or 0),
-                "transport_mode_tier": row["transport_mode_tier"],
+                "transport_mode_tier": row.get("transport_mode_tier"),
                 "bus_daytime_deps": float(row["bus_daytime_deps"] or 0.0),
                 "bus_daytime_headway_min": (
                     None
