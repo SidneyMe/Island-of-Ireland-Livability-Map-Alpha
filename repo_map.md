@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-07-15. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-08-01. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -87,7 +87,7 @@
 - Uses workflow-level concurrency so scheduled and manual refresh runs do not overlap, and a 240-minute job timeout to keep long refresh/precompute runs bounded. The OSM force flag is expanded without bash-only syntax so the workflow stays portable across an undocumented self-hosted runner OS. (Confirmed)
 - Runs:
   - `python scripts/refresh_osm.py`
-  - `python main.py transit`
+  - `python main.py transit --auto-refresh-gtfs`
   - `python main.py precompute --auto-refresh-import`
   - `python scripts/sanity_check.py --profile full`
 
@@ -98,7 +98,7 @@
 - Runs:
   - `npm ci` in `frontend/` using `frontend/package-lock.json`
   - `npm test` and `npm run build` in `frontend/`
-  - `git diff --exit-code -- static/dist` to catch stale checked-in frontend bundles
+  - `git ls-files --error-unmatch static/dist/app.css static/dist/app.js` and `git status --porcelain -- static/dist` to catch missing, untracked, or stale checked-in frontend bundles
   - `python -m unittest discover -s tests -t . -p "test_*.py"`
   - `cargo test --manifest-path walkgraph/Cargo.toml`
   - `python scripts/sanity_check.py --validate-only`
@@ -141,8 +141,9 @@
    -> osm_raw.features + osm_raw.import_manifest
 
 3. Transit reality
-   python main.py transit
+   python main.py transit --auto-refresh-gtfs
    -> transit/workflow.py
+   -> refreshes/verifies gitignored GTFS feed ZIP freshness when auto-refresh is requested
    -> walkgraph gtfs-refresh
    -> transit_raw.* + transit_derived.*
 
@@ -188,6 +189,7 @@
      GET /tiles/noise-test.pmtiles
      GET /tiles/surface/{resolution}/{z}/{x}/{y}.png
      GET /exports/transport-reality.zip
+   -> server startup fails immediately if `static/index.html`, `static/dist/app.css`, or `static/dist/app.js` is missing, so it does not serve a broken shell
 
 8. Frontend
    static/dist/app.js
@@ -296,14 +298,14 @@ Notes:
 ### `transit/gtfs_download.py`
 
 - Purpose: cache-aware public static GTFS downloader/validator used by transit source resolution. (Confirmed)
-- Why it matters: centralizes polite HTTP behavior (timeout, retry/backoff, conditional requests), atomic ZIP replacement, SHA256 manifests, and required-GTFS-file validation before any `current.zip` update is accepted. (Confirmed)
+- Why it matters: centralizes polite HTTP behavior (timeout, retry/backoff, conditional requests), atomic ZIP replacement, SHA256 manifests, freshness/calendar status logging, and required-GTFS-file validation before any `current.zip` update is accepted; transit auto-refresh fails if post-refresh cache freshness cannot be proven. (Confirmed)
 - Main functions: `refresh_gtfs_feed()`, `refresh_gtfs_feeds()`, `ensure_transit_feed_available()`
 
 ### `transit/railway_corridors.py`
 
 - Purpose: shapes-backed rail/tram corridor materialization and hidden railway proximity penalty helper. (Confirmed)
-- Why it matters: GTFS shapes are the current service-backed geometry source for rail/tram proximity, so this module hashes, dissolves, caches, and scores the corridor layer without changing the public overlay surface. (Confirmed)
-- Main functions: `build_railway_corridor_materialization()`, `compute_railway_proximity_penalties()`, `railway_proximity_penalty_for_distance()`
+- Why it matters: GTFS shapes are the current service-backed geometry source for rail/tram proximity, so this module hashes, dissolves, caches, validates the corridor manifest with the railway proximity hash, and scores the corridor layer without changing the public overlay surface. (Confirmed)
+- Main functions: `railway_proximity_hash_for_state()`, `build_railway_corridor_materialization()`, `compute_railway_proximity_penalties()`, `railway_proximity_penalty_for_distance()`
 
 ### `precompute/road_proximity.py`
 
@@ -384,9 +386,9 @@ Notes:
 ### `noise_artifacts/bake.py`
 
 - Purpose: standalone noise PMTiles bake from published `noise_polygons` (proxy rows in artifact mode). (Confirmed)
-- Why it matters: writes `noise[(-dev|-test)].pmtiles` with only the `noise` vector layer, removes stale noise archives when no rows exist, and reuses the lightweight `pmtiles_bake_worker.py` noise tile SQL so main PMTiles bakes stay noise-free. (Confirmed from code and tests)
+- Why it matters: writes `noise[(-dev|-test)].pmtiles` with only the `noise` vector layer, removes stale noise archives when no rows exist, streams tile specs into sequential/parallel bake paths instead of materializing the full list, and reuses the lightweight `pmtiles_bake_worker.py` noise tile SQL so main PMTiles bakes stay noise-free. (Confirmed from code and tests)
 - The `noise_proxy` source-layer declares proxy fields (`kind=road`, `class=unclassified`, `metric=Lden`, `calibrated_band_min`, `proxy_score`, `buffer_m=100`, `method=official_derived_grid_proxy`, `calibration_source=noise_grid_artifact`, `calibration_layer=grid_1000m`, `confidence=proxy_not_measured`, `actual_road_geometry=0`) and starts at z8. (Confirmed from code and tests)
-- LOC: 344
+- LOC: 349
 
 ### `fine_vector_pmtiles_worker.py`
 
@@ -421,12 +423,13 @@ Notes:
   - `transport_reality_download_url`
   - `transit_analysis_date`, `transit_analysis_window_days`, `transit_service_desert_window_days`
   - `overture_dataset`
-- `/api/runtime` still reports `surface_zoom_breaks`, `fine_resolutions_m`, `fine_surface_enabled`, `inspect_url`, and `max_zoom=19`, but it no longer advertises `surface_tile_url_template`; the main render path is now vector-only. Expected client aborts on `/api/inspect` are suppressed from server logs the same way PMTiles range disconnects are, while `/` and `/static/*` now ship with `Cache-Control: no-store` so rebuilt local frontend assets are not silently cached between reloads. Static and export responses are streamed in bounded chunks instead of being loaded with `read_bytes()`. (Confirmed from code and tests)
+- `/api/runtime` still reports `surface_zoom_breaks`, `fine_resolutions_m`, `fine_surface_enabled`, `inspect_url`, and `max_zoom=19`, but it no longer advertises `surface_tile_url_template`; the main render path is now vector-only. Runtime state reloads when the latest completed `build_key` changes, PMTiles URLs carry a `?v=<build_key>` cache-busting token, and PMTiles/export file responses emit strong file ETags with `If-None-Match` support. Expected client aborts on `/api/inspect` are suppressed from server logs the same way PMTiles range disconnects are, while `/` and `/static/*` now ship with `Cache-Control: no-store` so rebuilt local frontend assets are not silently cached between reloads. Static and export responses are streamed in bounded chunks instead of being loaded with `read_bytes()`. (Confirmed from code and tests)
+- PMTiles range serving rejects malformed, suffix/negative, multiple, reversed, and out-of-bounds ranges with `416` and `Content-Range: bytes */<size>` while preserving valid closed and open-ended ranges. (Confirmed from code and tests)
 - Route matching now lives in `serve_routes.py`, which keeps path dispatch priority testable without changing the HTTP response code paths. (Confirmed)
 - `/api/inspect` and `/tiles/surface/{resolution}/{z}/{x}/{y}.png` now reject non-finite or out-of-range inputs before fine-surface rendering starts; surface tiles validate supported resolution, integer zoom, and tile bounds against `2^z - 1`. (Confirmed from code and tests)
 - `/api/runtime` includes noise overlay availability, `noise_pmtiles_url` for the separate overlay archive, and filter counts used by the proxy UI (`noise_source_counts`, `noise_metric_counts`); when no noise rows/archive are available it reports `noise_enabled=false` and `noise_pmtiles_url=null`. (Confirmed from code and tests)
 - Strict mode still requires a manifest matching current `config_hash` + `extract_path`. An explicit local fallback can be enabled with `LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME=1`; it first considers the latest completed manifest for the same extract path, but if that manifest has transport reality enabled without usable transport summary/quality signals, it prefers the latest transport-ready completed manifest and flags runtime payload with `runtime_mode=stale_manifest_fallback` + `runtime_warning`. Runtime `pmtiles_url` follows the selected manifest `build_profile`, and the local server serves existing full/dev/test PMTiles routes so stale fallback does not pair dev runtime filters with a full-profile archive. (Confirmed from code and tests)
-- LOC: 791
+- LOC: 1370
 
 ### `db_postgis/tables.py`
 
@@ -719,15 +722,15 @@ Representative tests confirmed present:
 | `tests/test_precompute_behavior.py` | phase sequencing, cache / hash behavior, service-desert publish summaries |
 | `tests/test_precompute_planner.py` | pure precompute import / noise-artifact / build planning decisions |
 | `tests/test_precompute_cache.py` | tier cache read / write / invalidation helpers |
-| `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier` exposure, road/rail score fields, bounded parallel scheduling, retry behavior, temp-output cleanup, and old-archive preservation on failure |
+| `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier` exposure, road/rail score fields, bounded parallel scheduling, retry behavior, temp-output cleanup, old-archive preservation on failure, and streamed noise tile-spec bake inputs |
 | `tests/test_noise_loader.py` | ROI dB field normalization plus round-aware NI mapping (Round 1 class-code handling, Round 2/3 threshold mapping, unknown-code errors), and newest-round fallback geometry |
 | `tests/test_noise_artifacts.py` | manifest SQL safety checks (`CAST(:error_detail AS text)`), ingest pre-validation diagnostics, streaming ingest behavior, deterministic dev-fast grid cache identity, and non-mutating accurate simplification |
 | `tests/test_fine_vector_pmtiles_worker.py` | fine-grid shard aggregation, degenerate buffered-ring rejection, encoded per-zoom resolutions, mixed z15 resolutions, invalid-land skipping, buffered border-cell continuity, bounded worker LRU cache behavior across chunks |
 | `tests/test_progress_tracker.py` | timing-history sanitization and persistence |
 | `tests/test_serve_routes.py` | pure route matching and dispatch priority for runtime, inspect, surface, static, export, and PMTiles paths |
-| `tests/test_server_behavior.py` | runtime API shape, transport subtier/mode count exposure, noise count/PMTiles URL exposure, surface/inspect input validation, streaming file responses, and range serving for main + noise PMTiles |
-| `tests/test_transit_phase1.py` | GTFS-first transit reality rows, weekly bus subtiers, bus daytime headway buckets, frequency departure windows, transport score units, exact local GTFS snapshot stop regressions for each bus-tier bucket plus strict exception-only / unscheduled examples, exports, school-only classification, `gtfs-refresh` artifact loading |
-| `tests/test_surface_runtime.py` | fine-surface runtime behavior |
+| `tests/test_server_behavior.py` | runtime API shape and reload, transport subtier/mode count exposure, noise count/PMTiles URL exposure, PMTiles cache tokens/ETags, surface/inspect input validation, streaming file responses, and range serving for main + noise PMTiles |
+| `tests/test_transit_phase1.py` | GTFS-first transit reality rows, weekly bus subtiers, bus daytime headway buckets, frequency departure windows, transport score units, exact local GTFS snapshot stop regressions for each bus-tier bucket plus strict exception-only / unscheduled examples, atomic exports, school-only classification, `gtfs-refresh` artifact loading |
+| `tests/test_surface_runtime.py` | fine-surface runtime behavior and atomic PNG tile cache writes |
 | `tests/test_sanity_check.py` | sanity fixture structure and runtime lookup mode selection |
 | `tests/test_db_constraint_migration.py` | read-only preflight, primary-key / foreign-key application, missing-table handling, and downgrade drop safety for the new constraint migration |
 | `tests/test_db_integrity_check.py` | duplicate detection, NULL key validation, missing-table handling, and ambiguous-key skipping for future constraint preflight |

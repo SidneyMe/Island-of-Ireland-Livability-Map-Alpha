@@ -907,6 +907,7 @@ def transit_config_hash() -> str:
             "bus_daytime_end_hour": GTFS_BUS_DAYTIME_END_HOUR,
             "friday_evening_start_hour": GTFS_FRIDAY_EVENING_START_HOUR,
             "friday_evening_end_hour": GTFS_FRIDAY_EVENING_END_HOUR,
+            "railway_proximity_active_modes": list(RAILWAY_PROXIMITY_ACTIVE_MODES),
         }
     )
 
@@ -953,6 +954,7 @@ def build_transit_reality_state(
     transit_hash = transit_config_hash()
     reality_fingerprint = hash_dict(
         {
+            "analysis_date": resolved_analysis_date.isoformat(),
             "transit_config_hash": transit_hash,
             "gtfs_feed_fingerprint": combined_gtfs_feed_fingerprint,
         }

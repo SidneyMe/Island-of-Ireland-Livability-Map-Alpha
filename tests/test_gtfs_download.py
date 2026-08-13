@@ -397,6 +397,98 @@ class GtfsDownloadTests(TestCase):
             updated = json.loads(manifest_path.read_text(encoding="utf-8"))
             self.assertTrue(updated.get("calendar_unknown"))
 
+    def test_ensure_transit_feed_available_auto_refreshes_missing_cache(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp_path = Path(tmp_name)
+            feed = self._feed(tmp_path)
+            progress_cb = mock.Mock()
+            far_end = (datetime.now(UTC).date() + timedelta(days=45)).strftime("%Y%m%d")
+
+            with mock.patch.object(
+                gtfs_download.urllib.request,
+                "urlopen",
+                return_value=_FakeHttpResponse(_gtfs_zip_bytes(marker="fresh", calendar_end=far_end)),
+            ):
+                path = gtfs_download.ensure_transit_feed_available(
+                    feed,
+                    auto_refresh_gtfs=True,
+                    force_gtfs_refresh=False,
+                    progress_cb=progress_cb,
+                )
+
+            self.assertEqual(path, feed.zip_path)
+            self.assertTrue(feed.zip_path.exists())
+            detail_messages = [
+                call.kwargs.get("detail", "")
+                for call in progress_cb.call_args_list
+            ]
+            self.assertTrue(any("freshness status" in message for message in detail_messages))
+
+    def test_ensure_transit_feed_available_fails_when_cache_stays_stale_after_refresh(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp_path = Path(tmp_name)
+            feed = self._feed(tmp_path)
+            feed.zip_path.parent.mkdir(parents=True, exist_ok=True)
+            feed.zip_path.write_bytes(_gtfs_zip_bytes(marker="stale"))
+            manifest_path = feed.zip_path.parent / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "feed_id": feed.feed_id,
+                        "sha256": gtfs_download._sha256_file(feed.zip_path),
+                        "checked_at_utc": "2000-01-01T00:00:00Z",
+                        "calendar_min_date": "20200101",
+                        "calendar_max_date": "20200131",
+                        "zip_valid": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.object(gtfs_download, "refresh_gtfs_feed") as refresh_mock,
+                self.assertRaisesRegex(RuntimeError, "GTFS cache is not fresh enough") as ctx,
+            ):
+                gtfs_download.ensure_transit_feed_available(
+                    feed,
+                    auto_refresh_gtfs=True,
+                    force_gtfs_refresh=False,
+                )
+
+            refresh_mock.assert_called_once_with(feed, force=False, progress_cb=None)
+            message = str(ctx.exception)
+            self.assertIn("nta", message)
+            self.assertIn("cache age exceeds", message)
+            self.assertIn("calendar=20200101..20200131", message)
+
+    def test_ensure_transit_feed_available_logs_fresh_status_for_existing_cache(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp_path = Path(tmp_name)
+            feed = self._feed(tmp_path)
+            progress_cb = mock.Mock()
+            far_end = (datetime.now(UTC).date() + timedelta(days=45)).strftime("%Y%m%d")
+            with mock.patch.object(
+                gtfs_download.urllib.request,
+                "urlopen",
+                return_value=_FakeHttpResponse(_gtfs_zip_bytes(marker="fresh", calendar_end=far_end)),
+            ):
+                gtfs_download.refresh_gtfs_feed(feed, force=True)
+
+            path = gtfs_download.ensure_transit_feed_available(
+                feed,
+                auto_refresh_gtfs=False,
+                force_gtfs_refresh=False,
+                progress_cb=progress_cb,
+            )
+
+            self.assertEqual(path, feed.zip_path)
+            detail_messages = [
+                call.kwargs.get("detail", "")
+                for call in progress_cb.call_args_list
+            ]
+            self.assertTrue(any("freshness status" in message for message in detail_messages))
+            self.assertTrue(any("freshness_decision=fresh" in message for message in detail_messages))
+
     def test_combined_gtfs_fingerprint_changes_only_when_used_feed_changes(self) -> None:
         with TemporaryDirectory() as tmp_name:
             tmp_path = Path(tmp_name)

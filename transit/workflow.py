@@ -24,7 +24,10 @@ from db_postgis.writes import (
 
 from .export import EXPORTS_DIR, ZIP_FILENAME, export_transport_reality_bundle
 from .models import GtfsStopReality
-from .railway_corridors import build_railway_corridor_materialization
+from .railway_corridors import (
+    build_railway_corridor_materialization,
+    railway_proximity_hash_for_state,
+)
 from .rust_gtfs import load_gtfs_stop_reality_models, run_walkgraph_gtfs_refresh
 from .sources import ensure_feed_zip
 
@@ -46,13 +49,19 @@ def _ensure_railway_track_proximity(
     reality_state: TransitRealityState,
     progress_cb: ProgressFn = None,
 ) -> None:
+    railway_proximity_hash = railway_proximity_hash_for_state(
+        reality_fingerprint=reality_state.reality_fingerprint,
+        import_fingerprint=import_fingerprint,
+        transit_config_hash=reality_state.transit_config_hash,
+    )
     if has_complete_transit_railway_corridor_manifest(
         engine,
         reality_state.reality_fingerprint,
+        railway_proximity_hash=railway_proximity_hash,
     ):
         _emit(
             progress_cb,
-            f"[gtfs] railway corridor fingerprint unchanged; reusing {reality_state.reality_fingerprint}",
+            f"[gtfs] railway corridor fingerprint unchanged; reusing {railway_proximity_hash}",
         )
         return
 

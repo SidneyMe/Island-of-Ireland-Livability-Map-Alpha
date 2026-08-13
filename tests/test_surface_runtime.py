@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import unittest
 from pathlib import Path
@@ -174,6 +175,51 @@ class FineSurfaceRuntimeTests(TestCase):
         self.assertEqual(first[:8], b"\x89PNG\r\n\x1a\n")
         self.assertEqual(first, second)
         shard_iter_mock.assert_called_once()
+
+    def test_render_tile_writes_png_cache_atomically(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            shell_dir = tmp / "shell"
+            score_dir = tmp / "scores"
+            tile_dir = tmp / "tiles"
+            _write_shell_manifest(shell_dir, shard_inventory=[])
+            surface.save_node_score_arrays(
+                score_dir,
+                {
+                    "categories": ["shops", "transport", "healthcare", "parks"],
+                    "counts_matrix": np.zeros((1, 4), dtype=np.uint32),
+                    "cluster_counts_matrix": np.zeros((1, 4), dtype=np.uint32),
+                    "effective_units_matrix": np.zeros((1, 4), dtype=np.float32),
+                    "reference_scores": np.zeros((1, 5), dtype=np.float32),
+                    "reference_total": np.zeros(1, dtype=np.float32),
+                    "railway_proximity_penalties": np.zeros(1, dtype=np.float32),
+                },
+            )
+            _write_score_manifest(score_dir, shard_inventory=[])
+            runtime = surface.FineSurfaceRuntime(shell_dir, score_dir, tile_dir)
+            cache_path = surface.surface_tile_cache_path(
+                tile_dir,
+                resolution_m=250,
+                z=15,
+                x=3,
+                y=4,
+            )
+
+            with (
+                mock.patch.object(runtime, "_iter_intersecting_shards", return_value=iter(())),
+                mock.patch.object(surface, "encode_png_rgba", return_value=b"atomic-png"),
+                mock.patch.object(Path, "write_bytes", side_effect=AssertionError("final write_bytes used")),
+                mock.patch.object(surface.os, "replace", wraps=os.replace) as replace_mock,
+            ):
+                payload = runtime.render_tile(resolution_m=250, z=15, x=3, y=4)
+
+            self.assertEqual(payload, b"atomic-png")
+            self.assertEqual(cache_path.read_bytes(), b"atomic-png")
+            replace_mock.assert_called_once()
+            replace_source, replace_target = replace_mock.call_args.args
+            self.assertNotEqual(Path(replace_source), cache_path)
+            self.assertEqual(Path(replace_target), cache_path)
+            self.assertFalse(list(cache_path.parent.glob("*.tmp")))
 
     def test_aggregated_shard_surface_uses_persisted_canonical_totals(self) -> None:
         with TemporaryDirectory() as tmp_name:

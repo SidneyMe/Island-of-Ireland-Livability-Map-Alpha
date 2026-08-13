@@ -6,13 +6,14 @@ import math
 import mimetypes
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from config import (
     CACHE_DIR,
@@ -52,6 +53,26 @@ CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionR
 RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
 RUNTIME_STALE_FALLBACK_ENV = "LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME"
 FILE_STREAM_CHUNK_SIZE = 64 * 1024
+
+
+def _cache_busted_url(url: str | None, version_token: str | None) -> str | None:
+    if not url:
+        return None
+    token = str(version_token or "").strip()
+    if not token:
+        return str(url)
+    separator = "&" if "?" in str(url) else "?"
+    return f"{url}{separator}v={quote(token, safe='')}"
+
+
+def _file_etag(path: Path) -> str:
+    stat = path.stat()
+    return f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+
+
+def _request_etag_matches(header_value: str | None, etag: str) -> bool:
+    values = [value.strip() for value in (header_value or "").split(",")]
+    return "*" in values or etag in values
 
 
 def _require_finite_float(raw_value: Any, *, field_name: str) -> float:
@@ -116,11 +137,25 @@ def _stream_file_response(
         raise FileNotFoundError(str(resolved))
 
     file_size = resolved.stat().st_size
+    etag = _file_etag(resolved)
+    request_headers = getattr(handler, "headers", {})
+    if _request_etag_matches(request_headers.get("If-None-Match"), etag):
+        record_response = getattr(handler, "_record_response", None)
+        if callable(record_response):
+            record_response(HTTPStatus.NOT_MODIFIED, 0)
+        handler.send_response(HTTPStatus.NOT_MODIFIED)
+        handler.send_header("ETag", etag)
+        for header_name, header_value in (extra_headers or {}).items():
+            handler.send_header(header_name, header_value)
+        handler.end_headers()
+        return
+
     record_response = getattr(handler, "_record_response", None)
     if callable(record_response):
         record_response(status, 0 if head_only else file_size)
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
+    handler.send_header("ETag", etag)
     for header_name, header_value in (extra_headers or {}).items():
         handler.send_header(header_name, header_value)
     handler.send_header("Content-Length", str(file_size))
@@ -217,6 +252,7 @@ class RuntimeService:
         self._allow_stale_runtime_fallback = _env_truthy(RUNTIME_STALE_FALLBACK_ENV)
         self._state: RuntimeState | None = None
         self._surface_runtime: _surface.FineSurfaceRuntime | None = None
+        self._state_lock = threading.RLock()
 
     def _load_latest_completed_manifest_for_extract(self) -> dict[str, Any] | None:
         with self._engine.connect() as connection:
@@ -747,11 +783,24 @@ class RuntimeService:
         )
 
     def state(self) -> RuntimeState:
-        if self._state is None:
-            self._state = self._load_state()
-        return self._state
+        with self._state_lock:
+            if self._state is None:
+                self._state = self._load_state()
+            return self._state
+
+    def refresh_if_latest_build_changed(self) -> None:
+        with self._state_lock:
+            if self._state is None:
+                self._state = self._load_state()
+                return
+            previous_build_key = self._state.build_key
+            latest_state = self._load_state()
+            if latest_state.build_key != previous_build_key:
+                self._state = latest_state
+                self._surface_runtime = None
 
     def get_runtime(self) -> dict[str, Any]:
+        self.refresh_if_latest_build_changed()
         payload = self._get_runtime_base()
         state = self.state()
         if state.fine_surface_enabled:
@@ -789,12 +838,12 @@ class RuntimeService:
             "landuse_context_classes": state.landuse_context_classes,
             "landuse_context_min_zoom": state.landuse_context_min_zoom,
             "landuse_context_max_zoom": state.landuse_context_max_zoom,
-            "noise_pmtiles_url": state.noise_pmtiles_url,
+            "noise_pmtiles_url": _cache_busted_url(state.noise_pmtiles_url, state.build_key),
             "category_colors": CATEGORY_COLORS,
             "default_zoom": SURFACE_DEFAULT_ZOOM,
             "max_zoom": SURFACE_MAX_ZOOM,
             "fine_surface_enabled": state.fine_surface_enabled,
-            "pmtiles_url": pmtiles_url_path(state.build_profile),
+            "pmtiles_url": _cache_busted_url(pmtiles_url_path(state.build_profile), state.build_key),
             "transport_reality_enabled": state.transport_reality_enabled,
             "service_deserts_enabled": state.service_deserts_enabled,
             "transport_reality_download_url": state.transport_reality_download_url,
@@ -818,13 +867,14 @@ class RuntimeService:
             or state.surface_tile_dir is None
         ):
             raise RuntimeError("Fine surface runtime is unavailable for this build.")
-        if self._surface_runtime is None:
-            self._surface_runtime = _surface.FineSurfaceRuntime(
-                state.surface_shell_dir,
-                state.surface_score_dir,
-                state.surface_tile_dir,
-            )
-        return self._surface_runtime
+        with self._state_lock:
+            if self._surface_runtime is None:
+                self._surface_runtime = _surface.FineSurfaceRuntime(
+                    state.surface_shell_dir,
+                    state.surface_score_dir,
+                    state.surface_tile_dir,
+                )
+            return self._surface_runtime
 
     def get_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> bytes:
         normalized_resolution = _require_exact_int(resolution_m, field_name="resolution_m")
@@ -1049,26 +1099,32 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
         if pmtiles_path is None or not pmtiles_path.exists():
             raise FileNotFoundError(str(pmtiles_path))
         file_size = pmtiles_path.stat().st_size
+        etag = _file_etag(pmtiles_path)
         range_header = self.headers.get("Range")
+
+        def _reject_range() -> None:
+            self._record_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, 0)
+            self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_header("Content-Range", f"bytes */{file_size}")
+            self.send_header("Accept-Ranges", "bytes")
+            self.send_header("ETag", etag)
+            self.end_headers()
 
         if range_header:
             match = RANGE_RE.match(range_header.strip())
             if not match:
-                self._record_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, 0)
-                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                self.send_header("Content-Range", f"bytes */{file_size}")
-                self.end_headers()
+                _reject_range()
                 return
             start = int(match.group(1))
             end_text = match.group(2)
             end = int(end_text) if end_text else file_size - 1
             if start >= file_size:
-                self._record_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE, 0)
-                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
-                self.send_header("Content-Range", f"bytes */{file_size}")
-                self.end_headers()
+                _reject_range()
                 return
             end = min(end, file_size - 1)
+            if end < start:
+                _reject_range()
+                return
             length = end - start + 1
             self._record_response(HTTPStatus.PARTIAL_CONTENT, 0 if head_only else length)
             self.send_response(HTTPStatus.PARTIAL_CONTENT)
@@ -1077,6 +1133,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
             self.send_header("Accept-Ranges", "bytes")
             self.send_header("Cache-Control", "public, max-age=3600")
+            self.send_header("ETag", etag)
             self.end_headers()
             if head_only:
                 return
@@ -1091,12 +1148,21 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
                     remaining -= len(chunk)
             return
 
+        if _request_etag_matches(self.headers.get("If-None-Match"), etag):
+            self._record_response(HTTPStatus.NOT_MODIFIED, 0)
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            return
+
         self._record_response(HTTPStatus.OK, 0 if head_only else file_size)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/octet-stream")
         self.send_header("Content-Length", str(file_size))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("ETag", etag)
         self.end_headers()
         if head_only:
             return
@@ -1247,10 +1313,19 @@ def create_http_server(
         noise_pmtiles_path or noise_pmtiles_output_path(normalized_profile)
     )
     resolved_noise_pmtiles_url_path = noise_pmtiles_url_path(normalized_profile)
-    runtime_service = service or build_runtime_service(profile=normalized_profile)
     index_html_path = static_dir / "index.html"
     if not index_html_path.exists():
         raise RuntimeError(f"static index.html not found at {index_html_path}")
+    required_bundle_paths = (
+        static_dir / "dist" / "app.css",
+        static_dir / "dist" / "app.js",
+    )
+    for bundle_path in required_bundle_paths:
+        if not bundle_path.exists():
+            raise RuntimeError(
+                f"frontend bundle asset not found at {bundle_path}. "
+                "Run npm run build --prefix frontend before serving."
+            )
     index_html = index_html_path.read_bytes()
     if not resolved_pmtiles_path.exists():
         precompute_flag = precompute_flag_for_profile(normalized_profile)
@@ -1258,6 +1333,7 @@ def create_http_server(
             f"PMTiles archive not found at {resolved_pmtiles_path}. "
             f"Run {precompute_flag} to bake it before serving; the map cannot load without it."
         )
+    runtime_service = service or build_runtime_service(profile=normalized_profile)
     return LivabilityHTTPServer(
         (host, int(port)),
         LivabilityRequestHandler,

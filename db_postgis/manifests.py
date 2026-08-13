@@ -98,13 +98,12 @@ def load_transit_railway_corridor_manifest(
 def has_complete_transit_railway_corridor_manifest(
     engine: Engine,
     reality_fingerprint: str,
-    railway_proximity_hash: str | None = None,
+    *,
+    railway_proximity_hash: str,
 ) -> bool:
     manifest = root_module().load_transit_railway_corridor_manifest(engine, reality_fingerprint)
     if manifest is None or manifest.get("status") != "complete":
         return False
-    if railway_proximity_hash is None:
-        return True
     return str(manifest.get("railway_proximity_hash") or "") == railway_proximity_hash
 
 

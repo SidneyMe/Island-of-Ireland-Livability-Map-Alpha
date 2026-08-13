@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import struct
 import tempfile
 import zlib
@@ -1155,8 +1156,24 @@ class FineSurfaceRuntime:
         )
         payload = encode_png_rgba(rgba)
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_bytes(payload)
-        return payload
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                prefix=f"{cache_path.name}.",
+                suffix=".tmp",
+                dir=cache_path.parent,
+                delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, cache_path)
+        finally:
+            if temp_path is not None and temp_path.exists():
+                temp_path.unlink(missing_ok=True)
+        return cache_path.read_bytes()
 
     def inspect(self, *, lat: float, lon: float, zoom: float | None = None) -> dict[str, Any]:
         metric_x, metric_y = TO_TARGET(float(lon), float(lat))

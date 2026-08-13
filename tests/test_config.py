@@ -104,6 +104,7 @@ class ConfigHashTests(TestCase):
             [feed["feed_id"] for feed in payload["feeds"]],
             ["nta", "translink"],
         )
+        self.assertEqual(payload["railway_proximity_active_modes"], ["rail", "tram"])
 
     def test_build_transit_reality_state_uses_selected_transit_feed(self) -> None:
         def _fingerprint(path: Path) -> str:
@@ -124,10 +125,35 @@ class ConfigHashTests(TestCase):
             },
         )
 
+    def test_transit_reality_fingerprint_changes_when_analysis_date_changes(self) -> None:
+        with (
+            mock.patch.object(config, "transit_feed_fingerprint", return_value="feed-fingerprint"),
+            mock.patch.object(config, "transit_config_hash", return_value="transit-config-hash"),
+        ):
+            previous_state = config.build_transit_reality_state(
+                analysis_date=date(2026, 7, 25)
+            )
+            current_state = config.build_transit_reality_state(
+                analysis_date=date(2026, 7, 26)
+            )
+
+        self.assertNotEqual(
+            previous_state.reality_fingerprint,
+            current_state.reality_fingerprint,
+        )
+
     def test_transit_reality_algorithm_version_changes_transit_config_hash(self) -> None:
         with mock.patch.object(config, "TRANSIT_REALITY_ALGO_VERSION", 1):
             previous_hash = config.transit_config_hash()
         with mock.patch.object(config, "TRANSIT_REALITY_ALGO_VERSION", 2):
+            current_hash = config.transit_config_hash()
+
+        self.assertNotEqual(previous_hash, current_hash)
+
+    def test_railway_active_modes_change_transit_config_hash(self) -> None:
+        with mock.patch.object(config, "RAILWAY_PROXIMITY_ACTIVE_MODES", ("rail", "tram")):
+            previous_hash = config.transit_config_hash()
+        with mock.patch.object(config, "RAILWAY_PROXIMITY_ACTIVE_MODES", ("rail",)):
             current_hash = config.transit_config_hash()
 
         self.assertNotEqual(previous_hash, current_hash)

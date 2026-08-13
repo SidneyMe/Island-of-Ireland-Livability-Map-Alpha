@@ -43,6 +43,27 @@ class RailwayCorridorMaterialization:
     rows: list[dict[str, Any]]
 
 
+def railway_proximity_hash_for_state(
+    *,
+    reality_fingerprint: str,
+    import_fingerprint: str,
+    transit_config_hash: str,
+) -> str:
+    return hash_dict(
+        {
+            "transit_reality_algo_version": TRANSIT_REALITY_ALGO_VERSION,
+            "reality_fingerprint": reality_fingerprint,
+            "import_fingerprint": import_fingerprint,
+            "transit_config_hash": transit_config_hash,
+            "source_kind": SOURCE_KIND,
+            "full_penalty_distance_m": RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M,
+            "zero_penalty_distance_m": RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
+            "max_penalty": RAILWAY_PROXIMITY_MAX_PENALTY,
+            "active_modes": list(RAILWAY_PROXIMITY_ACTIVE_MODES),
+        }
+    )
+
+
 def railway_proximity_penalty_for_distance(distance_m: float | int | None) -> float:
     try:
         distance = float(distance_m)
@@ -363,30 +384,10 @@ def build_railway_corridor_materialization(
                     force_log=True,
                 )
 
-    railway_proximity_hash = hash_dict(
-        {
-            "transit_reality_algo_version": TRANSIT_REALITY_ALGO_VERSION,
-            "reality_fingerprint": reality_fingerprint,
-            "import_fingerprint": import_fingerprint,
-            "transit_config_hash": transit_config_hash,
-            "source_kind": SOURCE_KIND,
-            "full_penalty_distance_m": RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M,
-            "zero_penalty_distance_m": RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
-            "max_penalty": RAILWAY_PROXIMITY_MAX_PENALTY,
-            "active_modes": list(RAILWAY_PROXIMITY_ACTIVE_MODES),
-            "feed_rows": [
-                {
-                    "feed_id": row["feed_id"],
-                    "active_service_count": row["active_service_count"],
-                    "active_trip_count": row["active_trip_count"],
-                    "active_shape_count": row["active_shape_count"],
-                    "dissolved_shape_count": row["dissolved_shape_count"],
-                    "route_modes": row["route_modes_json"],
-                }
-                for row in active_feed_rows
-            ],
-            "warnings": warnings,
-        }
+    railway_proximity_hash = railway_proximity_hash_for_state(
+        reality_fingerprint=reality_fingerprint,
+        import_fingerprint=import_fingerprint,
+        transit_config_hash=transit_config_hash,
     )
 
     rows = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
@@ -116,6 +117,17 @@ class MainCliTests(TestCase):
         )
         print_mock.assert_any_call("Starting GTFS transit refresh...", flush=True)
         print_mock.assert_any_call("GTFS transit refresh complete -> transit-reality-123", flush=True)
+
+    def test_scheduled_refresh_runs_transit_with_gtfs_auto_refresh(self) -> None:
+        workflow = Path(".github/workflows/scheduled_refresh.yml").read_text(encoding="utf-8")
+
+        self.assertIn("python main.py transit --auto-refresh-gtfs", workflow)
+
+    def test_ci_frontend_bundle_check_detects_untracked_dist_files(self) -> None:
+        workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("git ls-files --error-unmatch static/dist/app.css static/dist/app.js", workflow)
+        self.assertIn("git status --porcelain -- static/dist", workflow)
 
     def test_precompute_subcommand_forwards_profile_and_noise_flags(self) -> None:
         precompute_mock = mock.Mock(return_value="build-key-test")

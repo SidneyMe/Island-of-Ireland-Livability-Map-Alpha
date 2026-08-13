@@ -33,6 +33,7 @@ from transit.models import (
 )
 from transit.railway_corridors import (
     build_railway_corridor_materialization,
+    railway_proximity_hash_for_state,
     railway_proximity_penalty_for_distance,
 )
 from transit.rust_gtfs import load_gtfs_stop_reality_models, run_walkgraph_gtfs_refresh
@@ -975,6 +976,28 @@ class TransitExportAndLoaderTests(TestCase):
         self.assertIn("directly from configured GTFS feeds", readme_text)
         self.assertIn("weekday bus departures from 06:00 to 20:00", readme_text)
 
+    def test_export_transport_reality_bundle_preserves_existing_zip_on_stage_failure(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            export_dir = Path(tmp_name)
+            zip_path = export_dir / "transport-reality.zip"
+            zip_path.write_bytes(b"previous-zip")
+
+            with (
+                mock.patch("transit.export.ZipFile", side_effect=RuntimeError("zip failed")),
+                self.assertRaisesRegex(RuntimeError, "zip failed"),
+            ):
+                export_transport_reality_bundle(
+                    [_gtfs_reality_row()],
+                    analysis_date=date(2026, 4, 14),
+                    export_dir=export_dir,
+                )
+
+            self.assertEqual(zip_path.read_bytes(), b"previous-zip")
+            self.assertEqual(
+                [path for path in export_dir.iterdir() if path.name.startswith("transport-reality-")],
+                [],
+            )
+
     def test_load_gtfs_stop_reality_models_parses_csv_payload(self) -> None:
         with TemporaryDirectory() as tmp_name:
             csv_path = Path(tmp_name) / "gtfs_stop_reality.csv"
@@ -1069,6 +1092,14 @@ class RailwayCorridorMaterializationTests(TestCase):
         self.assertEqual(materialization.manifest["active_service_count"], 2)
         self.assertEqual(materialization.manifest["active_trip_count"], 2)
         self.assertEqual(materialization.manifest["active_shape_count"], 2)
+        self.assertEqual(
+            materialization.railway_proximity_hash,
+            railway_proximity_hash_for_state(
+                reality_fingerprint="reality-123",
+                import_fingerprint="import-123",
+                transit_config_hash="config-hash",
+            ),
+        )
         self.assertEqual(len(materialization.rows), 1)
         self.assertEqual(materialization.rows[0]["route_modes_json"], ["rail", "tram"])
         self.assertGreater(materialization.rows[0]["geom"].length, 0.0)
@@ -1109,6 +1140,46 @@ class RailwayCorridorMaterializationTests(TestCase):
 
 
 class TransitWorkflowTests(TestCase):
+    def test_railway_track_proximity_reuse_checks_railway_hash(self) -> None:
+        reality_state = SimpleNamespace(
+            reality_fingerprint="reality-123",
+            transit_config_hash="config-hash",
+            feed_states=(),
+        )
+
+        with (
+            mock.patch.object(
+                transit_workflow,
+                "railway_proximity_hash_for_state",
+                return_value="railway-hash-123",
+            ) as hash_mock,
+            mock.patch.object(
+                transit_workflow,
+                "has_complete_transit_railway_corridor_manifest",
+                return_value=True,
+            ) as manifest_mock,
+            mock.patch.object(transit_workflow, "build_railway_corridor_materialization") as build_mock,
+            mock.patch.object(transit_workflow, "replace_transit_railway_corridors") as replace_mock,
+        ):
+            transit_workflow._ensure_railway_track_proximity(
+                mock.sentinel.engine,
+                import_fingerprint="import-123",
+                reality_state=reality_state,
+            )
+
+        hash_mock.assert_called_once_with(
+            reality_fingerprint="reality-123",
+            import_fingerprint="import-123",
+            transit_config_hash="config-hash",
+        )
+        manifest_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            "reality-123",
+            railway_proximity_hash="railway-hash-123",
+        )
+        build_mock.assert_not_called()
+        replace_mock.assert_not_called()
+
     def test_transit_reality_refresh_required_ignores_import_fingerprint(self) -> None:
         prepared_state = SimpleNamespace(reality_fingerprint="reality-123")
         progress_cb = mock.Mock()
@@ -1168,6 +1239,7 @@ class TransitWorkflowTests(TestCase):
                 mock.patch.object(transit_workflow, "replace_transit_reality_rows_from_artifacts"),
                 mock.patch.object(transit_workflow, "load_gtfs_stop_reality_models", return_value=[_gtfs_reality_row()]) as load_models_mock,
                 mock.patch.object(transit_workflow, "export_transport_reality_bundle"),
+                mock.patch.object(transit_workflow, "_ensure_railway_track_proximity") as railway_proximity_mock,
             ):
                 transit_workflow.ensure_transit_reality(
                     mock.sentinel.engine,
@@ -1177,6 +1249,12 @@ class TransitWorkflowTests(TestCase):
 
         self.assertNotIn("osm_features", run_refresh_mock.call_args.kwargs)
         load_models_mock.assert_called_once_with(artifacts_dir / "derived" / "gtfs_stop_reality.csv")
+        railway_proximity_mock.assert_called_once_with(
+            mock.sentinel.engine,
+            import_fingerprint="import-123",
+            reality_state=reality_state,
+            progress_cb=None,
+        )
 
 
 @unittest.skipUnless(

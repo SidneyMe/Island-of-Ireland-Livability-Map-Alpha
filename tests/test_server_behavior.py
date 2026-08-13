@@ -167,6 +167,7 @@ def _make_fixture(tmp: Path, pmtiles_bytes: bytes = b"PMTILESFAKE" * 32) -> tupl
     (static_dir / "index.html").write_bytes(b"<!doctype html><title>livability</title>")
     dist_dir = static_dir / "dist"
     dist_dir.mkdir()
+    (dist_dir / "app.css").write_text("body { color: #111; }", encoding="utf-8")
     (dist_dir / "app.js").write_text("console.log('livability');", encoding="utf-8")
     pmtiles_path = tmp / "livability.pmtiles"
     pmtiles_path.write_bytes(pmtiles_bytes)
@@ -511,6 +512,51 @@ class LocalServerEndpointTests(TestCase):
 
         self.assertEqual(payload, body[50:])
 
+    def test_pmtiles_rejects_invalid_ranges(self) -> None:
+        body = b"x" * 200
+        bad_ranges = [
+            "bytes=100-50",
+            "bytes=-50",
+            "bytes=0-1,2-3",
+            "bytes=200-250",
+        ]
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name), pmtiles_bytes=body)
+            with _ServerHarness(_FakeService(), pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                for range_header in bad_ranges:
+                    with self.subTest(range_header=range_header):
+                        request = Request(
+                            base_url + "/tiles/livability.pmtiles",
+                            headers={"Range": range_header},
+                        )
+                        with self.assertRaises(HTTPError) as ctx:
+                            urlopen(request)
+
+                        self.assertEqual(ctx.exception.code, 416)
+                        self.assertEqual(
+                            ctx.exception.headers.get("Content-Range"),
+                            f"bytes */{len(body)}",
+                        )
+
+    def test_pmtiles_etag_supports_not_modified(self) -> None:
+        body = b"x" * 200
+        with TemporaryDirectory() as tmp_name:
+            static_dir, pmtiles_path = _make_fixture(Path(tmp_name), pmtiles_bytes=body)
+            with _ServerHarness(_FakeService(), pmtiles_path=pmtiles_path, static_dir=static_dir) as base_url:
+                with urlopen(base_url + "/tiles/livability.pmtiles") as response:
+                    etag = response.headers.get("ETag")
+
+                request = Request(
+                    base_url + "/tiles/livability.pmtiles",
+                    headers={"If-None-Match": etag or ""},
+                )
+                with self.assertRaises(HTTPError) as ctx:
+                    urlopen(request)
+
+        self.assertIsNotNone(etag)
+        self.assertEqual(ctx.exception.code, 304)
+        self.assertEqual(ctx.exception.headers.get("ETag"), etag)
+
     def test_unknown_route_returns_404_json(self) -> None:
         with TemporaryDirectory() as tmp_name:
             static_dir, pmtiles_path = _make_fixture(Path(tmp_name))
@@ -687,10 +733,9 @@ class LocalServerEndpointTests(TestCase):
     def test_create_http_server_raises_when_pmtiles_missing(self) -> None:
         with TemporaryDirectory() as tmp_name:
             tmp = Path(tmp_name)
-            static_dir = tmp / "static"
-            static_dir.mkdir()
-            (static_dir / "index.html").write_bytes(b"<!doctype html><title>livability</title>")
+            static_dir, _ = _make_fixture(tmp)
             missing_pmtiles_path = tmp / "livability.pmtiles"
+            missing_pmtiles_path.unlink()
             self.assertFalse(missing_pmtiles_path.exists())
 
             with self.assertRaisesRegex(RuntimeError, "PMTiles archive not found"):
@@ -702,8 +747,60 @@ class LocalServerEndpointTests(TestCase):
                     pmtiles_path=missing_pmtiles_path,
                 )
 
+    def test_create_http_server_raises_when_frontend_bundle_missing(self) -> None:
+        for missing_name in ("app.css", "app.js"):
+            with self.subTest(missing_name=missing_name):
+                with TemporaryDirectory() as tmp_name:
+                    tmp = Path(tmp_name)
+                    static_dir, pmtiles_path = _make_fixture(tmp)
+                    (static_dir / "dist" / missing_name).unlink()
+
+                    with self.assertRaisesRegex(RuntimeError, "frontend bundle asset not found"):
+                        serve_from_db.create_http_server(
+                            service=_FakeService(),
+                            host="127.0.0.1",
+                            port=0,
+                            static_dir=static_dir,
+                            pmtiles_path=pmtiles_path,
+                        )
+
 
 class RuntimeValidationTests(TestCase):
+    def test_runtime_service_reloads_when_latest_build_key_changes(self) -> None:
+        def _manifest(build_key: str) -> dict[str, object]:
+            return {
+                "build_key": build_key,
+                "geo_hash": f"geo-{build_key}",
+                "score_hash": f"score-{build_key}",
+                "render_hash": f"render-{build_key}",
+                "summary_json": {
+                    "build_profile": "full",
+                    "map_center": {"lat": 53.4, "lon": -6.2},
+                    "fine_resolutions_m": [],
+                    "surface_zoom_breaks": [[0, 20000]],
+                },
+            }
+
+        with (
+            mock.patch.object(
+                serve_from_db,
+                "load_runtime_manifest",
+                side_effect=[_manifest("build-a"), _manifest("build-b")],
+            ),
+            mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000]),
+            mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=False),
+        ):
+            service = serve_from_db.RuntimeService(mock.sentinel.engine)
+            first_payload = service.get_runtime()
+            service._surface_runtime = mock.sentinel.surface_runtime
+            second_payload = service.get_runtime()
+
+        self.assertEqual(first_payload["build_key"], "build-a")
+        self.assertEqual(first_payload["pmtiles_url"], "/tiles/livability.pmtiles?v=build-a")
+        self.assertEqual(second_payload["build_key"], "build-b")
+        self.assertEqual(second_payload["pmtiles_url"], "/tiles/livability.pmtiles?v=build-b")
+        self.assertIsNone(service._surface_runtime)
+
     def test_runtime_service_rejects_invalid_inspect_values_before_rendering(self) -> None:
         service, runtime, _state = _make_validating_runtime_service()
         bad_cases = [
@@ -876,7 +973,7 @@ class RenderAndCliTests(TestCase):
 
         self.assertEqual(payload["grid_sizes_m"], [20000, 10000, 5000])
         self.assertEqual(payload["build_profile"], "full")
-        self.assertEqual(payload["pmtiles_url"], "/tiles/livability.pmtiles")
+        self.assertEqual(payload["pmtiles_url"], "/tiles/livability.pmtiles?v=build-123")
         self.assertEqual(payload["landuse_context_min_zoom"], 5)
         self.assertEqual(payload["landuse_context_max_zoom"], 11)
         self.assertEqual(payload["default_zoom"], 6)
@@ -896,7 +993,7 @@ class RenderAndCliTests(TestCase):
         self.assertEqual(payload["transport_flag_counts"]["is_unscheduled_stop"], 1)
         self.assertEqual(payload["transport_mode_counts"], {"tram": 4, "rail": 6})
         self.assertTrue(payload["noise_enabled"])
-        self.assertEqual(payload["noise_pmtiles_url"], "/tiles/noise.pmtiles")
+        self.assertEqual(payload["noise_pmtiles_url"], "/tiles/noise.pmtiles?v=build-123")
         self.assertEqual(payload["noise_counts"], {"roi": 5, "ni": 3})
         self.assertEqual(payload["noise_source_counts"]["road"], 4)
         self.assertEqual(payload["noise_source_counts"]["rail"], 2)
@@ -1106,7 +1203,7 @@ class RenderAndCliTests(TestCase):
 
         self.assertEqual(runtime_mock.call_args.kwargs["config_hash"], expected_config_hash)
         self.assertEqual(payload["build_profile"], "dev")
-        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-dev.pmtiles")
+        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-dev.pmtiles?v=build-dev-123")
         self.assertEqual(payload["fine_resolutions_m"], [])
         self.assertEqual(
             payload["surface_zoom_breaks"],
@@ -1196,7 +1293,7 @@ class RenderAndCliTests(TestCase):
 
         self.assertEqual(runtime_mock.call_args.kwargs["config_hash"], expected_config_hash)
         self.assertEqual(payload["build_profile"], "test")
-        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-test.pmtiles")
+        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-test.pmtiles?v=build-test-123")
         self.assertEqual(payload["fine_resolutions_m"], [2500, 1000, 500, 250, 100, 50])
         self.assertEqual(payload["inspect_url"], "/api/inspect")
 
@@ -1372,7 +1469,7 @@ class RenderAndCliTests(TestCase):
             payload = serve_from_db.RuntimeService(mock.sentinel.engine).get_runtime()
 
         self.assertEqual(payload["build_profile"], "dev")
-        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-dev.pmtiles")
+        self.assertEqual(payload["pmtiles_url"], "/tiles/livability-dev.pmtiles?v=build-fallback-dev")
 
     def test_main_serve_flag_starts_local_app(self) -> None:
         with (

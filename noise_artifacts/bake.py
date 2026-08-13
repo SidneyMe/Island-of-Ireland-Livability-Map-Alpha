@@ -200,7 +200,6 @@ def _bake_parallel(
     db_url: str,
     tile_specs: Iterable[tuple[int, int, int]],
     workers: int,
-    total_tile_count: int,
 ) -> tuple[int, int, dict[int, int]]:
     tiles_written = 0
     completed_specs = 0
@@ -232,7 +231,7 @@ def _bake_parallel(
                 completed_specs += chunk_size
             while len(pending) < in_flight_limit and _submit_next_chunk():
                 pass
-    tiles_empty = max(0, total_tile_count - tiles_written)
+    tiles_empty = max(0, completed_specs - tiles_written)
     return tiles_written, tiles_empty, per_zoom
 
 
@@ -266,14 +265,6 @@ def bake_noise_pmtiles(
         print(f"Noise PMTiles skipped: no noise rows for build_key={build_key}")
         return None
 
-    tile_specs = list(
-        _iter_tile_specs(
-            bounds=bounds,
-            bbox=bbox,
-            min_zoom=min_zoom,
-            max_zoom=source_max_zoom,
-        )
-    )
     min_lon, min_lat, max_lon, max_lat = bbox
     center_lon = (min_lon + max_lon) / 2.0
     center_lat = (min_lat + max_lat) / 2.0
@@ -296,8 +287,14 @@ def bake_noise_pmtiles(
     try:
         with temp_output_path.open("wb") as handle:
             writer = Writer(handle)
-            if configured_workers <= 1 or not tile_specs:
-                print(f"  bake_noise_pmtiles: sequential ({len(tile_specs):,} tile specs)")
+            tile_specs = _iter_tile_specs(
+                bounds=bounds,
+                bbox=bbox,
+                min_zoom=min_zoom,
+                max_zoom=source_max_zoom,
+            )
+            if configured_workers <= 1:
+                print("  bake_noise_pmtiles: sequential (streaming tile specs)")
                 with engine.connect() as connection:
                     tiles_written, tiles_empty, per_zoom = _bake_sequential(
                         connection,
@@ -308,7 +305,7 @@ def bake_noise_pmtiles(
             else:
                 print(
                     "  bake_noise_pmtiles: parallel, "
-                    f"{configured_workers} workers ({len(tile_specs):,} tile specs)"
+                    f"{configured_workers} workers (streaming tile specs)"
                 )
                 tiles_written, tiles_empty, per_zoom = _bake_parallel(
                     writer=writer,
@@ -316,7 +313,6 @@ def bake_noise_pmtiles(
                     db_url=database_url(),
                     tile_specs=tile_specs,
                     workers=configured_workers,
-                    total_tile_count=len(tile_specs),
                 )
             for zoom in sorted(per_zoom):
                 print(f"  noise z{zoom}: {per_zoom[zoom]:,} non-empty tiles")

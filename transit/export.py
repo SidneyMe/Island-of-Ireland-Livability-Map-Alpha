@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from config import (
@@ -137,29 +138,40 @@ def export_transport_reality_bundle(
     manifest_path = export_dir / MANIFEST_FILENAME
     readme_path = export_dir / README_FILENAME
     zip_path = export_dir / ZIP_FILENAME
+    with TemporaryDirectory(prefix="transport-reality-", dir=export_dir) as tmp_name:
+        staging_dir = Path(tmp_name)
+        staging_geojson_path = staging_dir / GEOJSON_FILENAME
+        staging_manifest_path = staging_dir / MANIFEST_FILENAME
+        staging_readme_path = staging_dir / README_FILENAME
+        staging_zip_path = staging_dir / ZIP_FILENAME
 
-    geojson_payload = build_transport_reality_geojson(rows)
-    geojson_path.write_text(json.dumps(geojson_payload, indent=2), encoding="utf-8")
-    manifest_path.write_text(
-        json.dumps(
-            {
-                "analysis_date": analysis_date.isoformat(),
-                "feature_count": len(rows),
-                "matcher_version": TRANSIT_REALITY_ALGO_VERSION,
-                "reality_fingerprint": rows[0].reality_fingerprint if rows else None,
-                "geojson_filename": GEOJSON_FILENAME,
-                "readme_filename": README_FILENAME,
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    readme_path.write_text(_readme_text(), encoding="utf-8")
+        geojson_payload = build_transport_reality_geojson(rows)
+        staging_geojson_path.write_text(json.dumps(geojson_payload, indent=2), encoding="utf-8")
+        staging_manifest_path.write_text(
+            json.dumps(
+                {
+                    "analysis_date": analysis_date.isoformat(),
+                    "feature_count": len(rows),
+                    "matcher_version": TRANSIT_REALITY_ALGO_VERSION,
+                    "reality_fingerprint": rows[0].reality_fingerprint if rows else None,
+                    "geojson_filename": GEOJSON_FILENAME,
+                    "readme_filename": README_FILENAME,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        staging_readme_path.write_text(_readme_text(), encoding="utf-8")
 
-    with ZipFile(zip_path, "w", compression=ZIP_DEFLATED) as archive:
-        archive.write(geojson_path, GEOJSON_FILENAME)
-        archive.write(manifest_path, MANIFEST_FILENAME)
-        archive.write(readme_path, README_FILENAME)
+        with ZipFile(staging_zip_path, "w", compression=ZIP_DEFLATED) as archive:
+            archive.write(staging_geojson_path, GEOJSON_FILENAME)
+            archive.write(staging_manifest_path, MANIFEST_FILENAME)
+            archive.write(staging_readme_path, README_FILENAME)
+
+        staging_geojson_path.replace(geojson_path)
+        staging_manifest_path.replace(manifest_path)
+        staging_readme_path.replace(readme_path)
+        staging_zip_path.replace(zip_path)
 
     return {
         "geojson": geojson_path,

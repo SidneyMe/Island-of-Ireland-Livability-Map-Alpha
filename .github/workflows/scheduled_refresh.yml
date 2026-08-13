@@ -47,7 +47,7 @@ jobs:
 
       - name: Run precompute
         run: |
-          python main.py transit
+          python main.py transit --auto-refresh-gtfs
           python main.py precompute --auto-refresh-import
 
       - name: Run sanity fixture

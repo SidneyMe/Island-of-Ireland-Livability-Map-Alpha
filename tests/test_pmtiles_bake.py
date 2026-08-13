@@ -850,3 +850,72 @@ class PmtilesBakeReliabilityTests(TestCase):
             self.assertEqual(result, output_path)
             self.assertEqual(output_path.read_bytes(), b"new-archive")
             self.assertFalse(temp_output_path.exists())
+
+
+class NoisePmtilesBakeStreamingTests(TestCase):
+    class _FakeWriter:
+        def __init__(self, handle) -> None:
+            self.handle = handle
+
+        def write_tile(self, tile_id, payload) -> None:
+            del tile_id, payload
+
+        def finalize(self, header, metadata) -> None:
+            del header, metadata
+            self.handle.write(b"noise-pmtiles")
+
+    class _FakeConnection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+
+    class _FakeEngine:
+        def connect(self):
+            return NoisePmtilesBakeStreamingTests._FakeConnection()
+
+    def test_noise_bake_sequential_streams_tile_specs_iterator(self) -> None:
+        tile_specs = iter([(12, 10, 20)])
+        with TemporaryDirectory() as tmp_name:
+            output_path = Path(tmp_name) / "noise.pmtiles"
+            with (
+                mock.patch.object(noise_bake, "Writer", self._FakeWriter),
+                mock.patch.object(noise_bake, "_load_noise_bounds", return_value=[(-6.2, 53.4, -6.1, 53.5)]),
+                mock.patch.object(noise_bake, "_iter_tile_specs", return_value=tile_specs),
+                mock.patch.object(noise_bake, "_bake_sequential", return_value=(0, 0, {})) as bake_mock,
+            ):
+                result = noise_bake.bake_noise_pmtiles(
+                    self._FakeEngine(),
+                    "build-key-123",
+                    output_path,
+                    noise_min_zoom=12,
+                    noise_max_zoom=12,
+                    workers=1,
+                )
+
+        self.assertEqual(result, output_path)
+        self.assertIs(bake_mock.call_args.kwargs["tile_specs"], tile_specs)
+
+    def test_noise_bake_parallel_chunks_from_tile_specs_iterator(self) -> None:
+        tile_specs = iter([(12, 10, 20)])
+        with TemporaryDirectory() as tmp_name:
+            output_path = Path(tmp_name) / "noise.pmtiles"
+            with (
+                mock.patch.object(noise_bake, "Writer", self._FakeWriter),
+                mock.patch.object(noise_bake, "_load_noise_bounds", return_value=[(-6.2, 53.4, -6.1, 53.5)]),
+                mock.patch.object(noise_bake, "_iter_tile_specs", return_value=tile_specs),
+                mock.patch.object(noise_bake, "database_url", return_value="postgresql://example"),
+                mock.patch.object(noise_bake, "_bake_parallel", return_value=(0, 0, {})) as bake_mock,
+            ):
+                result = noise_bake.bake_noise_pmtiles(
+                    self._FakeEngine(),
+                    "build-key-123",
+                    output_path,
+                    noise_min_zoom=12,
+                    noise_max_zoom=12,
+                    workers=2,
+                )
+
+        self.assertEqual(result, output_path)
+        self.assertIs(bake_mock.call_args.kwargs["tile_specs"], tile_specs)

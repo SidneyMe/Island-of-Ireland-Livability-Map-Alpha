@@ -704,6 +704,55 @@ def describe_gtfs_feeds(
     return statuses
 
 
+def _format_cache_age(cache_age_hours: float | None) -> str:
+    return f"{cache_age_hours:.2f}h" if cache_age_hours is not None else "unknown"
+
+
+def _format_feed_status(status: FeedRefreshStatus) -> str:
+    return (
+        f"feed_id={status.feed_id} "
+        f"path={status.path} "
+        f"cache_age={_format_cache_age(status.cache_age_hours)} "
+        f"calendar={status.calendar_min_date or 'unknown'}..{status.calendar_max_date or 'unknown'} "
+        f"days_until_calendar_end={status.days_until_calendar_end if status.days_until_calendar_end is not None else 'unknown'} "
+        f"freshness_decision={status.freshness_decision} "
+        f"freshness_reason={status.freshness_reason}"
+    )
+
+
+def _assert_transit_feed_fresh(
+    feed_config: TransitFeedConfig,
+    *,
+    progress_cb=None,
+) -> None:
+    status = describe_gtfs_feed_status(feed_config, force=False)
+    manifest = _read_manifest(status.manifest_path)
+    zip_valid = bool(manifest.get("zip_valid"))
+    problems: list[str] = []
+    accepted_age_hours = FRESHNESS_SECONDS / 3600.0
+    if not feed_config.zip_path.exists():
+        problems.append("current.zip missing")
+    if not zip_valid:
+        problems.append("manifest does not confirm a valid GTFS zip")
+    if status.cache_age_hours is None:
+        problems.append("cache age is unknown")
+    elif status.cache_age_hours >= accepted_age_hours:
+        problems.append(f"cache age exceeds {int(accepted_age_hours)}h TTL")
+    if status.stale_by_calendar:
+        problems.append("service calendar is expired or near expiry")
+    if status.calendar_unknown:
+        problems.append("service calendar end date is unknown or invalid")
+
+    _emit(progress_cb, f"[gtfs] freshness status: {_format_feed_status(status)}")
+    if problems:
+        raise RuntimeError(
+            "GTFS cache is not fresh enough for transit processing: "
+            + "; ".join(problems)
+            + ". "
+            + _format_feed_status(status)
+        )
+
+
 def ensure_transit_feed_available(
     feed_config: TransitFeedConfig,
     *,
@@ -713,6 +762,13 @@ def ensure_transit_feed_available(
 ) -> Path:
     if force_gtfs_refresh or auto_refresh_gtfs:
         refresh_gtfs_feed(feed_config, force=force_gtfs_refresh, progress_cb=progress_cb)
+        _assert_transit_feed_fresh(
+            feed_config,
+            progress_cb=progress_cb,
+        )
+    else:
+        status = describe_gtfs_feed_status(feed_config, force=False)
+        _emit(progress_cb, f"[gtfs] freshness status: {_format_feed_status(status)}")
     if feed_config.zip_path.exists():
         return feed_config.zip_path
     raise RuntimeError(

@@ -47,9 +47,16 @@ jobs:
 
       - name: Verify checked-in frontend bundle is up to date
         run: |
-          git diff --exit-code -- static/dist
+          git ls-files --error-unmatch static/dist/app.css static/dist/app.js
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "Frontend build changed static/dist. Rebuild with 'npm run build' in frontend and commit the updated static/dist artifact."
+            Write-Error "Frontend bundle files must be tracked: static/dist/app.css and static/dist/app.js."
+            exit 1
+          }
+          $status = git status --porcelain -- static/dist
+          if ($status) {
+            $status
+            Write-Error "Frontend build changed static/dist or created untracked bundle files. Rebuild with 'npm run build' in frontend and commit the updated static/dist artifact."
+            exit 1
           }
 
       - name: Run Python tests
