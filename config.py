@@ -415,8 +415,35 @@ BAKE_PMTILES_WORKERS = _positive_int_env(
 )
 
 
+SCORING_MODEL_VERSION = "v2-mode-aware-dual-2026-08-14"
+MODE_AWARE_SCORING_ENABLED = True
+MODE_AWARE_SCORE_WEIGHTS = {"walk": 0.50, "bike": 0.25, "transit": 0.25}
+
 WALK_RADIUS_M = 500
-WALKGRAPH_BBOX_PADDING_M = WALK_RADIUS_M
+BIKE_RADIUS_M = 5_000
+TRANSIT_ACCESS_WALK_RADIUS_M = 800
+TRANSIT_EGRESS_WALK_RADIUS_M = 800
+TRANSIT_MAX_TRANSFER_COUNT = 1
+TRANSIT_MAX_WAIT_MIN = 20
+TRANSIT_MAX_TRAVEL_MIN = 60
+WALKGRAPH_PROFILES = ("walk", "bike")
+BIKE_GRAPH_ACCESS_DENY_VALUES = frozenset({"private", "no", "use_sidepath"})
+BIKE_GRAPH_HIGHWAY_EXCLUDED = frozenset(
+    {
+        "construction",
+        "motor",
+        "motorway",
+        "motorway_link",
+        "planned",
+        "proposed",
+        "raceway",
+        "steps",
+    }
+)
+BIKE_GRAPH_EXPLICIT_INCLUDE_HIGHWAYS = frozenset(
+    {"cycleway", "path", "track", "service", "residential", "living_street", "unclassified"}
+)
+WALKGRAPH_BBOX_PADDING_M = max(WALK_RADIUS_M, TRANSIT_ACCESS_WALK_RADIUS_M, TRANSIT_EGRESS_WALK_RADIUS_M)
 VARIETY_CLUSTER_RADIUS_M = 25.0
 DISTANCE_DECAY_HALF_DISTANCE_M = {
     "shops": 150.0,
@@ -1120,6 +1147,19 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
 
     score_params = {
         "reach_hash": reach_hash,
+        "scoring_model_version": SCORING_MODEL_VERSION,
+        "mode_aware_scoring_enabled": MODE_AWARE_SCORING_ENABLED,
+        "mode_aware_score_weights": MODE_AWARE_SCORE_WEIGHTS,
+        "bike_radius_m": BIKE_RADIUS_M,
+        "transit_access_walk_radius_m": TRANSIT_ACCESS_WALK_RADIUS_M,
+        "transit_egress_walk_radius_m": TRANSIT_EGRESS_WALK_RADIUS_M,
+        "transit_max_transfer_count": TRANSIT_MAX_TRANSFER_COUNT,
+        "transit_max_wait_min": TRANSIT_MAX_WAIT_MIN,
+        "transit_max_travel_min": TRANSIT_MAX_TRAVEL_MIN,
+        "walkgraph_profiles": list(WALKGRAPH_PROFILES),
+        "bike_graph_access_deny_values": sorted(BIKE_GRAPH_ACCESS_DENY_VALUES),
+        "bike_graph_highway_excluded": sorted(BIKE_GRAPH_HIGHWAY_EXCLUDED),
+        "bike_graph_explicit_include_highways": sorted(BIKE_GRAPH_EXPLICIT_INCLUDE_HIGHWAYS),
         "caps": CAPS,
         "shop_tier_units": SHOP_TIER_UNITS,
         "healthcare_tier_units": HEALTHCARE_TIER_UNITS,
@@ -1304,6 +1344,19 @@ def build_hashes_for_import(
     score_hash = hash_dict(
         {
             "reach_hash": reach_hash,
+            "scoring_model_version": SCORING_MODEL_VERSION,
+            "mode_aware_scoring_enabled": MODE_AWARE_SCORING_ENABLED,
+            "mode_aware_score_weights": MODE_AWARE_SCORE_WEIGHTS,
+            "bike_radius_m": BIKE_RADIUS_M,
+            "transit_access_walk_radius_m": TRANSIT_ACCESS_WALK_RADIUS_M,
+            "transit_egress_walk_radius_m": TRANSIT_EGRESS_WALK_RADIUS_M,
+            "transit_max_transfer_count": TRANSIT_MAX_TRANSFER_COUNT,
+            "transit_max_wait_min": TRANSIT_MAX_WAIT_MIN,
+            "transit_max_travel_min": TRANSIT_MAX_TRAVEL_MIN,
+            "walkgraph_profiles": list(WALKGRAPH_PROFILES),
+            "bike_graph_access_deny_values": sorted(BIKE_GRAPH_ACCESS_DENY_VALUES),
+            "bike_graph_highway_excluded": sorted(BIKE_GRAPH_HIGHWAY_EXCLUDED),
+            "bike_graph_explicit_include_highways": sorted(BIKE_GRAPH_EXPLICIT_INCLUDE_HIGHWAYS),
             "caps": CAPS,
             "shop_tier_units": SHOP_TIER_UNITS,
             "healthcare_tier_units": HEALTHCARE_TIER_UNITS,

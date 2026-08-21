@@ -35,6 +35,7 @@ fn write_f32s(path: &Path, values: &[f32]) {
 fn write_graph_meta(graph_dir: &Path, node_count: u64, edge_count: u64) {
     let meta = GraphMeta {
         format_version: 3,
+        graph_profile: "walk".to_string(),
         extract_fingerprint: Some("fixture".to_string()),
         pbf_path: "fixture.osm.pbf".to_string(),
         pbf_size: 123,

@@ -18,6 +18,23 @@ pub const WALK_EXCLUDED: [&str; 9] = [
     "trunk",
     "trunk_link",
 ];
+pub const BIKE_EXCLUDED: [&str; 8] = [
+    "construction",
+    "motor",
+    "motorway",
+    "motorway_link",
+    "planned",
+    "proposed",
+    "raceway",
+    "steps",
+];
+pub const BIKE_PRIVATE_VALUES: [&str; 3] = ["private", "no", "use_sidepath"];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphProfile {
+    Walk,
+    Bike,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Bbox {
@@ -139,7 +156,56 @@ where
     true
 }
 
-pub fn scan_walkable_ways(pbf_path: &Path) -> Result<Pass1Artifacts, Box<dyn Error>> {
+pub fn is_bikeable_tags<I, K, V>(tags: I) -> bool
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    let mut highway: Option<String> = None;
+    let mut access: Option<String> = None;
+    let mut bicycle: Option<String> = None;
+
+    for (key, value) in tags {
+        match key.as_ref() {
+            "highway" => highway = Some(value.as_ref().to_string()),
+            "access" => access = Some(value.as_ref().to_ascii_lowercase()),
+            "bicycle" => bicycle = Some(value.as_ref().to_ascii_lowercase()),
+            _ => {}
+        }
+    }
+
+    let Some(highway) = highway else {
+        return false;
+    };
+    if BIKE_EXCLUDED.contains(&highway.as_str()) {
+        return false;
+    }
+
+    for value in [access.as_deref(), bicycle.as_deref()].into_iter().flatten() {
+        if BIKE_PRIVATE_VALUES.contains(&value) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn is_reachable_way_tags<I, K, V>(profile: GraphProfile, tags: I) -> bool
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    match profile {
+        GraphProfile::Walk => is_walkable_tags(tags),
+        GraphProfile::Bike => is_bikeable_tags(tags),
+    }
+}
+
+pub fn scan_reachable_ways(
+    pbf_path: &Path,
+    profile: GraphProfile,
+) -> Result<Pass1Artifacts, Box<dyn Error>> {
     let reader = ElementReader::from_path(pbf_path)?;
     let mut edge_spool = NamedTempFile::new()?;
     let mut referenced_node_ids = Vec::<i64>::new();
@@ -157,7 +223,7 @@ pub fn scan_walkable_ways(pbf_path: &Path) -> Result<Pass1Artifacts, Box<dyn Err
             let Element::Way(way) = element else {
                 return;
             };
-            if !is_walkable_tags(way.tags()) {
+            if !is_reachable_way_tags(profile, way.tags()) {
                 return;
             }
             let refs: Vec<i64> = way.refs().collect();
@@ -201,6 +267,10 @@ pub fn scan_walkable_ways(pbf_path: &Path) -> Result<Pass1Artifacts, Box<dyn Err
         walkable_way_count,
         raw_directed_edge_pairs,
     })
+}
+
+pub fn scan_walkable_ways(pbf_path: &Path) -> Result<Pass1Artifacts, Box<dyn Error>> {
+    scan_reachable_ways(pbf_path, GraphProfile::Walk)
 }
 
 fn record_if_referenced(

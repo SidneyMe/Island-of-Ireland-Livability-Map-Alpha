@@ -17,6 +17,31 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
+function modeAwareHtml(payload) {
+  const modeAware = payload && payload.mode_aware;
+  if (!modeAware || typeof modeAware !== "object") {
+    return "";
+  }
+  const total = Number(modeAware.total_score);
+  const version = modeAware.scoring_model_version || "unknown";
+  const weights = modeAware.weights || {};
+  const availability = modeAware.mode_available || {};
+  const weightText = ["walk", "bike", "transit"].map(function (mode) {
+    return mode + " " + Math.round(Number(weights[mode] || 0) * 100) + "%";
+  }).join(", ");
+  const availableText = ["walk", "bike", "transit"].filter(function (mode) {
+    return Boolean(availability[mode]);
+  }).join(", ") || "walk";
+  return (
+    '<div class="popup-score-variant">' +
+      "<h4>Mode-aware score " + (Number.isFinite(total) ? total.toFixed(1) : "n/a") + " / 100</h4>" +
+      "<p>Model: " + escapeHtml(version) + "</p>" +
+      "<p>Weights: " + escapeHtml(weightText) + "</p>" +
+      "<p>Available modes: " + escapeHtml(availableText) + "</p>" +
+    "</div>"
+  );
+}
+
 export function formatEffectiveUnits(value) {
   const numeric = Number(value || 0);
   return numeric.toFixed(2).replace(/\.?0+$/, "");
@@ -61,6 +86,7 @@ export function inspectPopupHtml(payload) {
       "<p>Visible grid: " + escapeHtml(formatResolutionLabel(payload.visible_resolution_m || payload.resolution_m || 50)) + "</p>" +
       "<p>Land coverage: " + (Number(payload.effective_area_ratio || 0) * 100).toFixed(0) + "%</p>" +
       "<ul>" + listHtml + "</ul>" +
+      modeAwareHtml(payload) +
     "</div>"
   );
 }
@@ -92,6 +118,7 @@ export function coarseGridPopupHtml(properties, fallbackResolutionM = 50) {
       "<h3>Walk score " + Number(properties.total_score || 0).toFixed(1) + " / 100</h3>" +
       "<p>Visible grid: " + escapeHtml(formatResolutionLabel(properties.resolution_m || fallbackResolutionM)) + "</p>" +
       "<ul>" + listHtml + "</ul>" +
+      modeAwareHtml(properties) +
     "</div>"
   );
 }

@@ -139,6 +139,7 @@ def run_walkgraph_build(
     bbox: tuple[float, float, float, float] | None = None,
     bbox_padding_m: float = 0.0,
     extract_fingerprint: str | None = None,
+    graph_profile: str = "walk",
     progress_cb=None,
 ) -> None:
     ensure_walkgraph_subcommand_available(walkgraph_bin, "build")
@@ -152,6 +153,8 @@ def run_walkgraph_build(
         str(output_dir),
         "--bbox-padding-m",
         f"{normalized_padding_m:.6f}",
+        "--profile",
+        str(graph_profile),
     ]
     if bbox is not None:
         normalized_bbox = _normalized_bbox(bbox)
@@ -323,6 +326,7 @@ def graph_meta_matches(
     extract_fingerprint: str,
     bbox: tuple[float, float, float, float] | None,
     bbox_padding_m: float,
+    graph_profile: str = "walk",
 ) -> bool:
     try:
         meta = load_graph_meta(graph_dir)
@@ -334,6 +338,8 @@ def graph_meta_matches(
     if int(meta.get("format_version", 0)) != GRAPH_FORMAT_VERSION:
         return False
     if str(meta.get("extract_fingerprint") or "") != str(extract_fingerprint):
+        return False
+    if str(meta.get("graph_profile") or "walk") != str(graph_profile):
         return False
     if not _required_graph_sidecars_exist(graph_dir):
         return False

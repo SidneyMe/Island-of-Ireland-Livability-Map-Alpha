@@ -7,6 +7,12 @@ from typing import Any, Callable, Iterable, Iterator
 
 from shapely.geometry import Point
 
+from config import (
+    MODE_AWARE_SCORE_WEIGHTS,
+    MODE_AWARE_SCORING_ENABLED,
+    SCORING_MODEL_VERSION,
+)
+
 
 PREP_PROGRESS_EVERY = 1_000
 AMENITY_MERGE_LARGE_CANDIDATE_WARNING_ROWS = 50_000
@@ -449,6 +455,9 @@ def summary_json_impl(
         "fine_resolutions_m": fine_resolutions_m,
         "map_center": {"lat": centre.y, "lon": centre.x},
         "walk_cell_counts": {str(size): len(cells) for size, cells in walk_grids.items()},
+        "scoring_model_version": SCORING_MODEL_VERSION,
+        "mode_aware_scoring_enabled": bool(MODE_AWARE_SCORING_ENABLED),
+        "mode_aware_score_weights": dict(MODE_AWARE_SCORE_WEIGHTS),
         "amenity_counts": {category: len(points) for category, points in amenity_data.items()},
         "amenity_tier_counts": _amenity_tier_counts(
             amenity_source_rows,

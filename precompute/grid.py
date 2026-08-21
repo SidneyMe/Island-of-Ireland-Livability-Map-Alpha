@@ -10,6 +10,7 @@ from shapely.ops import clip_by_rect, transform
 from shapely.prepared import prep
 
 from config import CAPS, TO_WGS84
+from .mode_aware import MODE_AWARE_KEY, build_mode_aware_payload
 
 
 def _as_2d(geometry):
@@ -308,6 +309,8 @@ def score_cell(
     effective_units: dict[str, float] | None = None,
     railway_proximity_penalty: float = 0.0,
     road_proximity_penalty: float = 0.0,
+    bike_effective_units: dict[str, float] | None = None,
+    transit_effective_units: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], float]:
     normalized_ratio = _normalized_area_ratio(effective_area_ratio)
     per_category: dict[str, float] = {}
@@ -326,7 +329,25 @@ def score_cell(
     deduction = max(float(railway_proximity_penalty), 0.0)
     per_category["railway_proximity"] = -deduction
     per_category["road_proximity"] = -max(float(road_proximity_penalty), 0.0)
-    return per_category, max(sum(per_category.values()), 0.0)
+    total = max(
+        sum(float(value) for value in per_category.values() if isinstance(value, (int, float))),
+        0.0,
+    )
+    if bike_effective_units is not None or transit_effective_units is not None:
+        per_category[MODE_AWARE_KEY] = build_mode_aware_payload(
+            score_cell=score_cell,
+            counts={str(category): int(value) for category, value in counts.items()},
+            cluster_counts={} if cluster_counts is None else dict(cluster_counts),
+            effective_area_ratio=effective_area_ratio,
+            walk_effective_units=effective_units,
+            walk_component_scores=per_category,
+            walk_total_score=total,
+            bike_effective_units=bike_effective_units,
+            transit_effective_units=transit_effective_units,
+            railway_proximity_penalty=railway_proximity_penalty,
+            road_proximity_penalty=road_proximity_penalty,
+        )
+    return per_category, total
 
 
 def _railway_penalty_for_node(
@@ -375,11 +396,15 @@ def score_cells(
     effective_units_by_node=None,
     railway_proximity_penalties_by_node=None,
     road_proximity_penalties_by_node=None,
+    bike_effective_units_by_node=None,
+    transit_effective_units_by_node=None,
+    bike_effective_units_by_cell: list[dict[str, float]] | None = None,
+    transit_effective_units_by_cell: list[dict[str, float]] | None = None,
 ) -> None:
     if not cells:
         return
 
-    for cell, node in zip(cells, cell_nodes):
+    for index, (cell, node) in enumerate(zip(cells, cell_nodes)):
         counts = dict(counts_by_node.get(node, {}))
         cluster_counts = dict(cluster_counts_by_node.get(node, {}))
         effective_units = (
@@ -405,6 +430,26 @@ def score_cells(
             effective_units=effective_units,
             railway_proximity_penalty=railway_proximity_penalty,
             road_proximity_penalty=road_proximity_penalty,
+            bike_effective_units=(
+                bike_effective_units_by_cell[index]
+                if bike_effective_units_by_cell is not None
+                else None
+                if bike_effective_units_by_node is None
+                else {
+                    str(category): float(value)
+                    for category, value in dict(bike_effective_units_by_node.get(node, {})).items()
+                }
+            ),
+            transit_effective_units=(
+                transit_effective_units_by_cell[index]
+                if transit_effective_units_by_cell is not None
+                else None
+                if transit_effective_units_by_node is None
+                else {
+                    str(category): float(value)
+                    for category, value in dict(transit_effective_units_by_node.get(node, {})).items()
+                }
+            ),
         )
         cell["counts"] = counts
         cell["cluster_counts"] = cluster_counts

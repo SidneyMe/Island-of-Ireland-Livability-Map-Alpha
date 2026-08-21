@@ -19,10 +19,18 @@ import { coarseGridPopupHtml, inspectPopupHtml } from "./popups/grid_popup.js";
       railway_proximity: -3.8,
       road_proximity: -2.1
     },
-    total_score: 29.4
+    total_score: 29.4,
+    mode_aware: {
+      scoring_model_version: "v2-mode-aware-dual-2026-08-14",
+      weights: { walk: 0.5, bike: 0.25, transit: 0.25 },
+      mode_available: { walk: true, bike: true, transit: false },
+      total_score: 34.2
+    }
   });
 
   assert.match(html, /Walk score 29\.4 \/ 100/);
+  assert.match(html, /Mode-aware score 34\.2 \/ 100/);
+  assert.match(html, /walk 50%, bike 25%, transit 25%/);
   assert.match(html, /Shops/);
   assert.match(html, /Railway proximity/);
   assert.match(html, /-3\.8 points/);

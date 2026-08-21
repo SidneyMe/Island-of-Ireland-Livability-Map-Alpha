@@ -12,6 +12,7 @@
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
 - Builds a GTFS-first transit reality layer, bus daytime frequency tiers, explicit rail/tram mode tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
+- Adds a dual-score mode-aware scoring payload: current walk-only `total_score` and top-level category scores remain the map default, while nested `scores_json["mode_aware"]` and fine-surface inspect payloads can expose walk/bike/transit weighted comparison data with model version and mode weights. (Confirmed)
 - Applies a hidden, explainable road-proximity penalty from OSM `motorway`, `trunk`, and `primary` ways, with class-specific distance decay and safe maxspeed weighting; strongest nearby-road selection avoids junction double-counting. (Confirmed)
 - Current live transit config in `config.py` now wires the active `nta` and `translink` GTFS feeds, matching the README/tests and restoring Northern Ireland transport coverage in the published transport layer. (Confirmed)
 - Adds a display-only transport/industry noise overlay (Phase E: roads + rail + airport + industry, Lden/Lnight) calibrated from official-derived strategic noise data; road/rail use grid proxy rows while airport/industry use resolved official-derived polygons, and runtime does not present measured point noise. This does not feed livability scoring yet. (Confirmed)
@@ -29,12 +30,14 @@
 - **OSM ingest**: `local_osm_import/` + `osm2pgsql_livability.lua`
 - **GTFS ingest and transit reality**: `transit/`
 - **GTFS rail-corridor proxy**: `transit/railway_corridors.py`
+- **GTFS transfer reach helper**: `transit/chained_reach.py`
 - **Major-road proximity penalty**: `precompute/road_proximity.py`
 - **Overture integration and dedupe**: `overture/loader.py`, `overture/merge.py`, `db_postgis/amenity_merge.py`
 - **Amenity merge observability**: `db_postgis/amenity_merge.py`, `precompute/phases.py`, `precompute/_rows.py`, `precompute/publish.py`
 - **Noise overlay ingestion**: `noise/loader.py`
 - **Noise artifact source ingest modes**: `noise_artifacts/ingest.py`, `noise_artifacts/ogr_ingest.py`
 - **Amenity tier classifier**: `precompute/amenity_tiers.py`
+- **Mode-aware scoring payload helper**: `precompute/mode_aware.py`
 - **Amenity clustering for Phase 2 variety scoring**: `precompute/amenity_clusters.py`
 - **Precompute cache helpers**: `precompute/cache.py`, `precompute/_cache_wrappers.py`
 - **Array-native reachability cache helpers**: `precompute/reachability_arrays.py`
@@ -44,7 +47,7 @@
 - **Precompute pipeline orchestration**: `precompute/__init__.py`, `precompute/_planning.py`, `precompute/workflow.py`, `precompute/phases.py`
 - **Lightweight GTFS refresh CLI path**: `transit_refresh_runner.py`
 - **Pipeline ETA and timing history**: `progress_tracker.py`
-- **Rust walkgraph binary**: `walkgraph/`
+- **Rust walkgraph binary**: `walkgraph/` (build profile supports walk and bike graph filtering)
 - **PMTiles bake**: `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py`, `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py`
 - **Runtime HTTP server**: `serve_from_db.py`
 - **Runtime route helper**: `serve_routes.py`
@@ -220,7 +223,9 @@ Notes:
 | OSM ingest rules | `osm2pgsql_livability.lua`, `local_osm_import/` | `config.IMPORTER_CONFIG_VERSION` | None |
 | Major-road proximity scoring | `osm2pgsql_livability.lua`, `db_postgis/reads.py`, `precompute/road_proximity.py` | `grid_walk.scores_json`, fine-surface score arrays, `/api/runtime` road diagnostics, grid popups | OSM `osm_raw.roads` importer-owned table |
 | Transit reality | `transit/workflow.py`, `transit/rust_gtfs.py`, `transit/railway_corridors.py` | `config.transit_config_hash()` | None |
+| Transfer-aware transit reach helper | `transit/chained_reach.py` | Future transit-chained scoring consumers | Pure helper returns bounded direct/one-transfer stop reach rows and excludes non-public service inputs. |
 | Amenity tiering | `config.py` tier constants, `precompute/amenity_tiers.py` | `precompute/phases.py`, `precompute/publish.py` | None |
+| Mode-aware score payloads | `config.py`, `precompute/mode_aware.py`, `precompute/grid.py`, `precompute/surface.py` | `grid_walk.scores_json["mode_aware"]`, `/api/inspect`, frontend grid popups | Walk-only total/top-level score fields remain default PMTiles styling inputs; mode-aware data is nested for validation. |
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
 | Overture merge logic | `overture/merge.py`, `db_postgis/amenity_merge.py` | `precompute/phases.py` | None |
 | Amenity merge diagnostics | `db_postgis/amenity_merge.py`, `precompute/phases.py`, `precompute/_rows.py`, `precompute/publish.py` | `phase_amenities_impl()` -> `_summary_json()` -> `build_manifest.summary_json` | `summary_json["amenity_merge"]` persists stage timings, key row counts, candidate-path counts, and compact warnings without storing geometries or SQL text. |
@@ -715,6 +720,7 @@ Representative tests confirmed present:
 | Test file | What it covers |
 |---|---|
 | `tests/test_config.py` | config hash stability, env parsing, schema-version invalidation |
+| `tests/test_mode_aware_scoring.py` | mode-aware weighted score payloads, score-hash invalidation for mode weights, and transfer-aware transit reach helper behavior |
 | `tests/test_amenity_tiers.py` | shop / healthcare / park tier classification |
 | `tests/test_overture_loader.py` | Overture category filtering and park handling |
 | `tests/test_osm_import_handling.py` | osm2pgsql wrapper and import manifest behavior |

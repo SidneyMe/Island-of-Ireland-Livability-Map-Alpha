@@ -34,6 +34,7 @@ from config import (
     surface_shell_hash_for_geo,
 )
 from .grid import build_cell_id, score_cell
+from .mode_aware import MODE_AWARE_KEY, build_mode_aware_payload
 from .reachability_arrays import ReachabilityMatrix
 
 
@@ -375,6 +376,8 @@ def build_node_score_arrays(
     walk_counts_by_node,
     walk_cluster_counts_by_node,
     walk_effective_units_by_node,
+    bike_effective_units_by_node=None,
+    transit_effective_units_by_node=None,
     railway_proximity_penalties: np.ndarray | None = None,
     road_proximity_penalties: np.ndarray | None = None,
 ) -> dict[str, Any]:
@@ -382,6 +385,8 @@ def build_node_score_arrays(
     counts_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.uint32)
     cluster_counts_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.uint32)
     effective_units_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.float32)
+    bike_effective_units_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.float32)
+    transit_effective_units_matrix = np.zeros((node_count, len(_CATEGORY_ORDER)), dtype=np.float32)
     if railway_proximity_penalties is None:
         railway_proximity_penalties = np.zeros(node_count, dtype=np.float32)
     else:
@@ -445,6 +450,23 @@ def build_node_score_arrays(
                     continue
                 effective_units_matrix[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(float(units), 0.0)
 
+    for source, target in (
+        (bike_effective_units_by_node, bike_effective_units_matrix),
+        (transit_effective_units_by_node, transit_effective_units_matrix),
+    ):
+        if source is None:
+            continue
+        if _copy_reachability_matrix(source, target):
+            continue
+        for node_idx, category_units in source.items():
+            normalized_node_idx = int(node_idx)
+            if normalized_node_idx < 0 or normalized_node_idx >= node_count:
+                continue
+            for category, units in dict(category_units).items():
+                if category not in _CATEGORY_TO_INDEX:
+                    continue
+                target[normalized_node_idx, _CATEGORY_TO_INDEX[category]] = max(float(units), 0.0)
+
     reference_scores = component_scores_for_nodes(
         counts_matrix,
         effective_units_matrix,
@@ -458,6 +480,8 @@ def build_node_score_arrays(
         "counts_matrix": counts_matrix,
         "cluster_counts_matrix": cluster_counts_matrix,
         "effective_units_matrix": effective_units_matrix,
+        "bike_effective_units_matrix": bike_effective_units_matrix,
+        "transit_effective_units_matrix": transit_effective_units_matrix,
         "reference_scores": reference_scores.astype(np.float32, copy=False),
         "reference_total": reference_total.astype(np.float32, copy=False),
         "railway_proximity_penalties": railway_proximity_penalties.astype(np.float32, copy=False),
@@ -473,6 +497,20 @@ def save_node_score_arrays(score_dir: Path, payload: dict[str, Any]) -> None:
         counts_matrix=np.asarray(payload["counts_matrix"], dtype=np.uint32),
         cluster_counts_matrix=np.asarray(payload["cluster_counts_matrix"], dtype=np.uint32),
         effective_units_matrix=np.asarray(payload["effective_units_matrix"], dtype=np.float32),
+        bike_effective_units_matrix=np.asarray(
+            payload.get(
+                "bike_effective_units_matrix",
+                np.zeros_like(payload["effective_units_matrix"], dtype=np.float32),
+            ),
+            dtype=np.float32,
+        ),
+        transit_effective_units_matrix=np.asarray(
+            payload.get(
+                "transit_effective_units_matrix",
+                np.zeros_like(payload["effective_units_matrix"], dtype=np.float32),
+            ),
+            dtype=np.float32,
+        ),
         reference_scores=np.asarray(payload["reference_scores"], dtype=np.float32),
         reference_total=np.asarray(payload["reference_total"], dtype=np.float32),
         railway_proximity_penalties=np.asarray(
@@ -495,6 +533,18 @@ def load_node_score_arrays(score_dir: Path) -> dict[str, Any]:
             "counts_matrix": np.asarray(data["counts_matrix"], dtype=np.uint32),
             "cluster_counts_matrix": np.asarray(data["cluster_counts_matrix"], dtype=np.uint32),
             "effective_units_matrix": np.asarray(data["effective_units_matrix"], dtype=np.float32),
+            "bike_effective_units_matrix": np.asarray(
+                data["bike_effective_units_matrix"]
+                if "bike_effective_units_matrix" in data.files
+                else np.zeros_like(data["effective_units_matrix"], dtype=np.float32),
+                dtype=np.float32,
+            ),
+            "transit_effective_units_matrix": np.asarray(
+                data["transit_effective_units_matrix"]
+                if "transit_effective_units_matrix" in data.files
+                else np.zeros_like(data["effective_units_matrix"], dtype=np.float32),
+                dtype=np.float32,
+            ),
             "reference_scores": np.asarray(data["reference_scores"], dtype=np.float32),
             "reference_total": np.asarray(data["reference_total"], dtype=np.float32),
             "railway_proximity_penalties": np.asarray(data["railway_proximity_penalties"], dtype=np.float32),
@@ -817,6 +867,8 @@ def ensure_surface_score_cache(
     walk_counts_by_node: dict[int, dict[str, int]],
     walk_cluster_counts_by_node: dict[int, dict[str, int]],
     walk_effective_units_by_node: dict[int, dict[str, float]],
+    bike_effective_units_by_node=None,
+    transit_effective_units_by_node=None,
     railway_proximity_penalties: np.ndarray | None = None,
     road_proximity_penalties: np.ndarray | None = None,
     tracker=None,
@@ -855,6 +907,8 @@ def ensure_surface_score_cache(
         walk_counts_by_node,
         walk_cluster_counts_by_node,
         walk_effective_units_by_node,
+        bike_effective_units_by_node=bike_effective_units_by_node,
+        transit_effective_units_by_node=transit_effective_units_by_node,
         railway_proximity_penalties=railway_proximity_penalties,
         road_proximity_penalties=road_proximity_penalties,
     )
@@ -1197,6 +1251,7 @@ class FineSurfaceRuntime:
             "effective_units": {},
             "component_scores": {category: 0.0 for category in _SCORE_COMPONENT_ORDER},
             "total_score": None,
+            MODE_AWARE_KEY: None,
         }
         if shard_id not in self.shard_inventory:
             return payload
@@ -1237,6 +1292,18 @@ class FineSurfaceRuntime:
             for index, category in enumerate(node_scores["categories"])
             if float(effective_units_row[index]) > 0.0
         }
+        bike_effective_units_row = node_scores["bike_effective_units_matrix"][node_idx]
+        bike_effective_units = {
+            str(category): float(bike_effective_units_row[index])
+            for index, category in enumerate(node_scores["categories"])
+            if float(bike_effective_units_row[index]) > 0.0
+        }
+        transit_effective_units_row = node_scores["transit_effective_units_matrix"][node_idx]
+        transit_effective_units = {
+            str(category): float(transit_effective_units_row[index])
+            for index, category in enumerate(node_scores["categories"])
+            if float(transit_effective_units_row[index]) > 0.0
+        }
         railway_proximity_penalty = float(node_scores["railway_proximity_penalties"][node_idx])
         road_proximity_penalty = float(node_scores["road_proximity_penalties"][node_idx])
         component_scores, total_score = score_cell(
@@ -1244,6 +1311,19 @@ class FineSurfaceRuntime:
             cluster_counts=cluster_counts,
             effective_area_ratio=effective_area_ratio,
             effective_units=effective_units,
+            railway_proximity_penalty=railway_proximity_penalty,
+            road_proximity_penalty=road_proximity_penalty,
+        )
+        mode_aware_payload = build_mode_aware_payload(
+            score_cell=score_cell,
+            counts=counts,
+            cluster_counts=cluster_counts,
+            effective_area_ratio=effective_area_ratio,
+            walk_effective_units=effective_units,
+            walk_component_scores=component_scores,
+            walk_total_score=float(total_score),
+            bike_effective_units=bike_effective_units,
+            transit_effective_units=transit_effective_units,
             railway_proximity_penalty=railway_proximity_penalty,
             road_proximity_penalty=road_proximity_penalty,
         )
@@ -1256,6 +1336,7 @@ class FineSurfaceRuntime:
                 "effective_units": effective_units,
                 "component_scores": component_scores,
                 "total_score": float(total_score),
+                MODE_AWARE_KEY: mode_aware_payload,
             }
         )
         return payload

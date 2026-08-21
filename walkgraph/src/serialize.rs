@@ -21,6 +21,8 @@ pub struct GraphPaths {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct GraphMeta {
     pub format_version: u32,
+    #[serde(default = "default_graph_profile")]
+    pub graph_profile: String,
     pub extract_fingerprint: Option<String>,
     pub pbf_path: String,
     pub pbf_size: u64,
@@ -30,6 +32,10 @@ pub struct GraphMeta {
     pub node_count: u64,
     pub edge_count: u64,
     pub created_utc: String,
+}
+
+fn default_graph_profile() -> String {
+    "walk".to_string()
 }
 
 pub fn graph_paths_for_dir(output_dir: &Path) -> GraphPaths {

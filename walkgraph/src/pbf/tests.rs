@@ -1,6 +1,6 @@
 use super::{
-    is_walkable_tags, open_spool_reader, parse_bbox, read_spooled_edge_pair, Bbox, PRIVATE_VALUES,
-    WALK_EXCLUDED,
+    is_bikeable_tags, is_walkable_tags, open_spool_reader, parse_bbox, read_spooled_edge_pair,
+    Bbox, BIKE_EXCLUDED, BIKE_PRIVATE_VALUES, PRIVATE_VALUES, WALK_EXCLUDED,
 };
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -17,6 +17,35 @@ fn bbox_parser_accepts_valid_input() {
             max_lon: -5.3,
         }
     );
+}
+
+#[test]
+fn bikeability_matches_expected_sets() {
+    assert_eq!(BIKE_PRIVATE_VALUES, ["private", "no", "use_sidepath"]);
+    assert_eq!(
+        BIKE_EXCLUDED,
+        [
+            "construction",
+            "motor",
+            "motorway",
+            "motorway_link",
+            "planned",
+            "proposed",
+            "raceway",
+            "steps",
+        ]
+    );
+    assert!(is_bikeable_tags([("highway", "cycleway")]));
+    assert!(is_bikeable_tags([("highway", "residential")]));
+    assert!(!is_bikeable_tags([("highway", "motorway")]));
+    assert!(!is_bikeable_tags([
+        ("highway", "residential"),
+        ("bicycle", "no")
+    ]));
+    assert!(!is_bikeable_tags([
+        ("highway", "cycleway"),
+        ("access", "private")
+    ]));
 }
 
 #[test]

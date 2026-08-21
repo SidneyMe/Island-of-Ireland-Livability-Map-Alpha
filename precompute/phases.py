@@ -7,17 +7,23 @@ from typing import Any, Iterable
 
 import numpy as np
 from config import (
+    BIKE_RADIUS_M,
     DISTANCE_DECAY_HALF_DISTANCE_M,
     GRID_GEOMETRY_SCHEMA_VERSION,
+    MODE_AWARE_SCORING_ENABLED,
     TAGS,
     VARIETY_CLUSTER_RADIUS_M,
 )
 from db_postgis import load_railway_corridor_rows, load_road_rows
+from network import graph_meta_matches as _graph_meta_matches
+from network import load_walk_graph_index as _load_walk_graph_index
+from network import run_walkgraph_build as _run_walkgraph_build
 from transit import compute_railway_proximity_penalties
 from .road_proximity import compute_road_proximity_penalties
 
 from .amenity_clusters import build_amenity_clusters
 from .amenity_tiers import annotate_amenity_row
+from . import network as _network
 from ._state import _STATE
 from .reachability_arrays import (
     ReachabilityMatrix,
@@ -217,6 +223,53 @@ def _amenity_points_from_rows(
             (float(row["lat"]), float(row["lon"]))
         )
     return amenity_points
+
+
+def _units_by_cell_nodes(
+    units_by_node,
+    cell_nodes: list[int],
+) -> list[dict[str, float]]:
+    return [
+        {
+            str(category): float(value)
+            for category, value in dict(units_by_node.get(int(node), {}) or {}).items()
+        }
+        for node in cell_nodes
+    ]
+
+
+def _build_or_load_bike_graph(
+    *,
+    source_state,
+    study_area_wgs84,
+    geometry_cache_dir: Path,
+    walkgraph_bin: str,
+    tracker,
+):
+    graph_dir = geometry_cache_dir / "bike_graph"
+    bbox = _graph_bbox(study_area_wgs84)
+    cache_hit = _graph_meta_matches(
+        graph_dir,
+        extract_fingerprint=source_state.extract_fingerprint,
+        bbox=bbox,
+        bbox_padding_m=BIKE_RADIUS_M,
+        graph_profile="bike",
+    )
+    if not cache_hit:
+        tracker.set_live_work("networks", detail="building bike graph")
+        started_at = time.perf_counter()
+        _run_walkgraph_build(
+            source_state.extract_path,
+            graph_dir,
+            walkgraph_bin=walkgraph_bin,
+            bbox=bbox,
+            bbox_padding_m=BIKE_RADIUS_M,
+            extract_fingerprint=source_state.extract_fingerprint,
+            graph_profile="bike",
+            progress_cb=tracker.phase_callback("networks"),
+        )
+        _record_substep(tracker, "networks", "bike_graph_build", started_at, force_log=True)
+    return _load_walk_graph_index(graph_dir)
 
 
 def _record_substep(
@@ -1139,8 +1192,11 @@ def phase_grids_impl(
 
     grid_cells_by_size: dict[int, list[dict[str, Any]]] = dict(cached_grids)
     walk_cell_nodes_by_size: dict[int, list[int]] = {}
+    bike_cell_nodes_by_size: dict[int, list[int]] = {}
+    bike_effective_units_by_size: dict[int, list[dict[str, float]]] = {}
     walk_origin_nodes: list[int] = []
     surface_origin_nodes: list[int] = []
+    bike_graph = None
 
     needs_walk_origin_nodes = bool(sizes_to_rebuild) or fine_surface_enabled
     if needs_walk_origin_nodes:
@@ -1176,6 +1232,70 @@ def phase_grids_impl(
             cache_save=cache_save,
             normalize_origin_node_ids=normalize_origin_node_ids,
         )
+
+    if MODE_AWARE_SCORING_ENABLED and sizes_to_rebuild and _STATE.source_state is not None:
+        try:
+            bike_graph = _build_or_load_bike_graph(
+                source_state=_STATE.source_state,
+                study_area_wgs84=_STATE.study_area_wgs84,
+                geometry_cache_dir=geometry_cache_dir,
+                walkgraph_bin=walkgraph_bin,
+                tracker=tracker,
+            )
+            amenity_cluster_rows = cache_load("amenity_clusters", cache_dir)
+            if amenity_cluster_rows is None:
+                _, amenity_cluster_rows = build_amenity_clusters(
+                    amenity_source_rows,
+                    categories=list(amenity_data),
+                    cluster_radius_m=VARIETY_CLUSTER_RADIUS_M,
+                )
+                cache_save("amenity_clusters", amenity_cluster_rows, cache_dir)
+            bike_cluster_data = _amenity_points_from_rows(
+                amenity_cluster_rows,
+                categories=list(amenity_data),
+            )
+            bike_cluster_nodes_by_category = cache_load("bike_cluster_nodes_by_cat", cache_dir)
+            if bike_cluster_nodes_by_category is None:
+                bike_cluster_nodes_by_category = _network.snap_amenities(
+                    bike_graph,
+                    bike_cluster_data,
+                )
+                cache_save("bike_cluster_nodes_by_cat", bike_cluster_nodes_by_category, cache_dir)
+            bike_base_unit_rows = _base_unit_node_rows(
+                amenity_cluster_rows,
+                bike_cluster_nodes_by_category,
+            )
+            bike_origin_nodes: list[int] = []
+            for size in sizes_to_rebuild:
+                bike_cell_nodes_by_size[size] = snap_cells_to_nodes(
+                    bike_graph,
+                    grid_cells_by_size[size],
+                    f"bike_cell_nodes_{size}",
+                    geometry_cache_dir,
+                )
+                bike_origin_nodes.extend(int(node) for node in bike_cell_nodes_by_size[size])
+            normalized_bike_origin_nodes = normalize_origin_node_ids(bike_origin_nodes)
+            bike_effective_units_by_node = cache_load("bike_effective_units_by_origin_node", cache_dir)
+            if bike_effective_units_by_node is None:
+                bike_effective_units_by_node = _network.precompute_walk_decayed_units_matrix_by_origin_node(
+                    bike_graph,
+                    bike_base_unit_rows,
+                    normalized_bike_origin_nodes,
+                    cutoff=BIKE_RADIUS_M,
+                    half_distance_m_by_category=DISTANCE_DECAY_HALF_DISTANCE_M,
+                    weight="length_m",
+                    progress_cb=tracker.phase_callback("reachability"),
+                    detail="bike origins",
+                )
+                cache_save("bike_effective_units_by_origin_node", bike_effective_units_by_node, cache_dir)
+            for size, bike_nodes in bike_cell_nodes_by_size.items():
+                bike_effective_units_by_size[size] = _units_by_cell_nodes(
+                    bike_effective_units_by_node,
+                    bike_nodes,
+                )
+        except Exception as exc:
+            print(f"  [score] bike mode-aware reachability unavailable ({exc})")
+            bike_effective_units_by_size = {}
 
     if fine_surface_enabled:
         ensure_surface_shell_cache(
@@ -1221,6 +1341,8 @@ def phase_grids_impl(
             walk_effective_units_by_node=walk_effective_units_by_node,
             railway_proximity_penalties=railway_proximity_penalties,
             road_proximity_penalties=road_proximity_penalties,
+            bike_effective_units_by_node=None,
+            transit_effective_units_by_node=None,
             tracker=tracker,
         )
 
@@ -1256,6 +1378,7 @@ def phase_grids_impl(
             walk_effective_units_by_node,
             railway_proximity_penalties,
             road_proximity_penalties,
+            bike_effective_units_by_cell=bike_effective_units_by_size.get(size),
         )
         walk_scores = [cell["total"] for cell in walk_cells]
         print(f"{_score_summary(walk_scores)} {elapsed(started_at)}")

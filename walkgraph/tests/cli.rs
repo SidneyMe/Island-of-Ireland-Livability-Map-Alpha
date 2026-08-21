@@ -70,6 +70,7 @@ fn write_tiny_graph(graph_dir: &Path) {
     let paths = graph_paths_for_dir(graph_dir);
     let meta = GraphMeta {
         format_version: 3,
+        graph_profile: "walk".to_string(),
         extract_fingerprint: Some("fixture".to_string()),
         pbf_path: "fixture.osm.pbf".to_string(),
         pbf_size: 123,

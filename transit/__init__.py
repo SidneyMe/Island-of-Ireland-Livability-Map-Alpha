@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .classification import classify_services
+from .chained_reach import TripStopTime, derive_transfer_stop_reach
 from .export import build_transport_reality_geojson, export_transport_reality_bundle
 from .gtfs_zip import parse_gtfs_zip, route_mode
 from .matching import derive_gtfs_stop_reality
@@ -20,6 +21,7 @@ __all__ = [
     "build_railway_corridor_materialization",
     "classify_services",
     "derive_gtfs_stop_reality",
+    "derive_transfer_stop_reach",
     "ensure_feed_zip",
     "ensure_transit_reality",
     "expand_service_windows",
@@ -33,4 +35,5 @@ __all__ = [
     "summarize_gtfs_stops",
     "token_set",
     "transit_reality_refresh_required",
+    "TripStopTime",
 ]

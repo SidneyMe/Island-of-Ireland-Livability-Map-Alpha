@@ -35,6 +35,7 @@ fn metadata_is_serializable() {
     let created_utc = now_utc_rfc3339().expect("timestamp");
     let meta = GraphMeta {
         format_version: 1,
+        graph_profile: "walk".to_string(),
         extract_fingerprint: Some("abc".to_string()),
         pbf_path: "sample.osm.pbf".to_string(),
         pbf_size: 123,
@@ -60,6 +61,7 @@ fn metadata_json_writes_and_round_trips() {
     let path = dir.path().join("walk_graph.meta.json");
     let meta = GraphMeta {
         format_version: 3,
+        graph_profile: "bike".to_string(),
         extract_fingerprint: Some("extract-fp".to_string()),
         pbf_path: "sample.osm.pbf".to_string(),
         pbf_size: 123,
@@ -81,6 +83,7 @@ fn metadata_json_writes_and_round_trips() {
     let payload = fs::read_to_string(path).expect("read metadata");
     let parsed: GraphMeta = serde_json::from_str(&payload).expect("parse metadata");
     assert_eq!(parsed.format_version, 3);
+    assert_eq!(parsed.graph_profile, "bike");
     assert_eq!(parsed.extract_fingerprint.as_deref(), Some("extract-fp"));
     assert_eq!(parsed.bbox.expect("bbox").min_lon, -10.0);
     assert_eq!(parsed.edge_count, 4);

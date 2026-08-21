@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 use walkgraph::graph::{build_compact_node_index, emit_adjacency_sidecars, emit_edge_sidecar};
 use walkgraph::gtfs::run_gtfs_refresh;
-use walkgraph::pbf::{collect_retained_nodes, parse_bbox, scan_walkable_ways};
+use walkgraph::pbf::{collect_retained_nodes, parse_bbox, scan_reachable_ways, GraphProfile};
 use walkgraph::reachability::run_reachability;
 use walkgraph::serialize::{
     now_utc_rfc3339, prepare_output_dir, write_meta_json, write_node_sidecars, GraphMeta,
@@ -17,6 +17,28 @@ const FORMAT_VERSION: u32 = 3;
 enum ReachabilityOutputMode {
     Counts,
     DecayedUnits,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum BuildGraphProfile {
+    Walk,
+    Bike,
+}
+
+impl BuildGraphProfile {
+    fn as_graph_profile(self) -> GraphProfile {
+        match self {
+            BuildGraphProfile::Walk => GraphProfile::Walk,
+            BuildGraphProfile::Bike => GraphProfile::Bike,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            BuildGraphProfile::Walk => "walk",
+            BuildGraphProfile::Bike => "bike",
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -40,6 +62,8 @@ enum Commands {
         bbox_padding_m: f64,
         #[arg(long)]
         extract_fingerprint: Option<String>,
+        #[arg(long, value_enum, default_value_t = BuildGraphProfile::Walk)]
+        profile: BuildGraphProfile,
     },
     Reachability {
         #[arg(long)]
@@ -117,6 +141,7 @@ fn build_graph(
     bbox: Option<String>,
     bbox_padding_m: f64,
     extract_fingerprint: Option<String>,
+    graph_profile: BuildGraphProfile,
     write_output: bool,
 ) -> Result<GraphMeta, Box<dyn Error>> {
     let started_at = Instant::now();
@@ -124,7 +149,7 @@ fn build_graph(
     let effective_bbox = requested_bbox.map(|bounds| bounds.expand(bbox_padding_m));
 
     eprintln!("pass 1/2: scanning walkable ways");
-    let pass1 = scan_walkable_ways(pbf_path)?;
+    let pass1 = scan_reachable_ways(pbf_path, graph_profile.as_graph_profile())?;
     eprintln!(
         "walkable ways: {} | referenced nodes: {} | raw directed edges: {}",
         pass1.walkable_way_count,
@@ -154,6 +179,7 @@ fn build_graph(
 
         let meta = GraphMeta {
             format_version: FORMAT_VERSION,
+            graph_profile: graph_profile.as_str().to_string(),
             extract_fingerprint,
             pbf_path: pbf_path.display().to_string(),
             pbf_size: metadata.len(),
@@ -189,6 +215,7 @@ fn build_graph(
 
     Ok(GraphMeta {
         format_version: FORMAT_VERSION,
+        graph_profile: graph_profile.as_str().to_string(),
         extract_fingerprint,
         pbf_path: pbf_path.display().to_string(),
         pbf_size: metadata.len(),
@@ -210,8 +237,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             bbox,
             bbox_padding_m,
             extract_fingerprint,
+            profile,
         } => {
-            build_graph(&pbf, &out, bbox, bbox_padding_m, extract_fingerprint, true)?;
+            build_graph(&pbf, &out, bbox, bbox_padding_m, extract_fingerprint, profile, true)?;
         }
         Commands::Reachability {
             graph_dir,
@@ -259,6 +287,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 bbox,
                 bbox_padding_m,
                 extract_fingerprint,
+                BuildGraphProfile::Walk,
                 false,
             )?;
             println!("nodes: {}", meta.node_count);
