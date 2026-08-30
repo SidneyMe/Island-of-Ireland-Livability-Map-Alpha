@@ -683,10 +683,19 @@ def phase_reachability_impl(
     normalize_origin_node_ids,
     precompute_walk_count_matrix_by_origin_node,
     precompute_walk_decayed_units_matrix_by_origin_node,
+    walk_routing_backend: str = "walkgraph",
+    valhalla_settings=None,
+    route_valhalla_reachability=None,
     migrate_legacy_reach_cache: bool = False,
 ):
     if walk_origin_node_ids is None:
         raise ValueError("walk_origin_node_ids is required for walk reachability")
+    if walk_routing_backend not in {"walkgraph", "valhalla"}:
+        raise ValueError(f"Unsupported walk routing backend: {walk_routing_backend!r}")
+    if walk_routing_backend == "valhalla" and (
+        valhalla_settings is None or route_valhalla_reachability is None
+    ):
+        raise ValueError("Valhalla reachability requires settings and a router implementation")
 
     requested_walk_origin_nodes = normalize_origin_node_ids(walk_origin_node_ids)
     tracker.start_phase(
@@ -810,7 +819,108 @@ def phase_reachability_impl(
     cluster_counts_needs_save = not walk_cluster_counts_complete
     effective_units_needs_save = not walk_effective_units_complete
 
-    if missing_origin_nodes:
+    if missing_origin_nodes and walk_routing_backend == "valhalla":
+        routing_started_at = time.perf_counter()
+        checkpointed = {"raw": False, "cluster": False, "effective": False}
+
+        def _checkpoint_save_valhalla(
+            chunk_counts: ReachabilityMatrix,
+            chunk_cluster_counts: ReachabilityMatrix,
+            chunk_effective_units: ReachabilityMatrix,
+        ) -> None:
+            if len(chunk_counts):
+                append_reachability_cache_chunk(
+                    "walk_counts_by_origin_node", cache_dir, chunk_counts
+                )
+                checkpointed["raw"] = True
+            if len(chunk_cluster_counts):
+                append_reachability_cache_chunk(
+                    "walk_cluster_counts_by_origin_node", cache_dir, chunk_cluster_counts
+                )
+                checkpointed["cluster"] = True
+            if len(chunk_effective_units):
+                append_reachability_cache_chunk(
+                    "walk_effective_units_by_origin_node", cache_dir, chunk_effective_units
+                )
+                checkpointed["effective"] = True
+
+        new_counts, new_cluster_counts, new_effective_units = route_valhalla_reachability(
+            walk_graph,
+            walk_nodes_by_category,
+            walk_cluster_nodes_by_category,
+            base_unit_rows,
+            missing_count_nodes=missing_count_nodes,
+            missing_cluster_count_nodes=missing_cluster_count_nodes,
+            missing_effective_nodes=missing_effective_nodes,
+            raw_categories=raw_count_categories,
+            cluster_categories=cluster_count_categories,
+            effective_categories=effective_unit_categories,
+            radius_m=walk_radius_m,
+            half_distances_m=DISTANCE_DECAY_HALF_DISTANCE_M,
+            settings=valhalla_settings,
+            progress_cb=tracker.phase_callback("reachability"),
+            save_chunk_cb=_checkpoint_save_valhalla,
+        )
+        _record_substep(
+            tracker,
+            "reachability",
+            "valhalla_walk_routing",
+            routing_started_at,
+            force_log=True,
+        )
+        if missing_count_nodes:
+            walk_counts_by_node = (
+                _load_checkpointed_reachability_matrix(
+                    "walk_counts_by_origin_node",
+                    cache_dir,
+                    categories=raw_count_categories,
+                    value_kind="counts",
+                    expected_origin_nodes=missing_count_nodes,
+                )
+                if checkpointed["raw"]
+                else merge_reachability_matrices(
+                    [walk_counts_by_node, new_counts],
+                    categories=raw_count_categories,
+                    value_kind="counts",
+                )
+            )
+            counts_needs_save = True
+        if missing_cluster_count_nodes:
+            walk_cluster_counts_by_node = (
+                _load_checkpointed_reachability_matrix(
+                    "walk_cluster_counts_by_origin_node",
+                    cache_dir,
+                    categories=cluster_count_categories,
+                    value_kind="counts",
+                    expected_origin_nodes=missing_cluster_count_nodes,
+                )
+                if checkpointed["cluster"]
+                else merge_reachability_matrices(
+                    [walk_cluster_counts_by_node, new_cluster_counts],
+                    categories=cluster_count_categories,
+                    value_kind="counts",
+                )
+            )
+            cluster_counts_needs_save = True
+        if missing_effective_nodes:
+            walk_effective_units_by_node = (
+                _load_checkpointed_reachability_matrix(
+                    "walk_effective_units_by_origin_node",
+                    cache_dir,
+                    categories=effective_unit_categories,
+                    value_kind="effective_units",
+                    expected_origin_nodes=missing_effective_nodes,
+                )
+                if checkpointed["effective"]
+                else merge_reachability_matrices(
+                    [walk_effective_units_by_node, new_effective_units],
+                    categories=effective_unit_categories,
+                    value_kind="effective_units",
+                )
+            )
+            effective_units_needs_save = True
+
+    if missing_origin_nodes and walk_routing_backend == "walkgraph":
         counts_cache_save_seconds = 0.0
         cluster_counts_cache_save_seconds = 0.0
         effective_units_cache_save_seconds = 0.0

@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-08-01. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-08-24. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -51,6 +51,8 @@
 - **PMTiles bake**: `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py`, `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py`
 - **Runtime HTTP server**: `serve_from_db.py`
 - **Runtime route helper**: `serve_routes.py`
+- **Optional Valhalla pedestrian reachability**: `precompute/valhalla_reachability.py` uses canonical walkgraph snapped nodes with EPSG:2157 STRtree prefiltering and `/sources_to_targets`; `valhalla/docker-compose.yml` remains the local service sandbox.
+- **Valhalla benchmark helper**: `scripts/bench_valhalla.py`, `scripts/win/bench_valhalla.ps1`
 - **Runtime request logging**: `serve_from_db.py` emits compact route-aware GET/HEAD logs with status, duration, response size, and disconnect hints.
 - **Land-use context overlay**: `db_postgis/reads.py`, `precompute/_rows.py`, `precompute/bake_pmtiles.py`, `pmtiles_bake_worker.py`, `frontend/src/landuse_filters.js`; frontend initial style construction omits the `filter` property when all land-use classes are selected because MapLibre rejects `filter: null` in layer JSON.
 - **Alembic schema-hardening migration**: `db_postgis/migrations/versions/20260617_000021_add_candidate_key_constraints.py`
@@ -111,6 +113,12 @@
 - Local Windows PowerShell CI runner for pre-push checks. (Confirmed)
 - Runs the practical developer-facing sequence: command availability checks for `python`, `npm.cmd`, and `git`; `python -m pytest -q`; `python -m alembic current`; `python -m alembic upgrade head`; `python scripts/db_integrity_check.py`; `python main.py precompute --profile dev --explain`; `npm.cmd test --prefix frontend`; `npm.cmd run build --prefix frontend`; `git diff --exit-code -- static/dist`; and `git diff --check`. (Confirmed)
 - Stops on the first failure, prints section headers, and reports elapsed time per step. (Confirmed)
+
+### `scripts/bench_valhalla.py`
+
+- Standalone local benchmark for the Valhalla `sources_to_targets` endpoint. (Confirmed, LOC: 309)
+- Avoids dependence on `build_manifest` / `grid_walk`: prepares routeable points by snapping jittered samples around major Ireland / NI city centres through `/locate`, builds one-source / multi-target pedestrian matrix jobs, then measures steady-state request throughput, route throughput, and latency percentiles. (Confirmed)
+- Intended Windows entrypoint is `scripts/win/bench_valhalla.ps1`, which defaults to `8` workers and project `.venv` Python when available. (Confirmed)
 
 ### `scripts/sanity_check.py`
 
@@ -456,8 +464,7 @@ Notes:
 ### `db_postgis/migrations/versions/`
 
 - Purpose: canonical schema history. (Confirmed)
-- Latest migration: `20260424_000012_noise_polygons.py`
-- Previous notable migration: `20260423_000010_transport_frequency_scoring.py`
+- Latest migration: `20260708_000023_transport_mode_tiering.py`
 
 ### `overture/loader.py`
 
@@ -618,8 +625,15 @@ tests/test_server_behavior.py
 | `GTFS_LOOKAHEAD_DAYS` | Transit lookahead window | `14` |
 | `GTFS_AS_OF_DATE` | Override analysis date | unset -> today in Europe/Dublin |
 | `WALKGRAPH_BIN` | Explicit walkgraph binary path | auto-detected |
+| `WALK_ROUTING_BACKEND` | Pedestrian reachability backend | `"walkgraph"`; `"valhalla"` opt-in |
+| `VALHALLA_URL` | Local Valhalla base URL | `"http://127.0.0.1:8002"` |
+| `VALHALLA_EXPECTED_VERSION` | Exact `/status` version required before Valhalla routing | `"3.8.3"` |
+| `VALHALLA_WORKERS` | Bounded Valhalla matrix-request concurrency | `8` |
+| `VALHALLA_TIMEOUT_S` | Per-request Valhalla timeout | `30.0` |
+| `VALHALLA_MAX_TARGETS_PER_REQUEST` | Matrix target batch size | `100` |
 | `LIVABILITY_SURFACE_THREADS` | Fine-surface worker thread count | unset -> all CPUs |
 | `LIVABILITY_BAKE_WORKERS` | PMTiles bake worker count | `min(12, cpu_count())` |
+| `scripts/win/bench_valhalla.ps1 -Workers` | Client concurrency for Valhalla matrix benchmark | `8` |
 | `LIVABILITY_FINE_RASTER_SURFACE` | Enable inspect-backed fine surface caches and legacy PNG endpoint; main map rendering now uses vector PMTiles | `"1"` |
 | `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` | Skip opening step for very large coastal components | `1_000_000_000.0` |
 | `OSM2PGSQL_BIN` | osm2pgsql binary path | `"osm2pgsql"` |
@@ -796,7 +810,7 @@ Local disk hotspots to remember:
 | Conflict class | Amenity merge status: `osm_only`, `overture_only`, `source_agreement`, `source_conflict`; GTFS-direct transport rows use `gtfs_direct` |
 | Geo hash | Geometry/import-level cache hash used for study area, walkgraph, fine surface shell, and geometry-only grid/snap caches |
 | Surface shell hash | Fine-surface shell identity derived from `geo_hash` plus shell/grid schema and geometry parameters |
-| Reach hash | Reachability-level hash including geo hash, transit reality, tags, merge version, and Overture signature |
+| Reach hash | Reachability-level hash including geo hash, transit reality, tags, merge version, and Overture signature; the default walkgraph input remains unchanged, while opt-in Valhalla additionally hashes backend, integration algorithm version, and expected Valhalla version (never local URL/operational limits). |
 | Score hash | Scoring-level hash including reach hash, caps, tier-unit tables, and resolution tiers; owns scored walk cells and fine surface score arrays |
 | Build key | Build-scoped identifier used on published PostGIS rows |
 | Build profile | `full`, `dev`, or `test` |

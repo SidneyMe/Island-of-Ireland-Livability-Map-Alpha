@@ -887,3 +887,50 @@ class WorkflowNoiseAutoBuildsTests(TestCase):
         plan = plan_noise_artifact(self._noise_context(noise_mode="legacy"))
         self.assertEqual(plan.action, "legacy")
         self.assertIn("slow debug path", plan.reason)
+
+
+class ValhallaConfigTests(TestCase):
+    def test_walkgraph_is_default_and_legacy_reach_hash_input_is_unchanged(self) -> None:
+        self.assertEqual(config.WALK_ROUTING_BACKEND, "walkgraph")
+        captured: list[dict] = []
+        original_hash_dict = config.hash_dict
+
+        def capture_hash(payload: dict) -> str:
+            captured.append(dict(payload))
+            return original_hash_dict(payload)
+
+        with (
+            mock.patch.object(config, "WALK_ROUTING_BACKEND", "walkgraph"),
+            mock.patch.object(config, "hash_dict", side_effect=capture_hash),
+        ):
+            config.build_config_hashes()
+            config.build_hashes_for_import("import-fingerprint-123")
+
+        reach_payloads = [
+            payload for payload in captured if "distance_decay_half_distance_m" in payload
+        ]
+        self.assertGreaterEqual(len(reach_payloads), 2)
+        for payload in reach_payloads:
+            self.assertNotIn("routing_backend", payload)
+            self.assertNotIn("valhalla_reachability_algo_version", payload)
+            self.assertNotIn("expected_valhalla_version", payload)
+
+    def test_valhalla_changes_reach_identity_not_geometry_or_operational_hashes(self) -> None:
+        with mock.patch.object(config, "WALK_ROUTING_BACKEND", "walkgraph"):
+            walkgraph = config.build_hashes_for_import("import-fingerprint-123")
+        with mock.patch.object(config, "WALK_ROUTING_BACKEND", "valhalla"):
+            valhalla = config.build_hashes_for_import("import-fingerprint-123")
+        with (
+            mock.patch.object(config, "WALK_ROUTING_BACKEND", "valhalla"),
+            mock.patch.object(config, "VALHALLA_URL", "http://another-host:9000"),
+            mock.patch.object(config, "VALHALLA_WORKERS", 99),
+            mock.patch.object(config, "VALHALLA_TIMEOUT_S", 1.0),
+            mock.patch.object(config, "VALHALLA_MAX_TARGETS_PER_REQUEST", 1),
+        ):
+            operational_change = config.build_hashes_for_import("import-fingerprint-123")
+
+        self.assertEqual(walkgraph.geo_hash, valhalla.geo_hash)
+        self.assertEqual(walkgraph.surface_shell_hash, valhalla.surface_shell_hash)
+        self.assertNotEqual(walkgraph.reach_hash, valhalla.reach_hash)
+        self.assertNotEqual(walkgraph.score_hash, valhalla.score_hash)
+        self.assertEqual(valhalla.reach_hash, operational_change.reach_hash)

@@ -46,7 +46,6 @@ NI_BOUNDARY_LAYER = None
 MAIN_ISLAND_BOUNDARY_PATH = BASE_DIR / "ireland_main_island_shp" / "ireland_main_island.shp"
 MAIN_ISLAND_BOUNDARY_LAYER = None
 
-
 OSM_EXTRACT_NAME = "ireland-and-northern-ireland-latest.osm.pbf"
 OSM_EXTRACT_PATH = OSM_DIR / OSM_EXTRACT_NAME
 OSM_IMPORT_SCHEMA = "osm_raw"
@@ -187,6 +186,41 @@ def _default_walkgraph_bin() -> str:
 
 WALKGRAPH_BIN = os.getenv("WALKGRAPH_BIN", _default_walkgraph_bin())
 WALKGRAPH_FORMAT_VERSION = 3
+
+
+def _walk_routing_backend_env() -> str:
+    value = (os.getenv("WALK_ROUTING_BACKEND") or "walkgraph").strip().lower()
+    if value not in {"walkgraph", "valhalla"}:
+        raise RuntimeError(
+            "WALK_ROUTING_BACKEND must be 'walkgraph' or 'valhalla'; "
+            f"got {value!r}."
+        )
+    return value
+
+
+def _valhalla_url_env() -> str:
+    value = (os.getenv("VALHALLA_URL") or "http://127.0.0.1:8002").strip().rstrip("/")
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError(
+            "VALHALLA_URL must be an absolute http(s) URL; "
+            f"got {value!r}."
+        )
+    return value
+
+
+WALK_ROUTING_BACKEND = _walk_routing_backend_env()
+VALHALLA_URL = _valhalla_url_env()
+VALHALLA_EXPECTED_VERSION = (os.getenv("VALHALLA_EXPECTED_VERSION") or "3.8.3").strip()
+if not VALHALLA_EXPECTED_VERSION:
+    raise RuntimeError("VALHALLA_EXPECTED_VERSION must not be empty.")
+VALHALLA_WORKERS = _positive_int_env("VALHALLA_WORKERS", 8)
+VALHALLA_TIMEOUT_S = _positive_float_env("VALHALLA_TIMEOUT_S", 30.0)
+VALHALLA_MAX_TARGETS_PER_REQUEST = _positive_int_env(
+    "VALHALLA_MAX_TARGETS_PER_REQUEST", 100
+)
+VALHALLA_REACHABILITY_ALGO_VERSION = 1
+
 LIVABILITY_SURFACE_THREADS = _optional_positive_int_env("LIVABILITY_SURFACE_THREADS")
 GTFS_ANALYSIS_WINDOW_DAYS = _positive_int_env("GTFS_ANALYSIS_WINDOW_DAYS", 30)
 GTFS_SERVICE_DESERT_WINDOW_DAYS = _positive_int_env("GTFS_SERVICE_DESERT_WINDOW_DAYS", 7)
@@ -217,6 +251,7 @@ GTFS_FRIDAY_EVENING_END_HOUR = 2
 
 TARGET_CRS = "EPSG:2157"
 DISPLAY_CRS = "EPSG:4326"
+TARGET_CRS_EPSG = int(TARGET_CRS.split(":", 1)[1])
 
 TO_WGS84 = Transformer.from_crs(TARGET_CRS, DISPLAY_CRS, always_xy=True).transform
 TO_TARGET = Transformer.from_crs(DISPLAY_CRS, TARGET_CRS, always_xy=True).transform
@@ -1141,6 +1176,14 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "overture_dataset_signature": overture_signature,
         "overture_release": overture_info.get("last_release"),
     }
+    if WALK_ROUTING_BACKEND == "valhalla":
+        reach_params.update(
+            {
+                "routing_backend": "valhalla",
+                "valhalla_reachability_algo_version": VALHALLA_REACHABILITY_ALGO_VERSION,
+                "expected_valhalla_version": VALHALLA_EXPECTED_VERSION,
+            }
+        )
     reach_hash = hash_dict(reach_params)
 
     surface_shell_hash = surface_shell_hash_for_geo(geo_hash)
@@ -1325,21 +1368,28 @@ def build_hashes_for_import(
             "import_fingerprint": import_fingerprint,
         }
     )
-    reach_hash = hash_dict(
-        {
-            "geo_hash": geo_hash,
-            "transit_hash": base_hashes.transit_hash,
-            "transit_reality_fingerprint": transit_reality_fingerprint,
-            "tags": TAGS,
-            "walk_radius_m": WALK_RADIUS_M,
-            "variety_cluster_radius_m": VARIETY_CLUSTER_RADIUS_M,
-            "distance_decay_half_distance_m": DISTANCE_DECAY_HALF_DISTANCE_M,
-            "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
-            "overture_category_map_signature": overture_category_signature,
-            "overture_dataset_signature": overture_signature,
-            "overture_release": overture_info.get("last_release"),
-        }
-    )
+    reach_params = {
+        "geo_hash": geo_hash,
+        "transit_hash": base_hashes.transit_hash,
+        "transit_reality_fingerprint": transit_reality_fingerprint,
+        "tags": TAGS,
+        "walk_radius_m": WALK_RADIUS_M,
+        "variety_cluster_radius_m": VARIETY_CLUSTER_RADIUS_M,
+        "distance_decay_half_distance_m": DISTANCE_DECAY_HALF_DISTANCE_M,
+        "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
+        "overture_category_map_signature": overture_category_signature,
+        "overture_dataset_signature": overture_signature,
+        "overture_release": overture_info.get("last_release"),
+    }
+    if WALK_ROUTING_BACKEND == "valhalla":
+        reach_params.update(
+            {
+                "routing_backend": "valhalla",
+                "valhalla_reachability_algo_version": VALHALLA_REACHABILITY_ALGO_VERSION,
+                "expected_valhalla_version": VALHALLA_EXPECTED_VERSION,
+            }
+        )
+    reach_hash = hash_dict(reach_params)
     surface_shell_hash = surface_shell_hash_for_geo(geo_hash)
     score_hash = hash_dict(
         {

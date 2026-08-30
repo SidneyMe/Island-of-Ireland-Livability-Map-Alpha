@@ -10,7 +10,13 @@ from config import (
     LIVABILITY_SURFACE_THREADS,
     MIGRATE_LEGACY_REACH_CACHE,
     TAGS,
+    VALHALLA_EXPECTED_VERSION,
+    VALHALLA_MAX_TARGETS_PER_REQUEST,
+    VALHALLA_TIMEOUT_S,
+    VALHALLA_URL,
+    VALHALLA_WORKERS,
     WALK_RADIUS_M,
+    WALK_ROUTING_BACKEND,
     WALKGRAPH_BIN,
     current_normalization_scope_hash,
     normalize_build_profile,
@@ -47,6 +53,7 @@ from . import surface as _surface
 from . import tiers as _tiers
 from . import workflow as _workflow
 from .bake_pmtiles import bake_pmtiles as _bake_pmtiles
+from .valhalla_reachability import ValhallaSettings, route_valhalla_reachability
 from noise_artifacts.bake import bake_noise_pmtiles as _bake_noise_pmtiles
 from ._state import _STATE, _active_fine_surface_enabled, _elapsed
 from ._cache_wrappers import (
@@ -144,6 +151,15 @@ def phase_reachability(
         normalize_origin_node_ids=normalize_origin_node_ids,
         precompute_walk_count_matrix_by_origin_node=precompute_walk_count_matrix_by_origin_node,
         precompute_walk_decayed_units_matrix_by_origin_node=precompute_walk_decayed_units_matrix_by_origin_node,
+        walk_routing_backend=WALK_ROUTING_BACKEND,
+        valhalla_settings=ValhallaSettings(
+            url=VALHALLA_URL,
+            expected_version=VALHALLA_EXPECTED_VERSION,
+            workers=VALHALLA_WORKERS,
+            timeout_s=VALHALLA_TIMEOUT_S,
+            max_targets_per_request=VALHALLA_MAX_TARGETS_PER_REQUEST,
+        ),
+        route_valhalla_reachability=route_valhalla_reachability,
         migrate_legacy_reach_cache=MIGRATE_LEGACY_REACH_CACHE,
     )
 

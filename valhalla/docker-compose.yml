@@ -1,0 +1,32 @@
+services:
+  valhalla:
+    image: ghcr.io/valhalla/valhalla-scripted:3.8.3
+    container_name: livability-valhalla
+
+    restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:8002:8002"
+
+    volumes:
+      - type: bind
+        source: ./custom_files
+        target: /custom_files
+
+    environment:
+      tile_urls: ""
+
+      server_threads: "4"
+      serve_tiles: "True"
+
+      use_tiles_ignore_pbf: "False"
+      tileset_name: "valhalla_tiles"
+
+      build_elevation: "False"
+      build_admins: "False"
+      build_time_zones: "False"
+      build_transit: "False"
+
+      build_tar: "True"
+      force_rebuild: "False"
+      update_existing_config: "True"

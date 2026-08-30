@@ -82,7 +82,6 @@ def _add_precompute_noise_arguments(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Island of Ireland livability map precompute and local web app entrypoint.",
