@@ -1128,6 +1128,17 @@ class IngestSqlTests(TestCase):
 class MainModuleTests(TestCase):
     """Tests for noise_artifacts.__main__ CLI helpers."""
 
+    def test_removed_standalone_bake_flags_fail_before_build(self) -> None:
+        import noise_artifacts.__main__ as _main
+        from unittest.mock import patch
+
+        for removed_flag in ("--bake-pmtiles", "--output-dir"):
+            with self.subTest(removed_flag=removed_flag):
+                with patch("noise_artifacts.__main__._run_build") as run_build:
+                    with self.assertRaises(SystemExit):
+                        _main.main([removed_flag])
+                run_build.assert_not_called()
+
     def test_default_data_dir_comes_from_noise_loader_not_config(self) -> None:
         """FIX 1: default data_dir must use noise.loader.NOISE_DATA_DIR, not config.NOISE_DATA_DIR."""
         import inspect

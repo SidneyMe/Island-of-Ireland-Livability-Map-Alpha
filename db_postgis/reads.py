@@ -61,7 +61,7 @@ _NON_OPERATIONAL_TAG_PREFIXES = (
 _CATEGORY_STATE_TAG_KEYS = frozenset(
     {"amenity", "shop", "healthcare", "leisure", "landuse", "natural", "tourism"}
 )
-_AMENITY_CATEGORY_VALUES = frozenset({"shops", "transport", "healthcare", "parks"})
+_AMENITY_CATEGORY_VALUES = frozenset({"shops", "healthcare", "parks"})
 _LANDUSE_CONTEXT_VALUES = frozenset(
     {"residential", "commercial", "industrial", "retail", "farmland", "forest"}
 )
@@ -82,39 +82,6 @@ def _is_non_operational_amenity(tags_json: dict[str, Any]) -> bool:
             if normalized_value:
                 return True
     return False
-
-
-def load_osm_transport_features(
-    engine: Engine,
-    import_fingerprint: str,
-    study_area_wgs84,
-) -> list[dict[str, Any]]:
-    root = root_module()
-    study_area = root.from_shape(study_area_wgs84, srid=4326)
-    with engine.connect() as connection:
-        rows = connection.execute(
-            select(
-                features.c.name,
-                features.c.osm_type,
-                features.c.osm_id,
-                func.ST_PointOnSurface(features.c.geom).label("point_geom"),
-                features.c.tags_json,
-            )
-            .where(features.c.import_fingerprint == import_fingerprint)
-            .where(features.c.category == "transport")
-            .where(func.ST_Intersects(features.c.geom, study_area))
-            .order_by(features.c.osm_type, features.c.osm_id)
-        ).mappings().all()
-
-    return [
-        {
-            "source_ref": f"{row['osm_type']}/{row['osm_id']}",
-            "name": row["name"],
-            "geom": root.to_shape(row["point_geom"]),
-            "tags_json": dict(row.get("tags_json") or {}),
-        }
-        for row in rows
-    ]
 
 
 def load_transport_reality_rows_for_scoring(

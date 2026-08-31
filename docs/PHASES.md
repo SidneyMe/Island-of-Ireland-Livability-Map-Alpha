@@ -135,7 +135,7 @@ Everything in this phase is either a scoring prerequisite or a cleanup that stop
 
 ## Phase 1 — Service reality check
 
-This phase is implemented as the GTFS-first transport reality layer. It replaced raw transport-stop presence with scheduled NTA and Translink stop reality, excludes school-only public scoring, preserves diagnostic stop states, and gives the scorer a defensible baseline before frequency weighting.
+This phase is implemented as the GTFS-only transport reality layer. It replaced raw transport-stop presence with scheduled NTA and Translink stop reality, excludes school-only public scoring, preserves diagnostic stop states, and gives the scorer a defensible baseline before frequency weighting. Missing or unavailable GTFS produces zero transport signal; OSM stops are not a fallback.
 
 Phase 1's outputs are now used directly by the frequency-based transport scorer.
 
@@ -278,7 +278,7 @@ The original v1 model counted features by presence. A corner shop scored the sam
 
 - Extend the Rust walkgraph helper to emit per-mode reach polygons (walk at 500 m / 1 km / 1.5 km, cycle at 3 km / 5 km).
 - Score each mode separately and combine with weighted blending.
-- Transit-chained reach requires the current GTFS frequency data plus a mode-tiering design before it is feasible.
+- Transit-chained reach requires the current GTFS frequency data plus a mode-tiering design before it is feasible. The earlier speculative standalone helper was removed pending that integrated design.
 
 **Open questions:**
 

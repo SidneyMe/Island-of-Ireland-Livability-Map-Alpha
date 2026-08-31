@@ -53,7 +53,7 @@ TRANSIT_RAW_SCHEMA = "transit_raw"
 TRANSIT_DERIVED_SCHEMA = "transit_derived"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
 OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
-IMPORTER_CONFIG_VERSION = "2026-07-15-road-proximity-1"
+IMPORTER_CONFIG_VERSION = "2026-08-31-gtfs-only-transport-1"
 
 
 def _osm2pgsql_flat_nodes_path() -> str:
@@ -450,7 +450,7 @@ BAKE_PMTILES_WORKERS = _positive_int_env(
 )
 
 
-SCORING_MODEL_VERSION = "v2-mode-aware-dual-2026-08-14"
+SCORING_MODEL_VERSION = "v3-gtfs-only-transport-2026-08-31"
 MODE_AWARE_SCORING_ENABLED = True
 MODE_AWARE_SCORE_WEIGHTS = {"walk": 0.50, "bike": 0.25, "transit": 0.25}
 
@@ -565,10 +565,7 @@ DEFAULT_SERVER_PORT = 8000
 
 TAGS = {
     "shops": {"shop": True},
-    "transport": {
-        "highway": "bus_stop",
-        "railway": ["station", "tram_stop", "halt"],
-    },
+    "transport": {"source": "gtfs_direct"},  # GTFS-only; no OSM selectors
     "healthcare": {
         "amenity": ["pharmacy", "hospital", "clinic", "doctors", "dentist", "health_centre"],
     },

@@ -4,7 +4,6 @@ Standalone noise artifact CLI.
 Usage:
     python -m noise_artifacts [OPTIONS]
     python -m noise_artifacts compare --artifact-hash HASH --build-key KEY
-    python -m noise_artifacts --bake-pmtiles --output-dir DIR  (Phase 8B stub)
 
 The normal livability build must NOT call this module.
 This is the only entry point that computes source hashes and calls noise.loader.
@@ -51,10 +50,6 @@ def main(argv: list[str] | None = None) -> int:
                          help="Build profile (full|dev|test)")
     build_p.add_argument("--data-dir", default=None,
                          help="Path to noise_datasets/ directory")
-    build_p.add_argument("--bake-pmtiles", action="store_true",
-                         help="Also bake standalone PMTiles (Phase 8B stub)")
-    build_p.add_argument("--output-dir", default=None,
-                         help="Output directory for PMTiles (required with --bake-pmtiles)")
     build_p.add_argument("--debug", action="store_true",
                          help="Print full tracebacks on error")
 
@@ -114,14 +109,6 @@ def _run_build(args) -> int:
             f"noise artifact built: resolved_hash={result['artifact_hash']} "
             f"rows={result.get('row_count', 0)}"
         )
-
-    if getattr(args, "bake_pmtiles", False):
-        print(
-            "Standalone noise artifact PMTiles bake is not yet implemented. "
-            "Use `python main.py precompute` to bake livability PMTiles from noise_polygons.",
-            file=__import__("sys").stderr,
-        )
-        return 1
 
     return 0
 

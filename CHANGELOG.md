@@ -4,6 +4,27 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-08-31 - GTFS-only transport scoring cleanup
+
+### Changed
+
+- Made GTFS reality rows the exclusive source of transport-stop scoring.
+- Stopped importing OSM bus and railway stops into `osm_raw.features` and stopped reading any older OSM transport rows that remain from a previous import.
+- Invalidated importer, reachability, scoring, and build caches through updated importer/scoring versions and GTFS-only transport source metadata.
+
+### Removed
+
+- Removed the unused transfer-reach helper, dead GTFS match-radius example, no-op normalized-network cleanup API, and unsupported standalone noise PMTiles CLI flags.
+
+### Notes
+
+- A missing, broken, omitted, or `transit-unavailable` GTFS reality produces zero transport signal. OSM stops are intentionally not used as a fallback.
+- Existing published builds remain available until a replacement import and precompute completes; no schema migration is required.
+
+### Scoring logic
+
+- Fixed transport double-counting where colocated OSM and GTFS stops previously contributed both a default OSM stop unit and GTFS frequency units. Transport scores can decrease in well-mapped areas, especially Dublin, because the duplicate OSM contribution has been removed.
+
 ## 2026-05-31 - Exact main-island coastline for PMTiles geometry
 
 ### Fixed

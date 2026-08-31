@@ -35,12 +35,6 @@ local landuse_values = {
     forest = true,
 }
 
-local transport_rail_values = {
-    station = true,
-    tram_stop = true,
-    halt = true,
-}
-
 local road_values = {
     motorway = true,
     trunk = true,
@@ -50,12 +44,6 @@ local road_values = {
 local function feature_category(tags)
     if tags.shop then
         return 'shops'
-    end
-    if tags.highway == 'bus_stop' then
-        return 'transport'
-    end
-    if tags.railway and transport_rail_values[tags.railway] then
-        return 'transport'
     end
     if tags.amenity and healthcare_values[tags.amenity] then
         return 'healthcare'

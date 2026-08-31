@@ -178,6 +178,54 @@ class ConfigHashTests(TestCase):
         self.assertEqual(previous_hashes.surface_shell_hash, current_hashes.surface_shell_hash)
         self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
 
+    def test_importer_config_version_changes_importer_hash_and_fingerprint(self) -> None:
+        source_path = Path("osm/sample.osm.pbf")
+        with (
+            mock.patch.object(config, "validate_local_osm_extract", return_value=source_path),
+            mock.patch.object(config, "extract_fingerprint", return_value="extract-fingerprint"),
+            mock.patch.object(config, "IMPORTER_CONFIG_VERSION", "old-importer"),
+        ):
+            previous_state = config.build_source_state("osm2pgsql 2.1.0", source_path)
+        with (
+            mock.patch.object(config, "validate_local_osm_extract", return_value=source_path),
+            mock.patch.object(config, "extract_fingerprint", return_value="extract-fingerprint"),
+            mock.patch.object(config, "IMPORTER_CONFIG_VERSION", "new-importer"),
+        ):
+            current_state = config.build_source_state("osm2pgsql 2.1.0", source_path)
+
+        self.assertNotEqual(previous_state.importer_config_hash, current_state.importer_config_hash)
+        self.assertNotEqual(previous_state.import_fingerprint, current_state.import_fingerprint)
+
+    def test_scoring_model_version_invalidates_score_config_and_build_hashes(self) -> None:
+        with mock.patch.object(config, "SCORING_MODEL_VERSION", "old-scoring"):
+            previous_hashes = config.build_config_hashes()
+            previous_build = config.build_hashes_for_import("import-fingerprint-123")
+        with mock.patch.object(config, "SCORING_MODEL_VERSION", "new-scoring"):
+            current_hashes = config.build_config_hashes()
+            current_build = config.build_hashes_for_import("import-fingerprint-123")
+
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+        self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
+        self.assertNotEqual(previous_build.score_hash, current_build.score_hash)
+        self.assertNotEqual(previous_build.build_key, current_build.build_key)
+
+    def test_transport_source_metadata_invalidates_reach_config_and_build_hashes(self) -> None:
+        legacy_tags = {**config.TAGS, "transport": {"highway": "bus_stop"}}
+        gtfs_tags = {**config.TAGS, "transport": {"source": "gtfs_direct"}}
+        with mock.patch.object(config, "TAGS", legacy_tags):
+            previous_hashes = config.build_config_hashes()
+            previous_build = config.build_hashes_for_import("import-fingerprint-123")
+        with mock.patch.object(config, "TAGS", gtfs_tags):
+            current_hashes = config.build_config_hashes()
+            current_build = config.build_hashes_for_import("import-fingerprint-123")
+
+        self.assertNotEqual(previous_hashes.reach_hash, current_hashes.reach_hash)
+        self.assertNotEqual(previous_hashes.score_hash, current_hashes.score_hash)
+        self.assertNotEqual(previous_hashes.config_hash, current_hashes.config_hash)
+        self.assertNotEqual(previous_build.reach_hash, current_build.reach_hash)
+        self.assertNotEqual(previous_build.score_hash, current_build.score_hash)
+        self.assertNotEqual(previous_build.build_key, current_build.build_key)
+
     def test_transit_reality_change_reuses_geo_surface_shell_hash(self) -> None:
         previous_hashes = config.build_hashes_for_import(
             "import-fingerprint-123",
@@ -303,6 +351,10 @@ class ConfigHashTests(TestCase):
     def test_garden_is_not_configured_as_park_source(self) -> None:
         self.assertNotIn("garden", config.TAGS["parks"]["leisure"])
         self.assertNotIn("garden", config.OVERTURE_PARK_NEIGHBOURHOOD_VALUES)
+
+    def test_transport_category_is_gtfs_only(self) -> None:
+        self.assertEqual(config.TAGS["transport"], {"source": "gtfs_direct"})
+        self.assertNotIn("bus_stop", str(config.TAGS["transport"]))
 
 
 class SurfaceResolutionTests(TestCase):

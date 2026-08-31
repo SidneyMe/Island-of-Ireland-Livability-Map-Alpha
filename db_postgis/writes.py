@@ -82,10 +82,6 @@ def clear_normalized_import_artifacts(engine: Engine, import_fingerprint: str) -
     clear_import_artifacts(engine, import_fingerprint)
 
 
-def clear_normalized_network_rows(engine: Engine, import_fingerprint: str) -> None:
-    del engine, import_fingerprint
-
-
 def _copy_stops_csv_into_table(
     connection: Connection,
     *,

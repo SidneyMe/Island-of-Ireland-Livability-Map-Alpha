@@ -5,7 +5,6 @@ from unittest import TestCase, mock
 import config
 from precompute.grid import score_cell
 from precompute.mode_aware import MODE_AWARE_KEY
-from transit.chained_reach import TripStopTime, derive_transfer_stop_reach
 
 
 class ModeAwareScoringTests(TestCase):
@@ -33,40 +32,3 @@ class ModeAwareScoringTests(TestCase):
 
         self.assertEqual(previous.surface_shell_hash, current.surface_shell_hash)
         self.assertNotEqual(previous.score_hash, current.score_hash)
-
-
-class TransitChainedReachTests(TestCase):
-    def test_direct_and_one_transfer_reach_are_derived(self) -> None:
-        rows = [
-            TripStopTime("T1", "A", 0, 0, 1, quality=1.0),
-            TripStopTime("T1", "B", 600, 660, 2, quality=1.0),
-            TripStopTime("T2", "B", 900, 900, 1, quality=0.5),
-            TripStopTime("T2", "C", 1_500, 1_500, 2, quality=0.5),
-        ]
-
-        reach = derive_transfer_stop_reach(
-            rows,
-            max_transfer_count=1,
-            max_wait_seconds=300,
-            max_travel_seconds=2_000,
-        )
-
-        destinations = {entry.destination_stop_id: entry for entry in reach["A"]}
-        self.assertEqual(destinations["B"].transfer_count, 0)
-        self.assertEqual(destinations["C"].transfer_count, 1)
-        self.assertLess(destinations["C"].quality, destinations["B"].quality)
-
-    def test_non_public_rows_are_excluded(self) -> None:
-        rows = [
-            TripStopTime("SCHOOL", "A", 0, 0, 1, public=False),
-            TripStopTime("SCHOOL", "B", 600, 600, 2, public=False),
-        ]
-
-        reach = derive_transfer_stop_reach(
-            rows,
-            max_transfer_count=1,
-            max_wait_seconds=300,
-            max_travel_seconds=2_000,
-        )
-
-        self.assertEqual(reach, {})

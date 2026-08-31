@@ -707,6 +707,68 @@ class DbPostgisImportStateTests(TestCase):
 
 
 class DbReadTests(TestCase):
+    def test_osm_amenity_query_excludes_transport_category(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execution_options.return_value = connection
+        connection.execute.return_value.yield_per.return_value.mappings.return_value = []
+        root = SimpleNamespace(from_shape=mock.Mock(return_value="study-area"))
+
+        with mock.patch.object(db_reads, "root_module", return_value=root):
+            rows = db_postgis.load_source_amenity_rows(
+                engine,
+                "import-fingerprint",
+                mock.sentinel.study_area_wgs84,
+            )
+
+        statement = connection.execute.call_args.args[0]
+        category_values = next(
+            value
+            for value in statement.compile().params.values()
+            if isinstance(value, (list, tuple, set, frozenset))
+            and set(value) == {"shops", "healthcare", "parks"}
+        )
+        self.assertEqual(set(category_values), {"shops", "healthcare", "parks"})
+        self.assertNotIn("transport", category_values)
+        self.assertEqual(rows, [])
+
+    def test_source_amenities_without_transit_fingerprint_have_no_transport_rows(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execution_options.return_value = connection
+        connection.execute.return_value.yield_per.return_value.mappings.return_value = []
+        root = SimpleNamespace(from_shape=mock.Mock(return_value="study-area"))
+
+        with (
+            mock.patch.object(db_reads, "root_module", return_value=root),
+            mock.patch.object(db_reads, "load_transport_reality_rows_for_scoring") as load_transit,
+        ):
+            rows = db_postgis.load_source_amenity_rows(
+                engine,
+                "import-fingerprint",
+                mock.sentinel.study_area_wgs84,
+            )
+
+        self.assertEqual(rows, [])
+        load_transit.assert_not_called()
+
+    def test_transit_unavailable_fingerprint_yields_no_transport_rows(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execute.return_value.mappings.return_value.all.return_value = []
+        root = SimpleNamespace(from_shape=mock.Mock(return_value="study-area"))
+
+        with mock.patch.object(db_reads, "root_module", return_value=root):
+            rows = db_postgis.load_transport_reality_rows_for_scoring(
+                engine,
+                "transit-unavailable",
+                mock.sentinel.study_area_wgs84,
+            )
+
+        statement = connection.execute.call_args.args[0]
+        self.assertIn("transit-unavailable", statement.compile().params.values())
+        self.assertEqual(rows, [])
+
     def test_load_source_amenity_rows_preserves_polygon_park_area(self) -> None:
         engine = mock.MagicMock()
         connection = engine.connect.return_value.__enter__.return_value
@@ -1064,6 +1126,10 @@ class TextCleanupTests(TestCase):
         text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")
         self.assertIn("local park_values = {", text)
         self.assertNotIn("garden = true", text)
+
+    def test_lua_does_not_import_osm_transport_features(self) -> None:
+        text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")
+        self.assertNotIn("transport", text)
 
     def test_schema_no_drive_or_network_tables(self) -> None:
         text = Path("schema.sql").read_text(encoding="utf-8")

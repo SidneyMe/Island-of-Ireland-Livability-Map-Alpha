@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-08-24. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-08-31. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -11,7 +11,7 @@
 - Ingests local OSM PBF via `osm2pgsql`, cache-managed public static GTFS ZIP feeds (default active transit inputs: `nta` and `translink`), and optionally an Overture Places geoparquet dataset. (Confirmed)
 - Runs heavy work ahead of time: geometry prep -> amenity load/merge -> Rust walkgraph build -> igraph reachability -> grid scoring -> PMTiles bake. (Confirmed)
 - Publishes results to PostGIS plus a main livability PMTiles archive and a separate noise PMTiles overlay so the frontend can run without live tile SQL queries. (Confirmed)
-- Builds a GTFS-first transit reality layer, bus daytime frequency tiers, explicit rail/tram mode tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures, not from OSM stop tags alone. (Confirmed)
+- Builds a strictly GTFS-only transit reality layer, bus daytime frequency tiers, explicit rail/tram mode tiers, frequency-weighted transport scoring, a hidden railway-track proximity modifier derived from GTFS shapes, and a service-desert overlay from scheduled departures. OSM transport stops are neither imported nor used as a scoring fallback. (Confirmed)
 - Adds a dual-score mode-aware scoring payload: current walk-only `total_score` and top-level category scores remain the map default, while nested `scores_json["mode_aware"]` and fine-surface inspect payloads can expose walk/bike/transit weighted comparison data with model version and mode weights. (Confirmed)
 - Applies a hidden, explainable road-proximity penalty from OSM `motorway`, `trunk`, and `primary` ways, with class-specific distance decay and safe maxspeed weighting; strongest nearby-road selection avoids junction double-counting. (Confirmed)
 - Current live transit config in `config.py` now wires the active `nta` and `translink` GTFS feeds, matching the README/tests and restoring Northern Ireland transport coverage in the published transport layer. (Confirmed)
@@ -30,7 +30,6 @@
 - **OSM ingest**: `local_osm_import/` + `osm2pgsql_livability.lua`
 - **GTFS ingest and transit reality**: `transit/`
 - **GTFS rail-corridor proxy**: `transit/railway_corridors.py`
-- **GTFS transfer reach helper**: `transit/chained_reach.py`
 - **Major-road proximity penalty**: `precompute/road_proximity.py`
 - **Overture integration and dedupe**: `overture/loader.py`, `overture/merge.py`, `db_postgis/amenity_merge.py`
 - **Amenity merge observability**: `db_postgis/amenity_merge.py`, `precompute/phases.py`, `precompute/_rows.py`, `precompute/publish.py`
@@ -49,6 +48,7 @@
 - **Pipeline ETA and timing history**: `progress_tracker.py`
 - **Rust walkgraph binary**: `walkgraph/` (build profile supports walk and bike graph filtering)
 - **PMTiles bake**: `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py`, `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py`
+- **Self-hosted context basemap**: `basemap.py`, `basemap/docker-compose.yml`, and a Protomaps style export plus same-origin glyph/sprite assets under `frontend/src/` and `static/basemap/`. The source profile/style pair is pinned by exact upstream commit SHA; the builder preflights Docker Desktop's Linux engine with an actionable message, and CI runs only a Docker `--area=monaco` fixture.
 - **Runtime HTTP server**: `serve_from_db.py`
 - **Runtime route helper**: `serve_routes.py`
 - **Optional Valhalla pedestrian reachability**: `precompute/valhalla_reachability.py` uses canonical walkgraph snapped nodes with EPSG:2157 STRtree prefiltering and `/sources_to_targets`; `valhalla/docker-compose.yml` remains the local service sandbox.
@@ -71,6 +71,8 @@
 - Primary CLI entry point. (Confirmed, LOC: 326)
 - Dispatches:
   - `import` -> `precompute.refresh_local_import()`
+    - after a successful raw import, refreshes the self-hosted basemap only when its PBF/pin manifest is stale
+  - `basemap [--force]` -> `basemap.build_basemap()` using Docker and the configured Ireland+NI PBF
   - `gtfs status` -> `transit_refresh_runner.gtfs_status()` diagnostics only (no download)
   - `gtfs refresh` -> `transit_refresh_runner.refresh_gtfs()`
   - `transit` -> `transit_refresh_runner.refresh_transit()`
@@ -82,7 +84,7 @@
     - `--reimport-noise-source` -> force raw source re-import into `noise_normalized`
     - `--force-noise-all` -> force both source re-import and resolved rebuild
     - `--auto-refresh-import` -> allow precompute to refresh raw OSM import state when missing
-  - `serve --profile {full,dev,test}` -> `render_from_db.run_render_from_db(...)`
+  - `serve --profile {full,dev,test} [--deployment]` -> `render_from_db.run_render_from_db(...)`; development can inspect the app without an archive while deployment requires the local basemap artifact and assets
 - If no subcommand is supplied, serving is the default path. (Confirmed)
 - `transit` now goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged, and can optionally auto-refresh GTFS cache first via `--auto-refresh-gtfs`. It still prints the explicit completion line plus the transit-phase `completed` tracker line. (Confirmed)
 
@@ -195,6 +197,7 @@
      GET /api/runtime
      GET /api/inspect
      GET /tiles/livability.pmtiles
+     GET /tiles/basemap.pmtiles
      GET /tiles/livability-test.pmtiles
      GET /tiles/noise.pmtiles
      GET /tiles/noise-test.pmtiles
@@ -231,7 +234,6 @@ Notes:
 | OSM ingest rules | `osm2pgsql_livability.lua`, `local_osm_import/` | `config.IMPORTER_CONFIG_VERSION` | None |
 | Major-road proximity scoring | `osm2pgsql_livability.lua`, `db_postgis/reads.py`, `precompute/road_proximity.py` | `grid_walk.scores_json`, fine-surface score arrays, `/api/runtime` road diagnostics, grid popups | OSM `osm_raw.roads` importer-owned table |
 | Transit reality | `transit/workflow.py`, `transit/rust_gtfs.py`, `transit/railway_corridors.py` | `config.transit_config_hash()` | None |
-| Transfer-aware transit reach helper | `transit/chained_reach.py` | Future transit-chained scoring consumers | Pure helper returns bounded direct/one-transfer stop reach rows and excludes non-public service inputs. |
 | Amenity tiering | `config.py` tier constants, `precompute/amenity_tiers.py` | `precompute/phases.py`, `precompute/publish.py` | None |
 | Mode-aware score payloads | `config.py`, `precompute/mode_aware.py`, `precompute/grid.py`, `precompute/surface.py` | `grid_walk.scores_json["mode_aware"]`, `/api/inspect`, frontend grid popups | Walk-only total/top-level score fields remain default PMTiles styling inputs; mode-aware data is nested for validation. |
 | Overture category mapping | `overture/loader.py::OVERTURE_CATEGORY_MAP` | `precompute/phases.py` | None |
@@ -702,7 +704,7 @@ tests/test_server_behavior.py
 - `extract_fingerprint()` now caches the exact `.osm.pbf` content hash in `.livability_cache/osm_extract_fingerprint_cache.json`, keyed by resolved path + file size + `mtime_ns`. Deleting or corrupting that cache only affects startup time; the code falls back to a full re-hash.
 - `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` has a non-zero live default even though the nearby comment still talks about "default 0 = disabled". Trust the constant, not the stale comment.
 - `overture/ireland_places.geoparquet`, `ireland_main_island_shp/*`, and `boundaries/*.geojson` are external inputs, not committed repo assets.
-- Transit reality is GTFS-first now. Do not assume an OSM-stop-to-GTFS matching workflow still drives scoring.
+- Transit reality is strictly GTFS-only. OSM stops are not imported or scored, and missing, broken, omitted, or `transit-unavailable` GTFS state yields zero transport signal rather than an OSM fallback.
 - PMTiles bake writes to a sibling temp archive and only replaces the final `.pmtiles` after finalize succeeds; failed bakes clean the temp file and preserve the previous archive.
 - The public noise overlay is intentionally not clipped to the walking/study-area land mask; noise can extend over water, while the walking grid and score PMTiles still use the exact coastline.
 - `db_postgis._dependencies` patches Windows `platform` calls before SQLAlchemy import. If startup hangs again before `Preparing livability precompute (...)`, check WMI/platform calls before assuming database or PMTiles work has started.
@@ -734,7 +736,7 @@ Representative tests confirmed present:
 | Test file | What it covers |
 |---|---|
 | `tests/test_config.py` | config hash stability, env parsing, schema-version invalidation |
-| `tests/test_mode_aware_scoring.py` | mode-aware weighted score payloads, score-hash invalidation for mode weights, and transfer-aware transit reach helper behavior |
+| `tests/test_mode_aware_scoring.py` | mode-aware weighted score payloads and score-hash invalidation for mode weights |
 | `tests/test_amenity_tiers.py` | shop / healthcare / park tier classification |
 | `tests/test_overture_loader.py` | Overture category filtering and park handling |
 | `tests/test_osm_import_handling.py` | osm2pgsql wrapper and import manifest behavior |
@@ -749,6 +751,7 @@ Representative tests confirmed present:
 | `tests/test_progress_tracker.py` | timing-history sanitization and persistence |
 | `tests/test_serve_routes.py` | pure route matching and dispatch priority for runtime, inspect, surface, static, export, and PMTiles paths |
 | `tests/test_server_behavior.py` | runtime API shape and reload, transport subtier/mode count exposure, noise count/PMTiles URL exposure, PMTiles cache tokens/ETags, surface/inspect input validation, streaming file responses, and range serving for main + noise PMTiles |
+| `tests/test_basemap.py` | Protomaps build/style pin consistency, complete glyph-range assets for every exported font stack, manifest staleness, Docker command construction, and CLI dispatch |
 | `tests/test_transit_phase1.py` | GTFS-first transit reality rows, weekly bus subtiers, bus daytime headway buckets, frequency departure windows, transport score units, exact local GTFS snapshot stop regressions for each bus-tier bucket plus strict exception-only / unscheduled examples, atomic exports, school-only classification, `gtfs-refresh` artifact loading |
 | `tests/test_surface_runtime.py` | fine-surface runtime behavior and atomic PNG tile cache writes |
 | `tests/test_sanity_check.py` | sanity fixture structure and runtime lookup mode selection |
@@ -804,7 +807,7 @@ Local disk hotspots to remember:
 | Score units | Integer weight attached to a tier and consumed by scoring |
 | Cluster count | Count of reachable scoring clusters after collapsing near-duplicate amenities within a category |
 | Effective units | Distance-decayed float scoring input derived from reachable cluster representatives |
-| Transit reality | GTFS-first stop-reality layer with status, departure counts, public frequency windows, weekday daytime bus tiers, and transport score units |
+| Transit reality | GTFS-only stop-reality layer with status, departure counts, public frequency windows, weekday daytime bus tiers, and transport score units; unavailable GTFS means no transport signal |
 | Service desert | Cell with at least one reachable baseline GTFS stop but zero public departures in the desert window |
 | Noise contour | Official display-only Lden / Lnight polygon from ROI EPA or NI OpenDataNI data, normalized into dB bands and source types |
 | Conflict class | Amenity merge status: `osm_only`, `overture_only`, `source_agreement`, `source_conflict`; GTFS-direct transport rows use `gtfs_direct` |
