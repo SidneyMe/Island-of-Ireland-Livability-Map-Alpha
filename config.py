@@ -597,6 +597,19 @@ CATEGORY_COLORS = {
 CACHE_DIR = BASE_DIR / ".livability_cache"
 PROJECT_TEMP_DIR = BASE_DIR / ".tmp"
 OSM_EXTRACT_FINGERPRINT_CACHE_PATH = CACHE_DIR / "osm_extract_fingerprint_cache.json"
+
+# The tile profile and its MapLibre style must be exported from this exact
+# source-tree state. Keep this in sync with frontend/src/basemap_style_metadata.json.
+PROTOMAPS_BASEMAPS_COMMIT = "a50c699adc60a45c899971b1e11275e61f13bfbf"
+PROTOMAPS_ASSETS_COMMIT = "028c18f713baecad011301ff7a69acc39bcc2ae7"
+PROTOMAPS_TILE_SCHEMA_MAJOR = 4
+BASEMAP_FONT_STACKS = (
+    "Noto Sans Regular",
+    "Noto Sans Medium",
+    "Noto Sans Italic",
+    "Noto Sans Devanagari Regular v1",
+)
+BASEMAP_CACHE_DIR = CACHE_DIR / "basemap"
 PMTILES_SCHEMA_VERSION = 13
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 14
@@ -738,6 +751,18 @@ def pmtiles_url_path(profile: str | None = None) -> str:
 
 def noise_pmtiles_url_path(profile: str | None = None) -> str:
     return f"/tiles/{noise_pmtiles_filename(profile)}"
+
+
+def basemap_pmtiles_filename() -> str:
+    return "basemap.pmtiles"
+
+
+def basemap_pmtiles_output_path() -> Path:
+    return BASEMAP_CACHE_DIR / basemap_pmtiles_filename()
+
+
+def basemap_pmtiles_url_path() -> str:
+    return f"/tiles/{basemap_pmtiles_filename()}"
 
 
 PMTILES_OUTPUT_PATH = pmtiles_output_path(DEFAULT_BUILD_PROFILE)

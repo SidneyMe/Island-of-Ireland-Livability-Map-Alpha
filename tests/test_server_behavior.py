@@ -764,6 +764,25 @@ class LocalServerEndpointTests(TestCase):
                             pmtiles_path=pmtiles_path,
                         )
 
+    def test_deployment_serve_requires_local_basemap_archive(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            static_dir, pmtiles_path = _make_fixture(tmp)
+            with mock.patch.object(
+                serve_from_db,
+                "basemap_pmtiles_output_path",
+                return_value=tmp / "missing-basemap.pmtiles",
+            ):
+                with self.assertRaisesRegex(RuntimeError, "python main.py basemap"):
+                    serve_from_db.create_http_server(
+                        service=_FakeService(),
+                        host="127.0.0.1",
+                        port=0,
+                        static_dir=static_dir,
+                        pmtiles_path=pmtiles_path,
+                        deployment=True,
+                    )
+
 
 class RuntimeValidationTests(TestCase):
     def test_runtime_service_reloads_when_latest_build_key_changes(self) -> None:

@@ -3,8 +3,12 @@ import {
   defaultLanduseContextSelections,
   landuseContextFillColorExpression
 } from "./landuse_filters.js";
+import PROTOMAPS_LIGHT_STYLE from "./basemap_style.generated.json" with { type: "json" };
 
-const BASEMAP_RASTER = "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png";
+const BASEMAP_SOURCE_ID = "basemap";
+const BASEMAP_SOURCE_LAYER_ID = "protomaps";
+const BASEMAP_GLYPHS_PATH = "/static/basemap/fonts/{fontstack}/{range}.pbf";
+const BASEMAP_SPRITE_PATH = "/static/basemap/sprites/v4/light";
 const ACTIVE_GRID_FILL_LAYER_ID = "grid-fill-active";
 const ACTIVE_GRID_OUTLINE_LAYER_ID = "grid-outline-active";
 const ACTIVE_DEBUG_GRID_LAYER_ID = "grid-fill-debug-active";
@@ -465,10 +469,27 @@ function noiseFillColorExpression() {
   ];
 }
 
+function absoluteUrl(origin, path) {
+  return String(origin).replace(/\/+$/, "") + path;
+}
+
+function localBasemapLayers() {
+  return PROTOMAPS_LIGHT_STYLE.layers.map(function (layer) {
+    const cloned = JSON.parse(JSON.stringify(layer));
+    if (cloned.source === BASEMAP_SOURCE_LAYER_ID) {
+      cloned.source = BASEMAP_SOURCE_ID;
+    }
+    return cloned;
+  });
+}
+
 function buildStyle(runtime, options = {}) {
   const colors = runtime.category_colors || {};
   const origin = options.windowOrigin || "http://127.0.0.1:8000";
   const selectedGridLayer = normalizeGridScoreLayer(options.selectedGridLayer || "combined");
+  const basemapPmtilesUrl = runtime.basemap_pmtiles_url
+    ? "pmtiles://" + origin + runtime.basemap_pmtiles_url
+    : null;
   const pmtilesUrl = "pmtiles://" + origin + (runtime.pmtiles_url || "/tiles/livability.pmtiles");
   const noisePmtilesUrl = runtime.noise_pmtiles_url
     ? "pmtiles://" + origin + runtime.noise_pmtiles_url
@@ -528,7 +549,9 @@ function buildStyle(runtime, options = {}) {
       ["literal", ["official_derived_grid_proxy", "official_resolved_contour"]]
     ]
   ];
-  const layers = [{ id: "basemap", type: "raster", source: "basemap" }];
+  const layers = basemapPmtilesUrl
+    ? localBasemapLayers()
+    : [{ id: "basemap-background", type: "background", paint: { "background-color": "#e2dfda" } }];
   if (runtime.landuse_context_enabled && landuseContextClasses.length > 0) {
     const landuseFilter = buildLanduseContextLayerFilter({
       selectedClasses: landuseContextClasses
@@ -674,12 +697,6 @@ function buildStyle(runtime, options = {}) {
   });
 
   const sources = {
-    basemap: {
-      type: "raster",
-      tiles: [BASEMAP_RASTER],
-      tileSize: 256,
-      attribution: "&copy; OpenStreetMap contributors &copy; CARTO"
-    },
     livability: {
       type: "vector",
       url: pmtilesUrl
@@ -691,16 +708,30 @@ function buildStyle(runtime, options = {}) {
       url: noisePmtilesUrl
     };
   }
+  if (basemapPmtilesUrl) {
+    sources[BASEMAP_SOURCE_ID] = {
+      type: "vector",
+      url: basemapPmtilesUrl,
+      attribution: '<a href="https://github.com/protomaps/basemaps">Protomaps</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    };
+  }
 
-  return {
+  const style = {
     version: 8,
-    glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
     sources: sources,
     layers: layers
   };
+  if (basemapPmtilesUrl) {
+    style.glyphs = absoluteUrl(origin, BASEMAP_GLYPHS_PATH);
+    style.sprite = absoluteUrl(origin, BASEMAP_SPRITE_PATH);
+  }
+  return style;
 }
 
 export {
+  BASEMAP_GLYPHS_PATH,
+  BASEMAP_SOURCE_ID,
+  BASEMAP_SPRITE_PATH,
   DEFAULT_NOISE_OPACITY,
   GRID_INSERT_BEFORE_LAYER_ID,
   GRID_SOURCE_ID,

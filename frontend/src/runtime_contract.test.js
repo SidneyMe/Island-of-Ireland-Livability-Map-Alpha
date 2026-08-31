@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import PROTOMAPS_LIGHT_STYLE from "./basemap_style.generated.json" with { type: "json" };
 
 import {
+  BASEMAP_GLYPHS_PATH,
+  BASEMAP_SOURCE_ID,
+  BASEMAP_SPRITE_PATH,
   DEFAULT_NOISE_OPACITY,
   GRID_INSERT_BEFORE_LAYER_ID,
   MAX_NOISE_OUTLINE_OPACITY,
@@ -38,6 +42,7 @@ import {
 const fullRuntime = {
   build_profile: "full",
   pmtiles_url: "/tiles/livability.pmtiles",
+  basemap_pmtiles_url: "/tiles/basemap.pmtiles?v=basemap-token",
   transport_reality_download_url: "/exports/transport-reality.zip",
   coarse_vector_resolutions_m: [20000, 10000, 5000],
   fine_resolutions_m: [2500, 1000, 500, 250, 100, 50],
@@ -82,6 +87,7 @@ const fullRuntime = {
 const devRuntime = {
   build_profile: "dev",
   pmtiles_url: "/tiles/livability-dev.pmtiles",
+  basemap_pmtiles_url: "/tiles/basemap.pmtiles?v=basemap-token",
   transport_reality_download_url: "/exports/transport-reality.zip",
   coarse_vector_resolutions_m: [20000, 10000, 5000],
   fine_resolutions_m: [],
@@ -116,6 +122,25 @@ const devRuntime = {
   landuse_context_max_zoom: 11,
   max_zoom: 19
 };
+
+{
+  const fontStacks = new Set();
+  PROTOMAPS_LIGHT_STYLE.layers.forEach(function (layer) {
+    const textFont = layer.layout && layer.layout["text-font"];
+    if (Array.isArray(textFont)) {
+      textFont.forEach(function (entry) {
+        if (typeof entry === "string" && entry.startsWith("Noto Sans")) {
+          fontStacks.add(entry);
+        }
+      });
+    }
+  });
+  assert.deepEqual([...fontStacks].sort(), [
+    "Noto Sans Italic",
+    "Noto Sans Medium",
+    "Noto Sans Regular"
+  ]);
+}
 
 {
   assert.deepEqual(
@@ -168,6 +193,26 @@ const devRuntime = {
     style.sources.noise.url,
     "pmtiles://http://127.0.0.1:8000/tiles/noise-dev.pmtiles",
   );
+  assert.equal(
+    style.sources[BASEMAP_SOURCE_ID].url,
+    "pmtiles://http://127.0.0.1:8000/tiles/basemap.pmtiles?v=basemap-token",
+  );
+  assert.equal(
+    style.glyphs,
+    "http://127.0.0.1:8000" + BASEMAP_GLYPHS_PATH,
+  );
+  assert.equal(
+    style.sprite,
+    "http://127.0.0.1:8000" + BASEMAP_SPRITE_PATH,
+  );
+  assert.equal(style.layers.some(function (layer) {
+    return layer.source === BASEMAP_SOURCE_ID;
+  }), true);
+  assert.equal(style.layers.some(function (layer) {
+    return layer.source === "protomaps";
+  }), false);
+  assert.equal(JSON.stringify(style).includes(["car", "to"].join("")), false);
+  assert.equal(JSON.stringify(style).includes("demotiles"), false);
 }
 
 {

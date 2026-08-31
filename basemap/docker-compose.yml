@@ -1,0 +1,10 @@
+services:
+  basemap:
+    image: livability-protomaps-basemap:${PROTOMAPS_BASEMAPS_COMMIT_SHORT}
+    build:
+      context: .
+      args:
+        PROTOMAPS_BASEMAPS_COMMIT: ${PROTOMAPS_BASEMAPS_COMMIT}
+    working_dir: /work
+    volumes:
+      - ../.livability_cache/basemap/work:/work

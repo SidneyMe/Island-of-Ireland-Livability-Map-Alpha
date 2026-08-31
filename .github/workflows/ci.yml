@@ -5,6 +5,29 @@ on:
   pull_request:
 
 jobs:
+  basemap-fixture:
+    name: Basemap Docker fixture
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read the basemap build pin
+        run: |
+          commit="$(sed -n 's/^PROTOMAPS_BASEMAPS_COMMIT = "\([^"]*\)"$/\1/p' config.py)"
+          test -n "$commit"
+          echo "PROTOMAPS_BASEMAPS_COMMIT=$commit" >> "$GITHUB_ENV"
+          echo "PROTOMAPS_BASEMAPS_COMMIT_SHORT=${commit:0:12}" >> "$GITHUB_ENV"
+
+      - name: Build the tiny named-area fixture
+        run: >-
+          docker compose -f basemap/docker-compose.yml run --rm --build basemap
+          --area=monaco --download
+
+      - name: Verify fixture archive
+        run: test -s .livability_cache/basemap/work/monaco.pmtiles
+
   test:
     runs-on: windows-latest
     defaults:

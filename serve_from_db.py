@@ -26,6 +26,8 @@ from config import (
     SURFACE_DEFAULT_ZOOM,
     SURFACE_MAX_ZOOM,
     build_config_hashes,
+    basemap_pmtiles_output_path,
+    basemap_pmtiles_url_path,
     build_profile_settings,
     normalize_build_profile,
     noise_pmtiles_output_path,
@@ -35,6 +37,7 @@ from config import (
     precompute_flag_for_profile,
     profile_fine_surface_enabled,
 )
+from basemap import missing_basemap_message, validate_vendored_assets
 from db_postgis import (
     build_engine,
     ensure_database_ready,
@@ -809,6 +812,8 @@ class RuntimeService:
 
     def _get_runtime_base(self) -> dict[str, Any]:
         state = self.state()
+        basemap_path = basemap_pmtiles_output_path()
+        basemap_token = _file_etag(basemap_path) if basemap_path.is_file() else None
         return {
             "build_key": state.build_key,
             "build_profile": state.build_profile,
@@ -844,6 +849,10 @@ class RuntimeService:
             "max_zoom": SURFACE_MAX_ZOOM,
             "fine_surface_enabled": state.fine_surface_enabled,
             "pmtiles_url": _cache_busted_url(pmtiles_url_path(state.build_profile), state.build_key),
+            "basemap_pmtiles_url": _cache_busted_url(
+                basemap_pmtiles_url_path() if basemap_path.is_file() else None,
+                basemap_token,
+            ),
             "transport_reality_enabled": state.transport_reality_enabled,
             "service_deserts_enabled": state.service_deserts_enabled,
             "transport_reality_download_url": state.transport_reality_download_url,
@@ -1299,6 +1308,7 @@ def create_http_server(
     static_dir: Path = STATIC_DIR,
     pmtiles_path: Path | None = None,
     noise_pmtiles_path: Path | None = None,
+    deployment: bool = False,
 ) -> LivabilityHTTPServer:
     normalized_profile = normalize_build_profile(profile)
     resolved_pmtiles_path = pmtiles_path or pmtiles_output_path(normalized_profile)
@@ -1313,6 +1323,13 @@ def create_http_server(
         noise_pmtiles_path or noise_pmtiles_output_path(normalized_profile)
     )
     resolved_noise_pmtiles_url_path = noise_pmtiles_url_path(normalized_profile)
+    resolved_basemap_path = basemap_pmtiles_output_path()
+    basemap_available = resolved_basemap_path.is_file()
+    if basemap_available:
+        validate_vendored_assets()
+        resolved_pmtiles_paths_by_url_path[basemap_pmtiles_url_path()] = resolved_basemap_path
+    elif deployment:
+        raise RuntimeError(missing_basemap_message())
     index_html_path = static_dir / "index.html"
     if not index_html_path.exists():
         raise RuntimeError(f"static index.html not found at {index_html_path}")
@@ -1353,12 +1370,20 @@ def serve_livability_app(
     host: str = DEFAULT_SERVER_HOST,
     port: int = DEFAULT_SERVER_PORT,
     profile: str = "full",
+    deployment: bool = False,
 ) -> str:
     normalized_profile = normalize_build_profile(profile)
-    httpd = create_http_server(host=host, port=port, profile=normalized_profile)
+    httpd = create_http_server(
+        host=host,
+        port=port,
+        profile=normalized_profile,
+        deployment=deployment,
+    )
     bound_host, bound_port = httpd.server_address[:2]
     url = f"http://{bound_host}:{bound_port}/"
     print("Phase R1 - serving      ... done")
+    if basemap_pmtiles_url_path() not in httpd.pmtiles_paths_by_url_path:
+        print(missing_basemap_message())
     print(f"Serving livability MapLibre app ({normalized_profile}) -> {url}")
     print("Press Ctrl+C to stop.")
     try:

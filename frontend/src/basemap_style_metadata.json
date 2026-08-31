@@ -1,0 +1,13 @@
+{
+  "protomaps_basemaps_commit": "a50c699adc60a45c899971b1e11275e61f13bfbf",
+  "protomaps_assets_commit": "028c18f713baecad011301ff7a69acc39bcc2ae7",
+  "tile_schema_major": 4,
+  "flavor": "light",
+  "language": "en",
+  "font_stacks": [
+    "Noto Sans Regular",
+    "Noto Sans Medium",
+    "Noto Sans Italic",
+    "Noto Sans Devanagari Regular v1"
+  ]
+}

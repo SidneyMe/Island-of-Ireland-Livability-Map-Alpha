@@ -521,7 +521,9 @@ The hosted demo is the project's public moment, and it deliberately sits at the 
 - **Overture Maps Foundation** — optional Places data used to rescue missing shop, healthcare, and park POIs before canonical amenity scoring. See [Overture Maps](https://overturemaps.org/) and preserve any release-specific attribution required by the dataset.
 - **Republic of Ireland county boundaries** — Tailte Éireann (formerly Ordnance Survey Ireland), National Statutory Boundaries 2024.
 - **Northern Ireland outline** — OSNI Open Data, Largescale Boundaries.
-- **Basemap rendering** — [MapLibre GL](https://maplibre.org/) on the frontend; tiles are served locally from the generated PMTiles archive.
+- **Basemap rendering** — [MapLibre GL](https://maplibre.org/) on the frontend;
+  the livability layers and an optional self-hosted Protomaps background are
+  served locally from PMTiles archives. See [self-hosted basemap setup](docs/BASEMAP.md).
 
 This project is a derivative database under ODbL terms. The generated `livability.pmtiles` archive is a database derived from OSM and inherits ODbL — it must be redistributed under the same license, with attribution preserved. The source code in this repository is a separate work and is not covered by ODbL.
 

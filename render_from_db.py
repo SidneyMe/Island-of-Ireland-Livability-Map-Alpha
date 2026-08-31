@@ -13,8 +13,16 @@ def run_render_from_db(
     host: str = DEFAULT_SERVER_HOST,
     port: int = DEFAULT_SERVER_PORT,
     profile: str = "full",
+    deployment: bool = False,
 ) -> str:
-    return serve_livability_app(host=host, port=port, profile=profile)
+    serve_kwargs = dict(
+        host=host,
+        port=port,
+        profile=profile,
+    )
+    if deployment:
+        serve_kwargs["deployment"] = True
+    return serve_livability_app(**serve_kwargs)
 
 
 __all__ = [

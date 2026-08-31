@@ -9,6 +9,7 @@ _COMMAND_SERVE = "serve"
 _COMMAND_IMPORT = "import"
 _COMMAND_TRANSIT = "transit"
 _COMMAND_PRECOMPUTE = "precompute"
+_COMMAND_BASEMAP = "basemap"
 _COMMAND_GTFS = "gtfs"
 _GTFS_STATUS = "status"
 _GTFS_REFRESH = "refresh"
@@ -94,6 +95,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     import_parser.set_defaults(command=_COMMAND_IMPORT)
 
+    basemap_parser = subparsers.add_parser(
+        _COMMAND_BASEMAP,
+        help="Build or refresh the self-hosted Protomaps basemap archive.",
+    )
+    basemap_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild the basemap archive even when its manifest is current.",
+    )
+    basemap_parser.set_defaults(command=_COMMAND_BASEMAP)
+
     gtfs_parser = subparsers.add_parser(
         _COMMAND_GTFS,
         help="Inspect or refresh cached public static GTFS feeds.",
@@ -163,6 +175,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--host",
         default=DEFAULT_SERVER_HOST,
         help=f"Bind host for the local web app (default: {DEFAULT_SERVER_HOST}).",
+    )
+    serve_parser.add_argument(
+        "--deployment",
+        action="store_true",
+        help="Require a complete local basemap archive and assets before serving.",
     )
     serve_parser.add_argument(
         "--port",
@@ -273,7 +290,14 @@ def _handle_precompute(args: argparse.Namespace) -> None:
 def _handle_serve(args: argparse.Namespace) -> None:
     from render_from_db import run_render_from_db as _run_render_from_db
 
-    _run_render_from_db(profile=args.profile, host=args.host, port=args.port)
+    serve_kwargs = dict(
+        profile=args.profile,
+        host=args.host,
+        port=args.port,
+    )
+    if args.deployment:
+        serve_kwargs["deployment"] = True
+    _run_render_from_db(**serve_kwargs)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -283,8 +307,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == _COMMAND_IMPORT:
             from precompute import refresh_local_import as _refresh_local_import
+            from basemap import build_if_stale as _build_basemap_if_stale
 
             _refresh_local_import()
+            _build_basemap_if_stale()
+        elif args.command == _COMMAND_BASEMAP:
+            from basemap import build_basemap as _build_basemap
+
+            print("Building self-hosted basemap...", flush=True)
+            output = _build_basemap(force=args.force)
+            print(f"Basemap ready -> {output}", flush=True)
         elif args.command == _COMMAND_GTFS:
             if args.gtfs_command == _GTFS_STATUS:
                 _handle_gtfs_status(force_gtfs_refresh=args.force_gtfs_refresh)
