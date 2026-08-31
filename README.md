@@ -211,6 +211,15 @@ gtfs/nta_gtfs.zip
 gtfs/translink_gtfs.zip
 ```
 
+### Where to get the feeds
+
+Transport scoring is GTFS-only, so both feeds are required input. Download the static GTFS zip for each operator and place it at the matching path above:
+
+- **NTA (Republic of Ireland)** — the [Transport for Ireland GTFS page](https://www.transportforireland.ie/transitData/PT_Data.html) lists the current static GTFS download. Prefer the portal link; the direct bundle URL changes between releases (a previous one was `https://www.transportforireland.ie/transitData/Data/GTFS_All.zip`).
+- **Translink (Northern Ireland)** — the [OpenDataNI transport group](https://admin.opendatani.gov.uk/group/transport) hosts the Translink GTFS dataset.
+
+Missing, broken, or unrefreshed GTFS now produces **zero transport signal** — OSM stops are intentionally not a fallback. `python main.py precompute` refuses to publish such a build unless you pass `--allow-missing-transport` (see the precompute section below).
+
 Useful environment overrides:
 
 ```text
@@ -221,7 +230,7 @@ GTFS_ANALYSIS_WINDOW_DAYS=30
 GTFS_SERVICE_DESERT_WINDOW_DAYS=7
 ```
 
-Optional `GTFS_NTA_URL` and `GTFS_TRANSLINK_URL` values can be set when you want `python main.py transit` to refresh those local zip files before parsing.
+Optional `GTFS_NTA_URL` and `GTFS_TRANSLINK_URL` values can be set when you want `python main.py transit --auto-refresh-gtfs` to refresh those local zip files before parsing.
 
 ## Usage Commands
 

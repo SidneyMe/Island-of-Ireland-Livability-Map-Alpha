@@ -163,6 +163,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow precompute to refresh raw OSM import state when it is missing instead of failing fast.",
     )
+    precompute_parser.add_argument(
+        "--allow-missing-transport",
+        action="store_true",
+        help="Publish even when no GTFS transport rows are available (transport scores will be zero).",
+    )
     _add_precompute_noise_arguments(precompute_parser)
     precompute_parser.set_defaults(command=_COMMAND_PRECOMPUTE)
 
@@ -281,6 +286,7 @@ def _handle_precompute(args: argparse.Namespace) -> None:
             or args.reimport_noise_source
             or args.force_noise_all
         ),
+        allow_missing_transport=args.allow_missing_transport,
     )
     if args.explain:
         precompute_kwargs["explain"] = True

@@ -314,6 +314,7 @@ def run_precompute_impl(
     noise_accurate: bool = False,
     require_active_noise_artifact: bool = False,
     refresh_noise_artifact: bool = False,
+    allow_missing_transport: bool = False,
     explain: bool = False,
     *,
     build_profile: str = "full",
@@ -779,6 +780,20 @@ def run_precompute_impl(
         tracker.set_phase_expected("reachability", False)
 
     amenity_data, amenity_source_rows = phase_amenities(engine, study_area_wgs84, tracker)
+
+    if not (amenity_data.get("transport") or []):
+        if allow_missing_transport:
+            print(
+                "WARNING: publishing without GTFS transport signal "
+                "(--allow-missing-transport); transport scores will be zero.",
+                flush=True,
+            )
+        else:
+            raise RuntimeError(
+                "No GTFS transport rows are available for scoring; refusing to publish a "
+                "build with zero transport scores. Run 'python main.py transit "
+                "--auto-refresh-gtfs' first, or pass --allow-missing-transport to publish anyway."
+            )
     print()
 
     walk_grids = phase_grids(

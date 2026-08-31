@@ -4,6 +4,21 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-08-31 - Transport publish gate and GTFS bootstrap docs
+
+### Added
+
+- `python main.py precompute` now refuses to publish a build when no GTFS transport rows are available for scoring, with an actionable error pointing at `transit --auto-refresh-gtfs`.
+- New `--allow-missing-transport` flag publishes anyway with a loud warning (transport scores will be zero).
+- Documented where to obtain the NTA and Translink static GTFS feeds (portal links in the README and `.env.example`); GTFS is now a documented hard requirement for transport scoring.
+
+### Notes
+
+- The gate only applies when amenities actually run (full pipeline and fine-surface rebuild paths); `--explain`, skip, rebake, and noise-refresh-only paths are unaffected.
+- The weekly scheduled refresh workflow now fails loudly instead of silently publishing a zero-transport build when GTFS refresh fails.
+
+---
+
 ## 2026-08-31 - GTFS-only transport scoring cleanup
 
 ### Changed

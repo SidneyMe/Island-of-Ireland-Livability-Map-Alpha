@@ -177,6 +177,12 @@ def _empty_amenity_data() -> dict[str, list[tuple[float, float]]]:
     return {category: [] for category in precompute.TAGS}
 
 
+def _amenity_data_with_transport() -> dict[str, list[tuple[float, float]]]:
+    data = _empty_amenity_data()
+    data["transport"] = [(53.35, -6.26)]
+    return data
+
+
 def _grid_cell(
     cell_id: str,
     *,
@@ -241,7 +247,7 @@ def _workflow_kwargs(**overrides):
         "print_cache_status": mock.Mock(),
         "validate_all_tiers": mock.Mock(),
         "phase_geometry": mock.Mock(return_value=(box(0.0, 0.0, 1.0, 1.0), box(0.0, 0.0, 1.0, 1.0))),
-        "phase_amenities": mock.Mock(return_value=(_empty_amenity_data(), [])),
+        "phase_amenities": mock.Mock(return_value=(_amenity_data_with_transport(), [])),
         "phase_grids": mock.Mock(return_value={1000: []}),
         "score_grid_fast_path_candidate": mock.Mock(return_value=False),
         "has_complete_build": mock.Mock(return_value=False),
@@ -3330,6 +3336,37 @@ class WorkflowTests(TestCase):
 
         self.assertEqual(build_key, "build-key-123")
         build_mock.assert_called_once()
+
+    def test_precompute_refuses_publish_when_transport_signal_missing(self) -> None:
+        kwargs = _workflow_kwargs(
+            phase_amenities=mock.Mock(return_value=(_empty_amenity_data(), [])),
+            phase_grids=mock.Mock(return_value={1000: []}),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "zero transport scores"):
+            precompute._workflow.run_precompute_impl(**kwargs)
+
+        kwargs["phase_grids"].assert_not_called()
+        kwargs["publish_precomputed_artifacts"].assert_not_called()
+
+    def test_precompute_allow_missing_transport_publishes_with_warning(self) -> None:
+        kwargs = _workflow_kwargs(
+            phase_amenities=mock.Mock(return_value=(_empty_amenity_data(), [])),
+            phase_grids=mock.Mock(return_value={1000: []}),
+        )
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            build_key = precompute._workflow.run_precompute_impl(
+                allow_missing_transport=True,
+                **kwargs,
+            )
+
+        self.assertEqual(build_key, "build-key-123")
+        kwargs["publish_precomputed_artifacts"].assert_called_once()
+        self.assertIn(
+            "WARNING: publishing without GTFS transport signal",
+            stdout.getvalue(),
+        )
 
 
 class TransitRefreshPreflightTests(TestCase):

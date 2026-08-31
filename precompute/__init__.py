@@ -357,6 +357,7 @@ def run_precompute(
     noise_accurate: bool = False,
     require_active_noise_artifact: bool = False,
     refresh_noise_artifact: bool = False,
+    allow_missing_transport: bool = False,
     explain: bool = False,
 ) -> str:
     normalized_profile = normalize_build_profile(profile)
@@ -369,6 +370,7 @@ def run_precompute(
         noise_accurate=noise_accurate,
         require_active_noise_artifact=require_active_noise_artifact,
         refresh_noise_artifact=refresh_noise_artifact,
+        allow_missing_transport=allow_missing_transport,
         explain=explain,
         cache_dir=CACHE_DIR,
         build_profile=normalized_profile,

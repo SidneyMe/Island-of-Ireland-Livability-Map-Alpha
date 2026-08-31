@@ -40,13 +40,22 @@ class MainCliTests(TestCase):
 
     def test_import_subcommand_dispatches_refresh_local_import(self) -> None:
         refresh_mock = mock.Mock()
+        basemap_build_mock = mock.Mock(return_value=None)
         fake_precompute_module = SimpleNamespace(refresh_local_import=refresh_mock)
+        fake_basemap_module = SimpleNamespace(build_if_stale=basemap_build_mock)
 
-        with mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}):
+        with mock.patch.dict(
+            sys.modules,
+            {
+                "precompute": fake_precompute_module,
+                "basemap": fake_basemap_module,
+            },
+        ):
             exit_code = main.main(["import"])
 
         self.assertEqual(exit_code, 0)
         refresh_mock.assert_called_once_with()
+        basemap_build_mock.assert_called_once_with()
 
     def test_gtfs_status_subcommand_dispatches_status_runner(self) -> None:
         status_row = SimpleNamespace(
@@ -161,7 +170,29 @@ class MainCliTests(TestCase):
             noise_accurate=True,
             require_active_noise_artifact=False,
             refresh_noise_artifact=True,
+            allow_missing_transport=False,
             explain=True,
+        )
+
+    def test_precompute_forwards_allow_missing_transport_flag(self) -> None:
+        precompute_mock = mock.Mock(return_value="build-key-test")
+        fake_precompute_module = SimpleNamespace(run_precompute=precompute_mock)
+
+        with mock.patch.dict(sys.modules, {"precompute": fake_precompute_module}):
+            exit_code = main.main(["precompute", "--allow-missing-transport"])
+
+        self.assertEqual(exit_code, 0)
+        precompute_mock.assert_called_once_with(
+            profile="full",
+            force_precompute=False,
+            auto_refresh_import=False,
+            force_noise_artifact=False,
+            reimport_noise_source=False,
+            force_noise_all=False,
+            noise_accurate=False,
+            require_active_noise_artifact=False,
+            refresh_noise_artifact=False,
+            allow_missing_transport=True,
         )
 
     def test_precompute_requires_active_noise_artifact_conflicts_with_build_flags(self) -> None:
