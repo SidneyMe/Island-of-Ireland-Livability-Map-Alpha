@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Bootstrap a local Linux/PostgreSQL development environment. This script does
+# not install operating-system packages; install the prerequisites in README.md
+# first (PostgreSQL + PostGIS, osm2pgsql, Python, Rust, Node.js, and curl).
+set -Eeuo pipefail
+IFS=$'\n\t'
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$PROJECT_ROOT"
+
+DB_HOST="${POSTGRES_HOST:-localhost}"
+DB_PORT="${POSTGRES_PORT:-5432}"
+DB_NAME="${POSTGRES_DB:-livability}"
+DB_USER="${POSTGRES_USER:-livability}"
+DB_PASSWORD="${POSTGRES_PASSWORD:-}"
+OSM_URL="${OSM_URL:-https://download.geofabrik.info/europe/ireland-and-northern-ireland-latest.osm.pbf}"
+OSM_PATH="osm/ireland-and-northern-ireland-latest.osm.pbf"
+ROI_BOUNDARY_PATH="boundaries/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson"
+NI_BOUNDARY_PATH="boundaries/osni_open_data_largescale_boundaries_ni_outline.geojson"
+NTA_GTFS_PATH="${GTFS_NTA_ZIP_PATH:-gtfs/nta_gtfs.zip}"
+TRANSLINK_GTFS_PATH="${GTFS_TRANSLINK_ZIP_PATH:-gtfs/translink_gtfs.zip}"
+OVERTURE_PATH="overture/ireland_places.geoparquet"
+MAIN_ISLAND_SHAPEFILE="ireland_main_island_shp/ireland_main_island.shp"
+
+# The official boundary download endpoints are stable enough to provide
+# defaults. Configure the remaining source URLs because portal release links
+# change frequently.
+ROI_BOUNDARY_URL="${ROI_BOUNDARY_URL:-https://data-osi.opendata.arcgis.com/api/download/v1/items/dc24df2a5ce84ee9a38d9afe8431ee9b/geojson?layers=1}"
+NI_BOUNDARY_URL="${NI_BOUNDARY_URL:-https://admin.opendatani.gov.uk/dataset/1f472693-2c20-483c-b367-b42382b83886/resource/ec752797-02df-43eb-bdeb-f74838771df3/download/osni_open_data_largescale_boundaries_ni_outline.geojson}"
+NTA_GTFS_URL="${GTFS_NTA_URL:-}"
+TRANSLINK_GTFS_URL="${GTFS_TRANSLINK_URL:-}"
+OVERTURE_PLACES_URL="${OVERTURE_PLACES_URL:-}"
+MAIN_ISLAND_BOUNDARY_ARCHIVE_URL="${MAIN_ISLAND_BOUNDARY_ARCHIVE_URL:-}"
+NOISE_ROUND4_URL="${NOISE_ROUND4_URL:-}"
+NOISE_ROUND3_URL="${NOISE_ROUND3_URL:-}"
+NOISE_ROUND2_URL="${NOISE_ROUND2_URL:-}"
+NOISE_NI_ROUND3_URL="${NOISE_NI_ROUND3_URL:-}"
+NOISE_NI_ROUND2_URL="${NOISE_NI_ROUND2_URL:-}"
+NOISE_NI_ROUND1_URL="${NOISE_NI_ROUND1_URL:-}"
+
+die() {
+    echo "setup.sh: $*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+download_dataset() {
+    local label="$1"
+    local target="$2"
+    local url="$3"
+    local required="$4"
+
+    if [[ -s "$target" ]]; then
+        echo "Reusing $label: $target"
+        return
+    fi
+    if [[ -z "$url" ]]; then
+        if [[ "$required" == "required" ]]; then
+            die "Missing $label at $target. Set the corresponding download URL or place the file there."
+        fi
+        echo "Skipping optional $label; no download URL was configured."
+        return
+    fi
+
+    mkdir -p "$(dirname "$target")"
+    echo "Downloading $label..."
+    curl --fail --location --retry 3 --output "${target}.part" "$url"
+    mv "${target}.part" "$target"
+}
+
+if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" && "$DB_HOST" != "::1" ]]; then
+    die "This script provisions a local PostgreSQL instance; POSTGRES_HOST must be localhost, 127.0.0.1, or ::1."
+fi
+
+for command_name in cargo curl node npm osm2pgsql pg_isready psql python3; do
+    require_command "$command_name"
+done
+
+if [[ -z "$DB_PASSWORD" ]]; then
+    if [[ -t 0 ]]; then
+        read -r -s -p "Password for PostgreSQL role '$DB_USER': " DB_PASSWORD
+        echo
+    else
+        die "Set POSTGRES_PASSWORD before running non-interactively."
+    fi
+fi
+
+export POSTGRES_HOST="$DB_HOST"
+export POSTGRES_PORT="$DB_PORT"
+export POSTGRES_DB="$DB_NAME"
+export POSTGRES_USER="$DB_USER"
+export POSTGRES_PASSWORD="$DB_PASSWORD"
+# The split variables above are URL-escaped by config.database_url(). Do not
+# let a stale DATABASE_URL silently point migrations at another database.
+unset DATABASE_URL
+
+if [[ "$EUID" -eq 0 ]]; then
+    PG_ADMIN=(runuser -u postgres --)
+    SERVICE_ADMIN=()
+elif command -v sudo >/dev/null 2>&1; then
+    PG_ADMIN=(sudo -u postgres)
+    SERVICE_ADMIN=(sudo)
+else
+    die "Run as root or install sudo so the local postgres service can be administered."
+fi
+
+echo "=== 1. Starting PostgreSQL ==="
+if ! pg_isready -q -h "$DB_HOST" -p "$DB_PORT"; then
+    if command -v systemctl >/dev/null 2>&1; then
+        "${SERVICE_ADMIN[@]}" systemctl start postgresql || true
+    fi
+    if ! pg_isready -q -h "$DB_HOST" -p "$DB_PORT" && command -v service >/dev/null 2>&1; then
+        "${SERVICE_ADMIN[@]}" service postgresql start || true
+    fi
+fi
+pg_isready -q -h "$DB_HOST" -p "$DB_PORT" || die "PostgreSQL is not accepting connections on $DB_HOST:$DB_PORT."
+
+echo "=== 2. Setting up database and extensions ==="
+"${PG_ADMIN[@]}" psql --set=ON_ERROR_STOP=1 --set=db_user="$DB_USER" --set=db_password="$DB_PASSWORD" -p "$DB_PORT" -d postgres <<'SQL'
+SELECT format('CREATE ROLE %I LOGIN PASSWORD %L CREATEDB', :'db_user', :'db_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user')
+\gexec
+SQL
+
+"${PG_ADMIN[@]}" psql --set=ON_ERROR_STOP=1 --set=db_name="$DB_NAME" --set=db_user="$DB_USER" -p "$DB_PORT" -d postgres <<'SQL'
+SELECT format('CREATE DATABASE %I OWNER %I', :'db_name', :'db_user')
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = :'db_name')
+\gexec
+SQL
+
+"${PG_ADMIN[@]}" psql --set=ON_ERROR_STOP=1 -p "$DB_PORT" -d "$DB_NAME" <<'SQL'
+CREATE EXTENSION IF NOT EXISTS postgis;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+SQL
+
+echo "=== 3. Downloading and validating local datasets ==="
+mkdir -p osm gtfs boundaries ireland_main_island_shp noise_datasets overture
+download_dataset "OSM extract" "$OSM_PATH" "$OSM_URL" required
+download_dataset "Republic of Ireland boundary" "$ROI_BOUNDARY_PATH" "$ROI_BOUNDARY_URL" required
+download_dataset "Northern Ireland boundary" "$NI_BOUNDARY_PATH" "$NI_BOUNDARY_URL" required
+download_dataset "NTA GTFS feed" "$NTA_GTFS_PATH" "$NTA_GTFS_URL" required
+download_dataset "Translink GTFS feed" "$TRANSLINK_GTFS_PATH" "$TRANSLINK_GTFS_URL" required
+download_dataset "Overture places dataset" "$OVERTURE_PATH" "$OVERTURE_PLACES_URL" optional
+
+if [[ ! -s "$MAIN_ISLAND_SHAPEFILE" && -n "$MAIN_ISLAND_BOUNDARY_ARCHIVE_URL" ]]; then
+    require_command unzip
+    main_island_archive="ireland_main_island_shp/ireland_main_island.zip"
+    download_dataset "main-island boundary archive" "$main_island_archive" "$MAIN_ISLAND_BOUNDARY_ARCHIVE_URL" optional
+    unzip -o "$main_island_archive" -d ireland_main_island_shp
+    [[ -s "$MAIN_ISLAND_SHAPEFILE" ]] || die "Main-island archive did not extract $MAIN_ISLAND_SHAPEFILE."
+fi
+if [[ -s "$MAIN_ISLAND_SHAPEFILE" ]]; then
+    echo "Reusing main-island boundary: $MAIN_ISLAND_SHAPEFILE"
+else
+    echo "Main-island boundary is optional; the two required GeoJSON boundaries will be merged instead."
+fi
+
+download_dataset "ROI Round 4 noise archive" "noise_datasets/NOISE_Round4.zip" "$NOISE_ROUND4_URL" optional
+download_dataset "ROI Round 3 noise archive" "noise_datasets/NOISE_Round3.zip" "$NOISE_ROUND3_URL" optional
+download_dataset "ROI Round 2 noise archive" "noise_datasets/NOISE_Round2.zip" "$NOISE_ROUND2_URL" optional
+download_dataset "NI Round 3 noise archive" "noise_datasets/end_noisedata_round3.zip" "$NOISE_NI_ROUND3_URL" optional
+download_dataset "NI Round 2 noise archive" "noise_datasets/end_noisedata_round2.zip" "$NOISE_NI_ROUND2_URL" optional
+download_dataset "NI Round 1 noise archive" "noise_datasets/end_noisedata_round1.zip" "$NOISE_NI_ROUND1_URL" optional
+
+echo "=== 4. Building Rust walkgraph ==="
+cargo build --release --manifest-path walkgraph/Cargo.toml
+export WALKGRAPH_BIN="$PROJECT_ROOT/walkgraph/target/release/walkgraph"
+
+echo "=== 5. Installing Python dependencies and running migrations ==="
+if [[ ! -x .venv/bin/python ]]; then
+    python3 -m venv .venv
+fi
+.venv/bin/python -m pip install --upgrade pip
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m alembic upgrade head
+
+echo "=== 6. Building frontend bundle ==="
+npm ci --prefix frontend
+npm run build --prefix frontend
+
+echo "=== Setup complete ==="
+echo "Database variables were set for this process only. Copy the POSTGRES_* values into .env before running the app in a new shell."
+echo "Optional Overture and noise source URLs are documented in .env.example; raw noise files must be converted to an artifact before use."

@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: 2026-08-31. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
+> Refreshed: 2026-09-19. Evidence grades: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from repo alone.
 
 ---
 
@@ -87,6 +87,14 @@
   - `serve --profile {full,dev,test} [--deployment]` -> `render_from_db.run_render_from_db(...)`; development can inspect the app without an archive while deployment requires the local basemap artifact and assets
 - If no subcommand is supplied, serving is the default path. (Confirmed)
 - `transit` now goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged, and can optionally auto-refresh GTFS cache first via `--auto-refresh-gtfs`. It still prints the explicit completion line plus the transit-phase `completed` tracker line. (Confirmed)
+
+### `setup.sh`
+
+- POSIX/Linux local bootstrap script for an already-installed PostgreSQL/PostGIS toolchain. (Confirmed)
+- Checks the required command-line tools, starts a local PostgreSQL service when necessary, and creates the configured role/database/extensions idempotently. (Confirmed)
+- Reuses local inputs or downloads the OSM extract plus configured required boundary/GTFS sources; it can also retrieve configured optional Overture, main-island, and raw noise datasets. (Confirmed)
+- Builds the Rust helper and frontend bundle, then installs Python requirements and applies Alembic migrations. (Confirmed)
+- Takes database settings from `POSTGRES_*`; it prompts for `POSTGRES_PASSWORD` only in an interactive shell and never writes the secret to disk. (Confirmed)
 
 ### `.github/workflows/scheduled_refresh.yml`
 
