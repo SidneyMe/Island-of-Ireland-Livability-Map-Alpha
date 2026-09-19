@@ -12,7 +12,9 @@ DB_PORT="${POSTGRES_PORT:-5432}"
 DB_NAME="${POSTGRES_DB:-livability}"
 DB_USER="${POSTGRES_USER:-livability}"
 DB_PASSWORD="${POSTGRES_PASSWORD:-}"
-MIRROR_BASE_URL="${DATASET_MIRROR_BASE_URL:-}"
+# The project-maintained release carries the required remote-install inputs.
+# Set DATASET_MIRROR_BASE_URL to replace it with another full mirror.
+MIRROR_BASE_URL="${DATASET_MIRROR_BASE_URL:-https://github.com/SidneyMe/livability-data/releases/download/v1}"
 MIRROR_BASE_URL="${MIRROR_BASE_URL%/}"
 
 if [[ -n "$MIRROR_BASE_URL" ]]; then
@@ -98,6 +100,29 @@ install_system_dependencies() {
         python3 python3-dev python3-venv unzip
 }
 
+ensure_supported_rust_toolchain() {
+    if cargo metadata --manifest-path walkgraph/Cargo.toml --format-version 1 --no-deps >/dev/null 2>&1; then
+        return
+    fi
+
+    echo "=== Rust toolchain upgrade required for walkgraph/Cargo.lock ==="
+    if ! command -v rustup >/dev/null 2>&1; then
+        local rustup_installer
+        rustup_installer="$(mktemp)"
+        curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
+            https://sh.rustup.rs -o "$rustup_installer"
+        sh "$rustup_installer" -y --profile minimal
+        rm -f "$rustup_installer"
+    fi
+
+    export PATH="$HOME/.cargo/bin:$PATH"
+    command -v rustup >/dev/null 2>&1 || die "rustup installation did not provide a usable toolchain."
+    rustup toolchain install stable --profile minimal
+    rustup default stable
+    cargo metadata --manifest-path walkgraph/Cargo.toml --format-version 1 --no-deps >/dev/null \
+        || die "Current stable Rust still cannot read walkgraph/Cargo.lock."
+}
+
 download_dataset() {
     local label="$1"
     local target="$2"
@@ -122,10 +147,23 @@ download_dataset() {
     if ! curl --fail --location --http1.1 --retry 2 --retry-delay 2 \
         --connect-timeout 30 --output "${target}.part" "$url"; then
         rm -f "${target}.part"
-        [[ -n "$fallback_url" ]] || die "Download failed for $label."
+        if [[ -z "$fallback_url" ]]; then
+            if [[ "$required" == "required" ]]; then
+                die "Download failed for $label."
+            fi
+            echo "Skipping optional $label; its configured download is unavailable."
+            return
+        fi
         echo "Primary download failed; trying the fallback source for $label..."
-        curl --fail --location --http1.1 --retry 2 --retry-delay 2 \
-            --connect-timeout 30 --output "${target}.part" "$fallback_url"
+        if ! curl --fail --location --http1.1 --retry 2 --retry-delay 2 \
+            --connect-timeout 30 --output "${target}.part" "$fallback_url"; then
+            rm -f "${target}.part"
+            if [[ "$required" == "required" ]]; then
+                die "Download failed for $label from both configured sources."
+            fi
+            echo "Skipping optional $label; both configured downloads are unavailable."
+            return
+        fi
     fi
     mv "${target}.part" "$target"
 }
@@ -139,6 +177,7 @@ fi
 for command_name in cargo curl node npm osm2pgsql pg_isready psql python3 unzip; do
     require_command "$command_name"
 done
+ensure_supported_rust_toolchain
 
 if [[ -z "$DB_PASSWORD" ]]; then
     if [[ -t 0 ]]; then

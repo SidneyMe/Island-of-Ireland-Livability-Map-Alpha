@@ -92,9 +92,11 @@
 
 - POSIX/Linux local bootstrap script for a PostgreSQL/PostGIS development toolchain. (Confirmed)
 - On Debian/Ubuntu it installs missing system dependencies (including Cargo, PostgreSQL/PostGIS, GDAL, osm2pgsql, Node, and Python tooling); other package managers receive an explicit prerequisite error. (Confirmed)
+- If the distro Cargo cannot parse `walkgraph/Cargo.lock`, it installs and selects the current stable Rust toolchain through rustup before building. (Confirmed)
 - Starts a local PostgreSQL service when necessary, and creates the configured role/database/extensions idempotently. (Confirmed)
 - Reuses local inputs or downloads the OSM extract plus configured required boundary/GTFS sources; it can also retrieve configured optional Overture, main-island, and raw noise datasets. (Confirmed)
-- `setup.sh` uses `SidneyMe/livability-data` release `v1` as the default source for the NI boundary backup only. `DATASET_MIRROR_BASE_URL` can opt into a full user-controlled release/CDN mirror containing all canonical filenames, while per-dataset URLs still take precedence. (Confirmed)
+- A missing or unreachable optional Overture/noise/main-island download logs a skip and lets bootstrap continue; required inputs still fail explicitly. (Confirmed)
+- `setup.sh` defaults to the full `SidneyMe/livability-data` release `v1` mirror, which carries the remote-install core inputs. `DATASET_MIRROR_BASE_URL` can replace it with another release/CDN base URL, while per-dataset URLs still take precedence. (Confirmed)
 - Its default OSM URL uses the Geofabrik `.de` host and its NI boundary default is a stable GitHub mirror of the NI coastline/outline because OSNI endpoints may reset or deny unattended downloads; ArcGIS Hub remains an overrideable fallback. It rejects an empty database password and sets the supplied password on the provisioned role, including on reruns. (Confirmed)
 - Builds the Rust helper and frontend bundle, then installs Python requirements and applies Alembic migrations. (Confirmed)
 - Takes database settings from `POSTGRES_*`; it prompts for `POSTGRES_PASSWORD` only in an interactive shell and never writes the secret to disk. (Confirmed)
