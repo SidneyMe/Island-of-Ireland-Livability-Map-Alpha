@@ -93,6 +93,7 @@
 - POSIX/Linux local bootstrap script for a PostgreSQL/PostGIS development toolchain. (Confirmed)
 - On Debian/Ubuntu it installs missing system dependencies (including Cargo, PostgreSQL/PostGIS, GDAL, osm2pgsql, Node, and Python tooling); other package managers receive an explicit prerequisite error. (Confirmed)
 - If the distro Cargo cannot parse `walkgraph/Cargo.lock`, it installs and selects the current stable Rust toolchain through rustup before building. (Confirmed)
+- Writes a new owner-only `.env` with its provisioned split `POSTGRES_*` settings and `WALKGRAPH_BIN`, while preserving a pre-existing `.env`. (Confirmed)
 - Starts a local PostgreSQL service when necessary, and creates the configured role/database/extensions idempotently. (Confirmed)
 - Reuses local inputs or downloads the OSM extract plus configured required boundary/GTFS sources; it can also retrieve configured optional Overture, main-island, and raw noise datasets. (Confirmed)
 - A missing or unreachable optional Overture/noise/main-island download logs a skip and lets bootstrap continue; required inputs still fail explicitly. (Confirmed)

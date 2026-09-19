@@ -200,6 +200,27 @@ export POSTGRES_PASSWORD="$DB_PASSWORD"
 # let a stale DATABASE_URL silently point migrations at another database.
 unset DATABASE_URL
 
+write_runtime_env() {
+    if [[ -e .env ]]; then
+        echo "Keeping existing .env; ensure it contains the matching POSTGRES_* settings."
+        return
+    fi
+
+    (
+        umask 077
+        printf '%s\n' \
+            '# Created by setup.sh. Keep this file private.' \
+            "POSTGRES_HOST=$DB_HOST" \
+            "POSTGRES_PORT=$DB_PORT" \
+            "POSTGRES_DB=$DB_NAME" \
+            "POSTGRES_USER=$DB_USER" \
+            "POSTGRES_PASSWORD=$DB_PASSWORD" \
+            "WALKGRAPH_BIN=$WALKGRAPH_BIN" \
+            > .env
+    )
+    echo "Created .env with owner-only permissions for future shells."
+}
+
 if [[ "$EUID" -eq 0 ]]; then
     PG_ADMIN=(runuser -u postgres --)
     SERVICE_ADMIN=()
@@ -273,6 +294,7 @@ download_dataset "NI Round 1 noise archive" "noise_datasets/end_noisedata_round1
 echo "=== 4. Building Rust walkgraph ==="
 cargo build --release --manifest-path walkgraph/Cargo.toml
 export WALKGRAPH_BIN="$PROJECT_ROOT/walkgraph/target/release/walkgraph"
+write_runtime_env
 
 echo "=== 5. Installing Python dependencies and running migrations ==="
 if [[ ! -x .venv/bin/python ]]; then
@@ -287,5 +309,5 @@ npm ci --prefix frontend
 npm run build --prefix frontend
 
 echo "=== Setup complete ==="
-echo "Database variables were set for this process only. Copy the POSTGRES_* values into .env before running the app in a new shell."
+echo "Database settings are available through .env in future shells."
 echo "Optional Overture and noise source URLs are documented in .env.example; raw noise files must be converted to an artifact before use."
