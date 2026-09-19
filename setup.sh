@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Bootstrap a local Linux/PostgreSQL development environment. This script does
-# not install operating-system packages; install the prerequisites in README.md
-# first (PostgreSQL + PostGIS, osm2pgsql, Python, Rust, Node.js, and curl).
+# Bootstrap a local Linux/PostgreSQL development environment. On Debian/Ubuntu
+# it installs missing prerequisites; other distributions must provide them.
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -13,7 +12,26 @@ DB_PORT="${POSTGRES_PORT:-5432}"
 DB_NAME="${POSTGRES_DB:-livability}"
 DB_USER="${POSTGRES_USER:-livability}"
 DB_PASSWORD="${POSTGRES_PASSWORD:-}"
-OSM_URL="${OSM_URL:-https://download.geofabrik.info/europe/ireland-and-northern-ireland-latest.osm.pbf}"
+MIRROR_BASE_URL="${DATASET_MIRROR_BASE_URL:-https://github.com/SidneyMe/livability-data/releases/download/v1}"
+MIRROR_BASE_URL="${MIRROR_BASE_URL%/}"
+
+if [[ -n "$MIRROR_BASE_URL" ]]; then
+    MIRROR_OSM_URL="$MIRROR_BASE_URL/ireland-and-northern-ireland-latest.osm.pbf"
+    MIRROR_ROI_BOUNDARY_URL="$MIRROR_BASE_URL/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson"
+    MIRROR_NI_BOUNDARY_URL="$MIRROR_BASE_URL/osni_open_data_largescale_boundaries_ni_outline.geojson"
+    MIRROR_NTA_GTFS_URL="$MIRROR_BASE_URL/nta_gtfs.zip"
+    MIRROR_TRANSLINK_GTFS_URL="$MIRROR_BASE_URL/translink_gtfs.zip"
+    MIRROR_OVERTURE_PLACES_URL="$MIRROR_BASE_URL/ireland_places.geoparquet"
+    MIRROR_MAIN_ISLAND_BOUNDARY_ARCHIVE_URL="$MIRROR_BASE_URL/ireland_main_island.zip"
+    MIRROR_NOISE_ROUND4_URL="$MIRROR_BASE_URL/NOISE_Round4.zip"
+    MIRROR_NOISE_ROUND3_URL="$MIRROR_BASE_URL/NOISE_Round3.zip"
+    MIRROR_NOISE_ROUND2_URL="$MIRROR_BASE_URL/NOISE_Round2.zip"
+    MIRROR_NOISE_NI_ROUND3_URL="$MIRROR_BASE_URL/end_noisedata_round3.zip"
+    MIRROR_NOISE_NI_ROUND2_URL="$MIRROR_BASE_URL/end_noisedata_round2.zip"
+    MIRROR_NOISE_NI_ROUND1_URL="$MIRROR_BASE_URL/end_noisedata_round1.zip"
+fi
+
+OSM_URL="${OSM_URL:-${MIRROR_OSM_URL:-https://download.geofabrik.de/europe/ireland-and-northern-ireland-latest.osm.pbf}}"
 OSM_PATH="osm/ireland-and-northern-ireland-latest.osm.pbf"
 ROI_BOUNDARY_PATH="boundaries/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson"
 NI_BOUNDARY_PATH="boundaries/osni_open_data_largescale_boundaries_ni_outline.geojson"
@@ -25,18 +43,23 @@ MAIN_ISLAND_SHAPEFILE="ireland_main_island_shp/ireland_main_island.shp"
 # The official boundary download endpoints are stable enough to provide
 # defaults. Configure the remaining source URLs because portal release links
 # change frequently.
-ROI_BOUNDARY_URL="${ROI_BOUNDARY_URL:-https://data-osi.opendata.arcgis.com/api/download/v1/items/dc24df2a5ce84ee9a38d9afe8431ee9b/geojson?layers=1}"
-NI_BOUNDARY_URL="${NI_BOUNDARY_URL:-https://admin.opendatani.gov.uk/dataset/1f472693-2c20-483c-b367-b42382b83886/resource/ec752797-02df-43eb-bdeb-f74838771df3/download/osni_open_data_largescale_boundaries_ni_outline.geojson}"
-NTA_GTFS_URL="${GTFS_NTA_URL:-}"
-TRANSLINK_GTFS_URL="${GTFS_TRANSLINK_URL:-}"
-OVERTURE_PLACES_URL="${OVERTURE_PLACES_URL:-}"
-MAIN_ISLAND_BOUNDARY_ARCHIVE_URL="${MAIN_ISLAND_BOUNDARY_ARCHIVE_URL:-}"
-NOISE_ROUND4_URL="${NOISE_ROUND4_URL:-}"
-NOISE_ROUND3_URL="${NOISE_ROUND3_URL:-}"
-NOISE_ROUND2_URL="${NOISE_ROUND2_URL:-}"
-NOISE_NI_ROUND3_URL="${NOISE_NI_ROUND3_URL:-}"
-NOISE_NI_ROUND2_URL="${NOISE_NI_ROUND2_URL:-}"
-NOISE_NI_ROUND1_URL="${NOISE_NI_ROUND1_URL:-}"
+ROI_BOUNDARY_URL="${ROI_BOUNDARY_URL:-${MIRROR_ROI_BOUNDARY_URL:-https://data-osi.opendata.arcgis.com/api/download/v1/items/dc24df2a5ce84ee9a38d9afe8431ee9b/geojson?layers=1}}"
+# OSNI's portals currently return transient resets and 403s to unattended
+# downloads. Use a stable GitHub mirror of the NI coastline/outline instead;
+# the pipeline consumes this file's geometry only. Override either URL when an
+# official source becomes reliably downloadable again.
+NI_BOUNDARY_URL="${NI_BOUNDARY_URL:-${MIRROR_NI_BOUNDARY_URL:-https://raw.githubusercontent.com/ft-interactive/geo-data/master/uk/ni-coast.geojson}}"
+NI_BOUNDARY_FALLBACK_URL="${NI_BOUNDARY_FALLBACK_URL:-https://hub.arcgis.com/api/v3/datasets/159c80fe1ad54140b429f8799f624962_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1}"
+NTA_GTFS_URL="${GTFS_NTA_URL:-${MIRROR_NTA_GTFS_URL:-}}"
+TRANSLINK_GTFS_URL="${GTFS_TRANSLINK_URL:-${MIRROR_TRANSLINK_GTFS_URL:-}}"
+OVERTURE_PLACES_URL="${OVERTURE_PLACES_URL:-${MIRROR_OVERTURE_PLACES_URL:-}}"
+MAIN_ISLAND_BOUNDARY_ARCHIVE_URL="${MAIN_ISLAND_BOUNDARY_ARCHIVE_URL:-${MIRROR_MAIN_ISLAND_BOUNDARY_ARCHIVE_URL:-}}"
+NOISE_ROUND4_URL="${NOISE_ROUND4_URL:-${MIRROR_NOISE_ROUND4_URL:-}}"
+NOISE_ROUND3_URL="${NOISE_ROUND3_URL:-${MIRROR_NOISE_ROUND3_URL:-}}"
+NOISE_ROUND2_URL="${NOISE_ROUND2_URL:-${MIRROR_NOISE_ROUND2_URL:-}}"
+NOISE_NI_ROUND3_URL="${NOISE_NI_ROUND3_URL:-${MIRROR_NOISE_NI_ROUND3_URL:-}}"
+NOISE_NI_ROUND2_URL="${NOISE_NI_ROUND2_URL:-${MIRROR_NOISE_NI_ROUND2_URL:-}}"
+NOISE_NI_ROUND1_URL="${NOISE_NI_ROUND1_URL:-${MIRROR_NOISE_NI_ROUND1_URL:-}}"
 
 die() {
     echo "setup.sh: $*" >&2
@@ -47,11 +70,40 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
 
+install_system_dependencies() {
+    local -a missing_commands=()
+    local command_name
+    for command_name in cargo curl node npm osm2pgsql pg_isready psql python3 unzip; do
+        command -v "$command_name" >/dev/null 2>&1 || missing_commands+=("$command_name")
+    done
+
+    if [[ ${#missing_commands[@]} -eq 0 ]]; then
+        return
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        die "Missing required commands: ${missing_commands[*]}. Install them with your system package manager, then rerun setup.sh."
+    fi
+
+    local -a apt_admin=()
+    if [[ "$EUID" -ne 0 ]]; then
+        command -v sudo >/dev/null 2>&1 || die "Missing required commands: ${missing_commands[*]}. Rerun as root or install sudo so setup.sh can install them."
+        apt_admin=(sudo)
+    fi
+
+    echo "=== 0. Installing missing system dependencies: ${missing_commands[*]} ==="
+    "${apt_admin[@]}" apt-get update
+    DEBIAN_FRONTEND=noninteractive "${apt_admin[@]}" apt-get install --yes \
+        build-essential cargo curl gdal-bin libgdal-dev libgeos-dev libpq-dev libproj-dev \
+        nodejs npm osm2pgsql postgis postgresql postgresql-contrib postgresql-postgis \
+        python3 python3-dev python3-venv unzip
+}
+
 download_dataset() {
     local label="$1"
     local target="$2"
     local url="$3"
     local required="$4"
+    local fallback_url="${5:-}"
 
     if [[ -s "$target" ]]; then
         echo "Reusing $label: $target"
@@ -67,22 +119,34 @@ download_dataset() {
 
     mkdir -p "$(dirname "$target")"
     echo "Downloading $label..."
-    curl --fail --location --retry 3 --output "${target}.part" "$url"
+    if ! curl --fail --location --http1.1 --retry 4 --retry-all-errors --retry-delay 2 \
+        --connect-timeout 30 --output "${target}.part" "$url"; then
+        rm -f "${target}.part"
+        [[ -n "$fallback_url" ]] || die "Download failed for $label."
+        echo "Primary download failed; trying the fallback source for $label..."
+        curl --fail --location --http1.1 --retry 4 --retry-all-errors --retry-delay 2 \
+            --connect-timeout 30 --output "${target}.part" "$fallback_url"
+    fi
     mv "${target}.part" "$target"
 }
+
+install_system_dependencies
 
 if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" && "$DB_HOST" != "::1" ]]; then
     die "This script provisions a local PostgreSQL instance; POSTGRES_HOST must be localhost, 127.0.0.1, or ::1."
 fi
 
-for command_name in cargo curl node npm osm2pgsql pg_isready psql python3; do
+for command_name in cargo curl node npm osm2pgsql pg_isready psql python3 unzip; do
     require_command "$command_name"
 done
 
 if [[ -z "$DB_PASSWORD" ]]; then
     if [[ -t 0 ]]; then
-        read -r -s -p "Password for PostgreSQL role '$DB_USER': " DB_PASSWORD
-        echo
+        while [[ -z "$DB_PASSWORD" ]]; do
+            read -r -s -p "Password for PostgreSQL role '$DB_USER': " DB_PASSWORD
+            echo
+            [[ -n "$DB_PASSWORD" ]] || echo "Password cannot be empty." >&2
+        done
     else
         die "Set POSTGRES_PASSWORD before running non-interactively."
     fi
@@ -109,7 +173,7 @@ fi
 
 echo "=== 1. Starting PostgreSQL ==="
 if ! pg_isready -q -h "$DB_HOST" -p "$DB_PORT"; then
-    if command -v systemctl >/dev/null 2>&1; then
+    if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
         "${SERVICE_ADMIN[@]}" systemctl start postgresql || true
     fi
     if ! pg_isready -q -h "$DB_HOST" -p "$DB_PORT" && command -v service >/dev/null 2>&1; then
@@ -122,6 +186,8 @@ echo "=== 2. Setting up database and extensions ==="
 "${PG_ADMIN[@]}" psql --set=ON_ERROR_STOP=1 --set=db_user="$DB_USER" --set=db_password="$DB_PASSWORD" -p "$DB_PORT" -d postgres <<'SQL'
 SELECT format('CREATE ROLE %I LOGIN PASSWORD %L CREATEDB', :'db_user', :'db_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user')
+\gexec
+SELECT format('ALTER ROLE %I LOGIN PASSWORD %L CREATEDB', :'db_user', :'db_password')
 \gexec
 SQL
 
@@ -140,7 +206,7 @@ echo "=== 3. Downloading and validating local datasets ==="
 mkdir -p osm gtfs boundaries ireland_main_island_shp noise_datasets overture
 download_dataset "OSM extract" "$OSM_PATH" "$OSM_URL" required
 download_dataset "Republic of Ireland boundary" "$ROI_BOUNDARY_PATH" "$ROI_BOUNDARY_URL" required
-download_dataset "Northern Ireland boundary" "$NI_BOUNDARY_PATH" "$NI_BOUNDARY_URL" required
+download_dataset "Northern Ireland boundary" "$NI_BOUNDARY_PATH" "$NI_BOUNDARY_URL" required "$NI_BOUNDARY_FALLBACK_URL"
 download_dataset "NTA GTFS feed" "$NTA_GTFS_PATH" "$NTA_GTFS_URL" required
 download_dataset "Translink GTFS feed" "$TRANSLINK_GTFS_PATH" "$TRANSLINK_GTFS_URL" required
 download_dataset "Overture places dataset" "$OVERTURE_PATH" "$OVERTURE_PLACES_URL" optional

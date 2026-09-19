@@ -90,9 +90,12 @@
 
 ### `setup.sh`
 
-- POSIX/Linux local bootstrap script for an already-installed PostgreSQL/PostGIS toolchain. (Confirmed)
-- Checks the required command-line tools, starts a local PostgreSQL service when necessary, and creates the configured role/database/extensions idempotently. (Confirmed)
+- POSIX/Linux local bootstrap script for a PostgreSQL/PostGIS development toolchain. (Confirmed)
+- On Debian/Ubuntu it installs missing system dependencies (including Cargo, PostgreSQL/PostGIS, GDAL, osm2pgsql, Node, and Python tooling); other package managers receive an explicit prerequisite error. (Confirmed)
+- Starts a local PostgreSQL service when necessary, and creates the configured role/database/extensions idempotently. (Confirmed)
 - Reuses local inputs or downloads the OSM extract plus configured required boundary/GTFS sources; it can also retrieve configured optional Overture, main-island, and raw noise datasets. (Confirmed)
+- `setup.sh` defaults its user-controlled dataset mirror to `SidneyMe/livability-data` release `v1`; `DATASET_MIRROR_BASE_URL` can replace it with another release/CDN base URL, while per-dataset URLs still take precedence. (Confirmed)
+- Its default OSM URL uses the Geofabrik `.de` host and its NI boundary default is a stable GitHub mirror of the NI coastline/outline because OSNI endpoints may reset or deny unattended downloads; ArcGIS Hub remains an overrideable fallback. It rejects an empty database password and sets the supplied password on the provisioned role, including on reruns. (Confirmed)
 - Builds the Rust helper and frontend bundle, then installs Python requirements and applies Alembic migrations. (Confirmed)
 - Takes database settings from `POSTGRES_*`; it prompts for `POSTGRES_PASSWORD` only in an interactive shell and never writes the secret to disk. (Confirmed)
 
