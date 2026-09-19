@@ -12,7 +12,7 @@ DB_PORT="${POSTGRES_PORT:-5432}"
 DB_NAME="${POSTGRES_DB:-livability}"
 DB_USER="${POSTGRES_USER:-livability}"
 DB_PASSWORD="${POSTGRES_PASSWORD:-}"
-MIRROR_BASE_URL="${DATASET_MIRROR_BASE_URL:-https://github.com/SidneyMe/livability-data/releases/download/v1}"
+MIRROR_BASE_URL="${DATASET_MIRROR_BASE_URL:-}"
 MIRROR_BASE_URL="${MIRROR_BASE_URL%/}"
 
 if [[ -n "$MIRROR_BASE_URL" ]]; then
@@ -48,7 +48,7 @@ ROI_BOUNDARY_URL="${ROI_BOUNDARY_URL:-${MIRROR_ROI_BOUNDARY_URL:-https://data-os
 # downloads. Use a stable GitHub mirror of the NI coastline/outline instead;
 # the pipeline consumes this file's geometry only. Override either URL when an
 # official source becomes reliably downloadable again.
-NI_BOUNDARY_URL="${NI_BOUNDARY_URL:-${MIRROR_NI_BOUNDARY_URL:-https://raw.githubusercontent.com/ft-interactive/geo-data/master/uk/ni-coast.geojson}}"
+NI_BOUNDARY_URL="${NI_BOUNDARY_URL:-${MIRROR_NI_BOUNDARY_URL:-https://github.com/SidneyMe/livability-data/releases/download/v1/osni_open_data_largescale_boundaries_ni_outline.geojson}}"
 NI_BOUNDARY_FALLBACK_URL="${NI_BOUNDARY_FALLBACK_URL:-https://hub.arcgis.com/api/v3/datasets/159c80fe1ad54140b429f8799f624962_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1}"
 NTA_GTFS_URL="${GTFS_NTA_URL:-${MIRROR_NTA_GTFS_URL:-}}"
 TRANSLINK_GTFS_URL="${GTFS_TRANSLINK_URL:-${MIRROR_TRANSLINK_GTFS_URL:-}}"
@@ -119,12 +119,12 @@ download_dataset() {
 
     mkdir -p "$(dirname "$target")"
     echo "Downloading $label..."
-    if ! curl --fail --location --http1.1 --retry 4 --retry-all-errors --retry-delay 2 \
+    if ! curl --fail --location --http1.1 --retry 2 --retry-delay 2 \
         --connect-timeout 30 --output "${target}.part" "$url"; then
         rm -f "${target}.part"
         [[ -n "$fallback_url" ]] || die "Download failed for $label."
         echo "Primary download failed; trying the fallback source for $label..."
-        curl --fail --location --http1.1 --retry 4 --retry-all-errors --retry-delay 2 \
+        curl --fail --location --http1.1 --retry 2 --retry-delay 2 \
             --connect-timeout 30 --output "${target}.part" "$fallback_url"
     fi
     mv "${target}.part" "$target"
