@@ -23,14 +23,9 @@ if [[ -n "$MIRROR_BASE_URL" ]]; then
     MIRROR_NI_BOUNDARY_URL="$MIRROR_BASE_URL/osni_open_data_largescale_boundaries_ni_outline.geojson"
     MIRROR_NTA_GTFS_URL="$MIRROR_BASE_URL/nta_gtfs.zip"
     MIRROR_TRANSLINK_GTFS_URL="$MIRROR_BASE_URL/translink_gtfs.zip"
-    MIRROR_OVERTURE_PLACES_URL="$MIRROR_BASE_URL/ireland_places.geoparquet"
-    MIRROR_MAIN_ISLAND_BOUNDARY_ARCHIVE_URL="$MIRROR_BASE_URL/ireland_main_island.zip"
-    MIRROR_NOISE_ROUND4_URL="$MIRROR_BASE_URL/NOISE_Round4.zip"
-    MIRROR_NOISE_ROUND3_URL="$MIRROR_BASE_URL/NOISE_Round3.zip"
-    MIRROR_NOISE_ROUND2_URL="$MIRROR_BASE_URL/NOISE_Round2.zip"
-    MIRROR_NOISE_NI_ROUND3_URL="$MIRROR_BASE_URL/end_noisedata_round3.zip"
-    MIRROR_NOISE_NI_ROUND2_URL="$MIRROR_BASE_URL/end_noisedata_round2.zip"
-    MIRROR_NOISE_NI_ROUND1_URL="$MIRROR_BASE_URL/end_noisedata_round1.zip"
+    # The v1 release deliberately contains only the five required bootstrap
+    # inputs above. Optional inputs are never guessed from the mirror URL:
+    # configure their individual *_URL variables when they are available.
 fi
 
 OSM_URL="${OSM_URL:-${MIRROR_OSM_URL:-https://download.geofabrik.de/europe/ireland-and-northern-ireland-latest.osm.pbf}}"
@@ -272,11 +267,13 @@ download_dataset "Translink GTFS feed" "$TRANSLINK_GTFS_PATH" "$TRANSLINK_GTFS_U
 download_dataset "Overture places dataset" "$OVERTURE_PATH" "$OVERTURE_PLACES_URL" optional
 
 if [[ ! -s "$MAIN_ISLAND_SHAPEFILE" && -n "$MAIN_ISLAND_BOUNDARY_ARCHIVE_URL" ]]; then
-    require_command unzip
     main_island_archive="ireland_main_island_shp/ireland_main_island.zip"
     download_dataset "main-island boundary archive" "$main_island_archive" "$MAIN_ISLAND_BOUNDARY_ARCHIVE_URL" optional
-    unzip -o "$main_island_archive" -d ireland_main_island_shp
-    [[ -s "$MAIN_ISLAND_SHAPEFILE" ]] || die "Main-island archive did not extract $MAIN_ISLAND_SHAPEFILE."
+    if [[ -s "$main_island_archive" ]]; then
+        require_command unzip
+        unzip -o "$main_island_archive" -d ireland_main_island_shp
+        [[ -s "$MAIN_ISLAND_SHAPEFILE" ]] || die "Main-island archive did not extract $MAIN_ISLAND_SHAPEFILE."
+    fi
 fi
 if [[ -s "$MAIN_ISLAND_SHAPEFILE" ]]; then
     echo "Reusing main-island boundary: $MAIN_ISLAND_SHAPEFILE"
