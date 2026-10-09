@@ -5,6 +5,10 @@ services:
       context: .
       args:
         PROTOMAPS_BASEMAPS_COMMIT: ${PROTOMAPS_BASEMAPS_COMMIT}
+    environment:
+      # The JVM default (25% of the Docker VM) is ~2 GB on an 8 GB Docker Desktop
+      # VM, which runs out of heap in the OSM stage for the Ireland + NI extract.
+      JAVA_TOOL_OPTIONS: "-Xmx${BASEMAP_JAVA_HEAP:-5g}"
     working_dir: /work
     volumes:
       - ../.livability_cache/basemap/work:/work
