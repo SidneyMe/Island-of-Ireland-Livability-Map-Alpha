@@ -32,8 +32,9 @@ overture/                  optional Overture Places loader + OSM/Overture merge 
 serve_from_db.py           runtime HTTP server: PMTiles ranges, /api/*, PNG surface tiles, static, exports
 serve_routes.py            pure route matching / dispatch priority, unit-tested without HTTP
 frontend/src/              MapLibre app as small modules; static/dist/ is the built, checked-in bundle
-scripts/                   sanity_check, db_integrity_check, refresh_osm, bench_valhalla, ci_local, win/*.cmd
-tests/ (37 files)          Python unittest/pytest suite; frontend/src/*.test.js (12 files) is the Node suite
+scripts/                   fetch_datasets (all inputs), sanity_check, db_integrity_check, refresh_osm, bench_valhalla, ci_local, win/*.cmd
+setup.sh / setup.cmd+ps1   one-command bootstrap (Linux / Windows): prereqs, DB, datasets, build, full pipeline
+tests/ (38 files)          Python unittest/pytest suite; frontend/src/*.test.js (12 files) is the Node suite
 docs/                      PHASES.md (design), notes.md (authority/methodology), BASEMAP.md
 AGENTS.md                  always-loaded agent instructions; repo_map.md (this file) is the deep map
 ```
@@ -42,7 +43,7 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 
 | If the task is … | Read (in order) | Usually skip |
 |---|---|---|
-| Scoring math: caps, decay, units, total score | `config.py` (`CAPS`, `DISTANCE_DECAY_HALF_DISTANCE_M`, `*_TIER_UNITS`, `SCORING_MODEL_VERSION`) → `precompute/grid.py` (`score_cell`, `score_cells`, `_normalized_area_ratio`) → `precompute/amenity_tiers.py` → `tests/test_amenity_tiers.py`, `tests/test_mode_aware_scoring.py` | walkgraph, noise, frontend |
+| Scoring math: caps, decay, units, total score | `config.py` (`CAPS`, `DISTANCE_DECAY_HALF_DISTANCE_M`, `*_TIER_UNITS`, `SCORING_MODEL_VERSION`) → `precompute/grid.py` (`score_cell`, `_effective_area_metadata`) → `precompute/surface.py` (`component_scores_for_nodes`, fine-surface mirror) → `precompute/amenity_tiers.py`, `precompute/amenity_clusters.py` → `tests/test_amenity_tiers.py`, `tests/test_mode_aware_scoring.py` | noise, frontend; Rust unless changing reachability |
 | Add / change an amenity category, tier, or OSM tag | `config.py` (`TAGS`, tier-unit tables) → `osm2pgsql_livability.lua` → `db_postgis/reads.py` (`load_source_amenity_rows`, `_AMENITY_CATEGORY_VALUES`) → `precompute/amenity_tiers.py` → new migration → `pmtiles_bake_worker.py` (if it reaches tiles) | transit, noise |
 | Hidden penalties: railway proximity / road proximity | `config.py` (`RAILWAY_PROXIMITY_*`, `ROAD_PROXIMITY_CLASS_SETTINGS`) → `transit/railway_corridors.py` → `precompute/road_proximity.py` → `precompute/grid.py` (deduction) → `tests/test_road_proximity.py` | frontend, noise |
 | Transport scoring / GTFS frequency tiers | `transit/service.py` (tier units) → `walkgraph/src/gtfs/mod.rs` (`bus_frequency_tier_from_headway`, `transport_score_units_from_frequency`, `classify_services`) → `precompute/phases.py` (`phase_amenities_impl` transport split) → `db_postgis/reads.py` (`load_transport_reality_rows_for_scoring`) → `tests/test_transit_phase1.py` | physics of frontend styling |
@@ -74,7 +75,7 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 |---|---|
 | `build_config_hashes`, `geo_hash`, `reach_hash`, `score_hash`, `render_hash`, `config_hash`, `build_key` | `config.py` |
 | `importer_config_hash`, `transit_config_hash`, `current_normalization_scope_hash`, `package_snapshot` | `config.py` |
-| `IMPORTER_CONFIG_VERSION` = `"2026-08-31-gtfs-only-transport-1"` (l.56), `SCORING_MODEL_VERSION` = `"v3-gtfs-only-transport-2026-08-31"` (l.453) | `config.py` |
+| `IMPORTER_CONFIG_VERSION` = `"2026-08-31-gtfs-only-transport-1"` (l.56), `SCORING_MODEL_VERSION` = `"v3-gtfs-only-transport-rail-proximity-2026-09-25"` (l.453) | `config.py` |
 | `TAGS`, `CAPS`, `WALK_RADIUS_M`, `TRANSIT_ACCESS_WALK_RADIUS_M`, `TRANSIT_EGRESS_WALK_RADIUS_M` | `config.py` |
 | `TRANSIT_REALITY_ALGO_VERSION` (10), `AMENITY_MERGE_ALGO_VERSION` (4), `WALKGRAPH_FORMAT_VERSION` (3) | `config.py` |
 | `FINE_SURFACE_SCHEMA_VERSION` (2), `PMTILES_SCHEMA_VERSION` (13), `GRID_GEOMETRY_SCHEMA_VERSION` (4), `CACHE_SCHEMA_VERSION` (14) | `config.py` |
@@ -136,6 +137,11 @@ python scripts/sanity_check.py --validate-only      # fixture structure only
 python scripts/sanity_check.py --profile full       # fixture vs live build
 python scripts/db_integrity_check.py                # read-only duplicate/NULL preflight
 
+# --- bootstrap / inputs ---
+./setup.sh [--skip-build] [--refresh-data]          # Linux one-command install + full build (setup.cmd on Windows)
+python scripts/fetch_datasets.py --list             # every input, its target path, and source order
+python scripts/fetch_datasets.py [--refresh] [--only KEY ...]
+
 # --- pipeline ---
 python main.py precompute --profile dev --explain   # planner decision only, fast, no side effects
 python main.py precompute --profile dev             # cheap iteration profile (coarse only)
@@ -178,13 +184,15 @@ Get-ChildItem -Recurse -File -Include *.py,*.js,*.rs,*.md | Where-Object { $_.Fu
 | Input | Exact path | Used by | If missing |
 |---|---|---|---|
 | OSM extract | `osm/ireland-and-northern-ireland-latest.osm.pbf` | import, transit fingerprint, basemap | import fails / `--auto-refresh-import` needed |
-| osm2pgsql flat nodes | `osm/flat-nodes.bin` (generated, ~37 GiB) | import cache | regenerated (slow) |
+| osm2pgsql flat nodes | `osm/flat-nodes.bin` (~40 GiB) — only when `OSM2PGSQL_FLAT_NODES` is set; default off | import with `--create` (never `--append`) | nothing — a stale copy is dead weight and safe to delete |
 | GTFS feeds | `gtfs/nta_gtfs.zip`, `gtfs/translink_gtfs.zip` (or `GTFS_NTA_ZIP_PATH` / `GTFS_TRANSLINK_ZIP_PATH` / `GTFS_*_URL`) | transit reality, transport scoring | **zero transport → publish gate blocks the build** |
 | ROI boundary | `boundaries/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson` | study area fallback | fallback path unavailable |
 | NI boundary | `boundaries/osni_open_data_largescale_boundaries_ni_outline.geojson` | study area fallback | fallback path unavailable |
 | Main-island coast (preferred) | `ireland_main_island_shp/ireland_main_island.shp` + `.shx/.dbf/.prj/.cpg` | exact study-area mask | falls back to ROI+NI merge + coastal cleanup |
 | Overture Places (optional) | `overture/ireland_places.geoparquet` (+ `.state`) | amenity merge | degrades gracefully |
-| Noise datasets (optional) | `noise_datasets/*.zip` (6 rounds) | display-only overlay | overlay absent, scoring unaffected |
+| Noise datasets | `noise_datasets/NOISE_Round{2,3,4}.zip`, `end_noisedata_round{1,2,3}.zip` | display-only overlay; `full` builds an **accurate** artifact from all rounds | `full` precompute fails building the accurate artifact unless one is already active; scoring unaffected |
+
+All inputs are fetched by `scripts/fetch_datasets.py` (env `*_URL` → mirror `DATASET_MIRROR_BASE_URL`, default `livability-data` release v2 → official upstream). EPA noise is email-gated and OpenDataNI returns 403 to scripts, so those archives and the Translink GTFS exist only in the mirror.
 
 Local trap: the repo root contains an **empty directory** named `ireland-and-northern-ireland-latest.osm.pbf/`. It is not the PBF. The real extract lives under `osm/`.
 
@@ -199,7 +207,7 @@ Local trap: the repo root contains an **empty directory** named `ireland-and-nor
 | `config.py` | 1376 | Grep the symbol; constants only |
 | `serve_from_db.py` | 1310 | Grep `RuntimeState` / route names |
 | `precompute/surface.py` | 1238 | Grep `FineSurfaceRuntime` |
-| `repo_map.md` | 1048 | This file — read §0 and the one section you need; never end-to-end |
+| `repo_map.md` | 1055 | This file — read §0 and the one section you need; never end-to-end |
 | `precompute/workflow.py` | 927 | Read the plan-execution branch you need |
 | `study_area.py` | 864 | Grep `clean_coastal_artifacts` / `load_island_geometry_metric` |
 | `precompute/network.py` | 815 | Dense math; grep the `precompute_walk_*` entry point |
@@ -215,7 +223,7 @@ Local trap: the repo root contains an **empty directory** named `ireland-and-nor
 | `noise_artifacts/ingest.py` | 533 | Grep `NOISE_INGEST_*` |
 | `pmtiles_bake_worker.py` | 486 | Small enough, but keep it import-light |
 
-Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_artifacts/builder.py` 446, `precompute/publish.py` 443, `README.md` 410, `precompute/valhalla_reachability.py` 405, `precompute/grid.py` 397, `schema.sql` 389 (snapshot, do not treat as truth), `precompute/tiers.py` 364, `CHANGELOG.md` 358, `precompute/cache.py` 262, `precompute/_planning.py` 240, `basemap.py` 211, `precompute/amenity_tiers.py` 199, `mapbox_vector_tile.py` 173 (root module — grep its importers before assuming the PyPI package), `osm2pgsql_livability.lua` 153, `transit_refresh_runner.py` 152, `precompute/road_proximity.py` 146, `db_postgis/manifests.py` 144, `precompute/amenity_clusters.py` 127, `precompute/mode_aware.py` 122, `walkgraph_support.py` 104, `serve_routes.py` 60. Refresh all sizes with the command in §0.5.
+Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_artifacts/builder.py` 446, `precompute/publish.py` 443, `README.md` 428, `precompute/valhalla_reachability.py` 405, `precompute/grid.py` 397, `schema.sql` 389 (snapshot, do not treat as truth), `precompute/tiers.py` 364, `CHANGELOG.md` 358, `precompute/cache.py` 262, `precompute/_planning.py` 240, `basemap.py` 211, `precompute/amenity_tiers.py` 199, `mapbox_vector_tile.py` 173 (root module — grep its importers before assuming the PyPI package), `osm2pgsql_livability.lua` 153, `transit_refresh_runner.py` 152, `precompute/road_proximity.py` 146, `db_postgis/manifests.py` 144, `precompute/amenity_clusters.py` 127, `precompute/mode_aware.py` 122, `walkgraph_support.py` 104, `serve_routes.py` 60. Refresh all sizes with the command in §0.5.
 
 ### 0.8 Never read / never edit
 
@@ -227,7 +235,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 | `schema.sql` | Stale bootstrap snapshot; Alembic is canonical |
 | `CHANGELOG.md` | History only; read the top entry at most |
 | `db_postgis/migrations/versions/*` except head/relevant one | 23 migrations; read `000023` and the file you are changing |
-| `osm/flat-nodes.bin`, `osm/*.pbf` | ~37 GiB generated/binary |
+| `osm/flat-nodes.bin`, `osm/*.pbf` | Large binary inputs (flat-nodes only exists when opted in) |
 | `noise_datasets/*.zip`, `overture/*.geoparquet`, `gtfs/*.zip` | Large local inputs |
 | `legacy/`, `data/`, `reports/`, `.agents/`, `.test_logs/`, `__pycache__`, `.mypy_cache`, `.uv-cache`, `.uv-python` | Local/generated/empty; never runtime truth |
 | `render_from_db.py` | 27-line compatibility wrapper around `serve_from_db.py` |
@@ -239,11 +247,14 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 3. `python main.py import` also runs `basemap.build_if_stale()` → **requires Docker**. On a Docker-less server use `python main.py precompute --auto-refresh-import` instead.
 4. `precompute` refuses to publish a build with **zero GTFS transport**; only `--allow-missing-transport` overrides it.
 5. The noise overlay is **display-only** and never scored. Penalising noise is new work, not a bug fix.
-6. Mode-aware transit is always unavailable: `phase_reachability_impl` passes `transit_effective_units_by_node=None`. Walk and bike are real; transit is a stub.
+6. Mode-aware transit is always unavailable: `phase_grids_impl` supplies no transit effective units. Coarse grids can carry walk/bike comparison payloads; fine-surface scoring receives neither bike nor transit units. The published default remains walk-only.
 7. `HASHES = build_config_hashes()` and `_STATE = _BuildState.bootstrap()` run at **import time**; missing inputs hash as zero-like metadata instead of raising, which silently reuses caches.
 8. `pmtiles_bake_worker._resolution_for_zoom()` is **not** `config.resolution_for_zoom()`.
 9. `pmtiles_bake_worker.py` must stay import-light (Windows spawn); fine-grid work belongs in `fine_vector_pmtiles_worker.py`.
 10. Transport scoring is strictly GTFS-only: `TAGS["transport"] = {"source": "gtfs_direct"}`, `_AMENITY_CATEGORY_VALUES` excludes transport, and OSM stop helpers were deleted (`load_osm_transport_features`, `clear_normalized_network_rows`, `transit/chained_reach.py` no longer exist — do not import them).
+11. Noise accuracy follows the profile: `full` defaults to **accurate** (needs all six raw noise archives + ≥30 GB free), `dev`/`test` to `dev_fast`. Set `NOISE_ACCURACY_MODE=dev_fast` to publish `full` from the cheap artifact.
+12. PMTiles archives are "current" only when their metadata `build_key` matches the build (`pmtiles_archive_build_key` / `_pmtiles_archive_is_current` in `precompute/workflow.py`). File existence alone is not enough: a failed bake keeps the old archive while the manifest is already `complete`, and a rerun then rebakes.
+13. `precompute --explain` prints `Transit reality fingerprint: transit-unavailable` and a provisional build key: transit is resolved only during a real run, so do not treat that line as a transit failure.
 
 ---
 
@@ -334,19 +345,13 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 - If no subcommand is supplied, serving is the default path. (Confirmed)
 - `transit` goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged, and can auto-refresh GTFS cache first. (Confirmed)
 
-### `setup.sh`
+### `setup.sh` (Linux) and `setup.cmd` → `setup.ps1` (Windows)
 
-- POSIX/Linux local bootstrap for a PostgreSQL/PostGIS development toolchain. (Confirmed)
-- On Debian/Ubuntu it installs missing system dependencies (including Cargo, PostgreSQL/PostGIS, GDAL, osm2pgsql, Node, and Python tooling); other package managers receive an explicit prerequisite error. (Confirmed)
-- If the distro Cargo cannot parse `walkgraph/Cargo.lock`, it installs and selects the current stable Rust toolchain through rustup before building. (Confirmed)
-- Writes a new owner-only `.env` with its provisioned split `POSTGRES_*` settings and `WALKGRAPH_BIN`, while preserving a pre-existing `.env`. (Confirmed)
-- Starts a local PostgreSQL service when necessary and creates the configured role/database/extensions idempotently. (Confirmed)
-- Reuses local inputs or downloads the OSM extract plus configured required boundary/GTFS sources; can also retrieve configured optional Overture, main-island, and raw noise datasets. (Confirmed)
-- A missing or unreachable optional Overture/noise/main-island download logs a skip and lets bootstrap continue; a skipped main-island archive is never passed to `unzip`. Required inputs still fail explicitly. (Confirmed)
-- Defaults to the `SidneyMe/livability-data` release `v1` mirror, which carries its five remote-install core inputs. Optional asset URLs are not guessed from that base because v1 does not carry them; configure their individual URLs when available. `DATASET_MIRROR_BASE_URL` can replace the core mirror, while per-dataset URLs take precedence. (Confirmed)
-- Its default OSM URL uses the Geofabrik `.de` host and its NI boundary default is a stable GitHub mirror of the NI coastline/outline because OSNI endpoints may reset or deny unattended downloads; ArcGIS Hub remains an overrideable fallback. It rejects an empty database password and sets the supplied password on the provisioned role, including on reruns. (Confirmed)
-- Builds the Rust helper and frontend bundle, then installs Python requirements and applies Alembic migrations. (Confirmed)
-- Takes database settings from `POSTGRES_*`; it prompts for `POSTGRES_PASSWORD` only in an interactive shell and never writes the secret to disk. (Confirmed)
+- One-command bootstrap up to a servable map; `--skip-build` / `-SkipBuild` stops before the pipeline, `--refresh-data` / `-RefreshData` re-downloads OSM + GTFS. Reruns reuse finished work (planner skips, datasets reused). (Confirmed)
+- Both call `scripts/fetch_datasets.py` (stdlib only) for **every** input, so the dataset list lives in one place. (Confirmed)
+- After the frontend build they run `main.py import` (also builds the basemap, hence Docker) → `main.py transit` → `main.py precompute --profile full` (accurate noise) → `scripts/sanity_check.py --profile full`, then print the `serve --deployment` command. (Confirmed)
+- `setup.sh`: Debian/Ubuntu packages via apt (Cargo, PostgreSQL/PostGIS, GDAL incl. `ogr2ogr`, osm2pgsql, Node, Python); Docker Engine + Compose v2 via `get.docker.com` when `docker compose` is missing, adds the user to `docker` and runs the import through `sg docker` until relogin; rustup stable fallback when distro Cargo fails to build walkgraph (Ubuntu 24.04's Cargo 1.75 cannot read the v4 `Cargo.lock`); Node 22 from NodeSource when the distro Node is older (Vite 7); local PostgreSQL service + role/db/extensions idempotently; prompts for `POSTGRES_PASSWORD` only in an interactive shell and writes it into a new owner-only `.env` (an existing `.env` is kept). (Confirmed)
+- `setup.ps1`: winget installs Miniforge, VS Build Tools + rustup (only when `cargo` is missing), and Docker Desktop; creates/updates conda env `livability-gdal` from `environment.yml` (GDAL, PostgreSQL + PostGIS, osm2pgsql, Node 22, Python deps) and runs every step through `scripts\win\geo_env.cmd`. Reuses the database from `.env` when it is reachable; otherwise creates a private cluster in `%LOCALAPPDATA%\livability\pgdata` (random password, first free port ≥5432) and **appends** its settings to `.env` — it never overwrites `.env`. The private cluster does not auto-start after a reboot; rerunning `setup.cmd` starts it. (Confirmed)
 
 ### `.github/workflows/scheduled_refresh.yml`
 
@@ -533,7 +538,7 @@ Notes:
   - `DISTANCE_DECAY_HALF_DISTANCE_M = {"shops": 150.0, "transport": 250.0, "healthcare": 300.0, "parks": 350.0}`
   - `TRANSIT_REALITY_ALGO_VERSION = 10`, `AMENITY_MERGE_ALGO_VERSION = 4`, `WALKGRAPH_FORMAT_VERSION = 3`
   - `FINE_SURFACE_SCHEMA_VERSION = 2`, `PMTILES_SCHEMA_VERSION = 13`, `GRID_GEOMETRY_SCHEMA_VERSION = 4`, `CACHE_SCHEMA_VERSION = 14`
-  - `IMPORTER_CONFIG_VERSION = "2026-08-31-gtfs-only-transport-1"`, `SCORING_MODEL_VERSION = "v3-gtfs-only-transport-2026-08-31"`
+  - `IMPORTER_CONFIG_VERSION = "2026-08-31-gtfs-only-transport-1"`, `SCORING_MODEL_VERSION = "v3-gtfs-only-transport-rail-proximity-2026-09-25"`
   - `WALK_RADIUS_M = 500`, `TRANSIT_ACCESS_WALK_RADIUS_M = 800`, `TRANSIT_EGRESS_WALK_RADIUS_M = 800`
   - `RAILWAY_PROXIMITY_ACTIVE_MODES = ("rail", "tram")`, full-penalty at 50 m, zero at 200 m, `RAILWAY_PROXIMITY_MAX_PENALTY = 4.0`
   - `ROAD_PROXIMITY_CLASS_SETTINGS`: motorway/trunk/primary with max penalties 4.0 / 3.0 / 2.0
@@ -607,6 +612,8 @@ Notes:
 
 - Purpose: per-cell scoring: category totals, caps, distance decay, area-ratio normalization, hidden penalty deduction. (Confirmed)
 - Main functions: `score_cell`, `score_cells`; `_MIN_DENSITY_AREA_RATIO = 0.25` guards sliver cells via `_normalized_area_ratio`.
+- For all four current categories, the component is `25 * min(effective_units / max(effective_area_ratio, 0.25) / cap, 1)`. `_effective_area_metadata` derives the ratio from the clipped grid-cell land area, not the walk catchment; identical reachable units can therefore contribute up to four times more in a coastal cell. `precompute/surface.py::component_scores_for_nodes` mirrors this formula.
+- Effective units sum cluster-representative tier units with `0.5 ** (network_distance_m / category_half_distance_m)` decay. The current walk search stops at 500 m, so a nonzero contribution at the bound drops to zero beyond it.
 
 #### `precompute/surface.py`
 
@@ -616,7 +623,7 @@ Notes:
 #### `precompute/mode_aware.py`
 
 - Purpose: mode-aware scoring payload helper. (Confirmed)
-- `SCORE_MODES = ("walk", "bike", "transit")`; `mode_available(...)` reports availability. Transit is currently never available (see §9), so `scores_json["mode_aware"]` carries walk/bike comparisons in practice.
+- `SCORE_MODES = ("walk", "bike", "transit")`; `build_mode_aware_payload` uses a local `mode_available` dictionary (there is no function by that name). Transit is currently never supplied by the pipeline (see §9). Coarse grids can carry walk/bike comparisons; fine-surface scoring currently receives neither bike nor transit units. Top-level category scores and totals remain walk-only.
 
 #### `precompute/tiers.py` + `precompute/cache.py`
 
@@ -645,6 +652,7 @@ Notes:
 - Purpose: scoring-only clustering for Phase 2 variety handling. (Confirmed)
 - One physical cluster contributes one category-specific scoring item; original rows stay intact for publishing and raw-count explainability.
 - Representative order: highest `score_units`, then named before unnamed, then stable source identity.
+- Clustering uses connected components with 25 m neighbour links within each broad category, without checking subtype or source identity. Nearby distinct services (for example a GP and pharmacy) can collapse into one representative; connected chains can span more than 25 m.
 
 #### `precompute/amenity_tiers.py`
 
@@ -801,13 +809,15 @@ Notes:
   - Stage imports preflight stale backend/lock diagnostics, commit stage `DROP TABLE` before external `ogr2ogr` runs, and can terminate stale sessions via `NOISE_TERMINATE_STALE_IMPORT_BACKENDS` / `NOISE_TERMINATE_STALE_STAGE_LOCKS`. `-append` + `-select` is blocked by an internal guard. (Confirmed)
 - `builder.py` — disk preflight (`NOISE_MIN_FREE_DISK_GB`) and advisory lock. (Confirmed)
 - `dissolve.py` — two-pass chunked dissolve. (Confirmed)
-- `resolve.py` — round priority resolution into `noise_resolved_display`. (Confirmed)
+- `resolve.py` — round priority resolution into `noise_resolved_display`. Per run it builds two UNLOGGED helper tables: `_noise_domain_parts_<hash>` (island subdivided to 256-vertex parts, GiST) for clipping, and `_noise_newer_pieces_<hash>` (GiST-only mirror of the current group's resolved pieces) for masking older rounds. All round CTEs are `MATERIALIZED`, because inlined CTEs made PostgreSQL recompute intersections per filter. Do not reintroduce a whole-island `ST_Intersection` or a whole-group `ST_UnaryUnion` per row; that is what made resolve take hours per group. Overlays go through session-local `pg_temp.noise_safe_intersection` / `pg_temp.noise_safe_difference` (fixed-precision `ST_Difference(a, b, grid)` first), which fall back instead of raising GEOS TopologyExceptions and log `resolve GEOS fallbacks ...` counts per round. (Confirmed)
+- Retry checkpoints: the builder marks the source artifact `complete` right after ingest (ingest reuses rows only for a complete manifest with a matching `row_count`), and on failure keeps the finished `_noise_round_staging_<hash>` table. `dissolve.round_staging_complete_rows` treats an indexed, non-empty round table as a finished dissolve and skips both passes. (Confirmed)
 - `dev_fast.py` — deterministic dev-fast road/rail grid proxy; cache key derives from source hash, grid size, latest-round metadata, and grid algorithm version (`NOISE_REBUILD_DEV_FAST_GRID=1` escape hatch). (Confirmed)
 - `manifest.py` — hash functions (`source→domain→resolved→tiles`), artifact CRUD over `noise_artifact_manifest` / `_lineage` / `_active_artifact`. (Confirmed)
 - `bake.py` — standalone noise PMTiles bake from published `noise_polygons`. (Confirmed)
   - Writes `noise[(-dev|-test)].pmtiles` with only the `noise` vector layer, removes stale archives when no rows exist, streams tile specs, and reuses the lightweight `noise_proxy` SQL helper in `pmtiles_bake_worker.py`. (Confirmed)
   - The `noise_proxy` source-layer declares proxy fields (`kind=road`, `class=unclassified`, `metric=Lden`, `calibrated_band_min`, `proxy_score`, `buffer_m=100`, `method=official_derived_grid_proxy`, `calibration_source=noise_grid_artifact`, `calibration_layer=grid_1000m`, `confidence=proxy_not_measured`, `actual_road_geometry=0`) and starts at z8. (Confirmed)
-- `compare.py`, `modes.py`, `runner.py`, `exceptions.py`, `geometry.py` — comparison tooling, mode resolution, artifact runner orchestration, error types, geometry helpers. (Confirmed)
+- `modes.py` — accuracy-mode resolution: CLI `--noise-accurate` > `NOISE_ACCURACY_MODE` > profile default (`full` → `accurate`, `dev`/`test` → `dev_fast`). A `precompute --profile full` with no active accurate artifact therefore builds one first, which needs all six raw archives in `noise_datasets/` and ≥30 GB free. (Confirmed)
+- `compare.py`, `runner.py`, `exceptions.py`, `geometry.py` — comparison tooling, artifact runner orchestration, error types, geometry helpers. (Confirmed)
 - `__main__.py` — artifact CLI; it no longer exposes `--bake-pmtiles` / `--output-dir` (noise baking happens through precompute/`bake.py`). (Confirmed)
 
 ### 6.9 Bake
@@ -1054,6 +1064,8 @@ tests/test_basemap.py
 | `LIVABILITY_MIGRATE_LEGACY_REACH_CACHE` | Convert legacy pickle/gzip reachability caches | `0` |
 | `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` | Skip opening step for very large coastal components | `1_000_000_000.0` |
 | `OSM2PGSQL_BIN` | osm2pgsql binary path | `"osm2pgsql"` |
+| `OSM2PGSQL_FLAT_NODES` | Opt-in flat-nodes file (tight-RAM imports only) | unset → no flat-nodes file |
+| `NOISE_ACCURACY_MODE` | `dev_fast` / `accurate` noise artifact mode (CLI `--noise-accurate` wins) | unset → `accurate` for `full`, `dev_fast` for `dev`/`test` |
 | `NOISE_INGEST_MODE` | Noise source ingest mode | `auto` (prefers `ogr2ogr`) |
 | `NOISE_INGEST_COPY_BATCH_ROWS`, `NOISE_INGEST_FLUSH_ROWS` | Python ingest COPY/flush windows | module defaults |
 | `NOISE_ALLOW_LEGACY_CANDIDATE_CACHE` | Read legacy single-file candidate cache | `0` |
@@ -1071,7 +1083,8 @@ tests/test_basemap.py
 | `NOISE_TERMINATE_STALE_IMPORT_BACKENDS` | Terminate stale `pg_stat_activity` sessions from crashed ingest | `0` |
 | `NOISE_TERMINATE_STALE_STAGE_LOCKS` | Terminate stale lock holders on `_noise_raw_*` targets | `0` |
 | `NOISE_PYTHON_EXE` | Python used by the Windows noise watchdog | `.venv` → conda fallback |
-| `DATASET_MIRROR_BASE_URL` | Replace `setup.sh`'s core input mirror | GitHub release `v1` |
+| `BASEMAP_JAVA_HEAP` | Planetiler JVM `-Xmx` for the basemap build (JVM default ~2 GB OOMs on Ireland) | `5g` |
+| `DATASET_MIRROR_BASE_URL` | Dataset mirror used by `scripts/fetch_datasets.py` (all 14 inputs); per-dataset `*_URL` vars override it | `SidneyMe/livability-data` release `v2` |
 | `scripts/win/bench_valhalla.ps1 -Workers` | Client concurrency for the Valhalla benchmark | `8` |
 
 ### Important config files
@@ -1118,7 +1131,9 @@ tests/test_basemap.py
 - **`import` needs Docker** because `_handle_import` calls `basemap.build_if_stale()`. On a Docker-less host, use `precompute --auto-refresh-import` and run the pipeline without `import`.
 - **Zero-transport publish gate**: `precompute/workflow.py` raises when the transport category is empty unless `--allow-missing-transport` is passed (then it warns and transport scores are zero). Both behaviours have tests.
 - **Noise is display-only.** The overlay never feeds scoring; road/rail rows are grid proxies, not measured point noise, and the overlay is intentionally not clipped to the land mask.
-- **Mode-aware transit is a stub**: `phase_reachability_impl` passes `transit_effective_units_by_node=None`, so only walk (default) and bike comparisons are real.
+- **Mode-aware transit is a stub**: `phase_grids_impl` supplies no transit effective units. Bike comparisons are only supplied to coarse grids; fine-surface scoring receives neither bike nor transit units. Map defaults remain walk-only.
+- **Scoring area normalization is grid geometry, not accessibility.** All four categories divide by the clipped cell's land fraction (floor `0.25`), potentially quadrupling identical reachable units near the coast. Fine-surface scoring mirrors this behaviour; do not change only `score_cell`.
+- **The walk bound is still a hard cutoff.** Category decay is smooth within 500 m, but positive contributions at the bound disappear beyond it. The common half-distance table is also reused for bike comparisons despite their 5 km search bound.
 - **Transport scoring is strictly GTFS-only.** `TAGS["transport"] = {"source": "gtfs_direct"}`, `_AMENITY_CATEGORY_VALUES` excludes transport, and OSM stop helpers were removed (`load_osm_transport_features`, `clear_normalized_network_rows`, `transit/chained_reach.py` do not exist — do not import or "restore" them without an explicit task).
 - `pmtiles_bake_worker.py` import isolation is real, and `fine_vector_pmtiles_worker.py` exists specifically so Windows bake workers do not import `precompute/__init__.py`. Do not collapse them back together casually.
 - `static/dist/` is a checked-in build artifact. Editing `frontend/src/*` without rebuilding leaves runtime stale; CI fails on a dirty bundle.
@@ -1141,14 +1156,15 @@ tests/test_basemap.py
 - Noise artifact ingest stages rows in a temp table (`noise_ingest_stage_*`) then normalizes in SQL (`ST_GeomFromWKB` → `ST_Transform` → `ST_MakeValid`) instead of giant inline `VALUES` statements.
 - Noise force semantics are split: resolved rebuild (`--force-noise-artifact`) vs source re-import (`--reimport-noise-source`); `--force-noise-all` does both.
 - Accurate noise mode reads all rounds and simplifies road/rail only inside the dissolve CTE; canonical `noise_normalized` rows must not be updated in place.
-- Artifact-mode proxy publish enforces Phase E mixed-source behavior: road/rail from `noise_grid_artifact` with per-cell metric/band mapping, airport/industry from active `noise_resolved_display` rows. A missing grid artifact hash is a hard `noise_proxy_blocked` state.
+- Artifact-mode publish (`copy_noise_artifact_to_noise_polygons`) depends on the artifact mode: **dev_fast** publishes road/rail from `noise_grid_artifact` and airport/industry from `noise_resolved_display`; **accurate** (no grid artifact) publishes road, rail, airport and industry all from `noise_resolved_display`. NI `consolidated` is never published. A dev_fast artifact without a grid hash is a hard `noise_proxy_blocked` state.
+- Build keys change daily: the GTFS analysis date (today in Europe/Dublin, or `GTFS_AS_OF_DATE`, which itself enters the transit config hash) feeds the transit reality fingerprint, so a rerun on another day is a new build, not a refresh. `serve` matches on `config_hash`, so a finished build stays servable.
 - `progress_tracker.py` is intentionally defensive: if tracking breaks, the build continues, so ETA regressions can hide without failing tests.
 - Reachability large-cache recovery is mixed-format: `{key}.pkl(.gz)` base + `{key}.chunks.pkl(.gz)` overlay journal. Preserve that merge order.
 - Reachability origin-node helpers assume a split contract: `normalize_origin_node_ids(...)` produces sorted unique lists and `merge_normalized_origin_node_ids(...)` unions already-normalized lists. Do not use `sorted(set(...))` on multi-million sequences.
 - The legacy `/tiles/surface/{resolution}/{z}/{x}/{y}.png` endpoint still exists for compatibility, but `/api/runtime` no longer advertises it and the frontend does not use it.
 - Fine-grid render correctness spans three layers: buffered geometry in `fine_vector_pmtiles_worker.py`, degenerate-ring filtering before MVT encoding, and active-layer recreation in `frontend/src/main.js` / `runtime_contract.js`. If seams reappear, inspect all three before blaming the archive.
 - Test environment gotchas: `.venv` can be broken (e.g. a namespace-package `pyarrow` without `__version__`) — use the conda env through `scripts\win\geo_env.cmd`; and tests using `TemporaryDirectory` can fail on `chmod` inside a restricted sandbox (not a code failure).
-- `tests/test_transit_phase1.py` snapshot regressions are skipped unless local GTFS zips are present, so a green run there may mean "skipped", not "verified".
+- `tests/test_transit_phase1.py` snapshot regressions run only when the local GTFS zip calendar covers `SNAPSHOT_ANALYSIS_DATE` (2026-04-23); a refreshed feed skips them, so a green run there may mean "skipped", not "verified".
 
 ---
 
@@ -1167,7 +1183,7 @@ tests/test_basemap.py
 | `tests/test_osm_import_handling.py` | osm2pgsql wrapper, import manifest behavior, Lua/SQL expectations |
 | `tests/test_local_osm_rules.py` | Lua/importer rule mapping |
 | `tests/test_road_proximity.py` | maxspeed parsing, class calibration, distance decay, strongest-road selection, empty/invalid geometry |
-| `tests/test_transit_phase1.py` | GTFS reality rows, weekly bus subtiers, headway buckets, frequency windows, score units, snapshot stop regressions (skipped without zips), school-only classification, `gtfs-refresh` artifacts |
+| `tests/test_transit_phase1.py` | GTFS reality rows, weekly bus subtiers, headway buckets, frequency windows, score units, snapshot stop regressions (skipped unless the local zip covers 2026-04-23), school-only classification, `gtfs-refresh` artifacts |
 | `tests/test_transit_refresh_runner.py` | lightweight transit CLI path behavior |
 | `tests/test_gtfs_download.py` | conditional requests, atomic replacement, manifest/freshness validation |
 | `tests/test_network_loader.py` | walkgraph graph index loading |
@@ -1191,6 +1207,8 @@ tests/test_basemap.py
 | `tests/test_valhalla_reachability.py` | opt-in Valhalla backend integration behavior |
 | `tests/test_walkgraph_support.py` | walkgraph binary discovery/subcommand checks |
 | `tests/test_refresh_osm.py` | OSM download/refresh helper behavior |
+| `tests/test_fetch_datasets.py` | dataset source order (env → mirror → official, `--refresh` flips refreshable ones), reuse, zip validation fallback, main-island extraction, failure exit |
+| `tests/test_noise_accuracy_mode.py` | accuracy-mode precedence: CLI > env > profile default (`full` → accurate) |
 | `frontend/src/runtime_contract.test.js` | runtime parsing, score-layer mapping, noise source wiring, grid layer definitions, lifecycle rebuilds, transport styling priority |
 | `frontend/src/grid_debug.test.js`, `grid_popup.test.js` | debug card + score popup rendering |
 | `frontend/src/map_source_guard.test.js` | source guard behavior (no `isSourceLoaded()` errors) |
@@ -1224,7 +1242,7 @@ Areas still relatively fragile:
 
 Local disk hotspots:
 
-- `osm/flat-nodes.bin` (~37 GiB) dominates when the OSM import cache exists; `.livability_cache/` grows large from rebuildable PMTiles, surface shards, and geo/noise caches. Both are generated state, not source.
+- `osm/flat-nodes.bin` (~40 GiB) exists only when `OSM2PGSQL_FLAT_NODES` is opted in; imports always `--create`, so a leftover copy is dead weight. `.livability_cache/` grows large from rebuildable PMTiles, surface shards, and geo/noise caches. Both are generated state, not source.
 
 ---
 

@@ -15,6 +15,7 @@ It started as "haha what if I made a silly map of Ireland" and turned into a rea
 - [What It Does](#what-it-does)
 - [Architecture Overview](#architecture-overview)
 - [Project Layout](#project-layout)
+- [Quick Start](#quick-start)
 - [Prerequisites](#prerequisites)
 - [Environment Setup](#environment-setup)
 - [Required Local Data](#required-local-data)
@@ -98,6 +99,23 @@ The split is simple:
 - `static/` is served by the local Python server. `static/dist/` is the checked-in Vite production bundle.
 - `legacy/` contains quarantined historical UI/server files that are retained for reference but are not part of the active runtime path.
 - Alembic migrations under `db_postgis/migrations/` are the canonical managed-schema source of truth. `schema.sql` is kept as a bootstrap snapshot for convenience, and the SQLAlchemy metadata in `db_postgis/` mirrors the runtime query model.
+
+## Quick Start
+
+One command installs every prerequisite, provisions a local PostgreSQL/PostGIS database, downloads every dataset (OSM, boundaries, GTFS, Overture, main-island coastline, all noise rounds), builds the helpers, and runs the full pipeline up to a servable map:
+
+```text
+Windows:        double-click setup.cmd      (or: setup.cmd -SkipBuild / -RefreshData)
+Debian/Ubuntu:  ./setup.sh                  (or: ./setup.sh --skip-build / --refresh-data)
+```
+
+- Windows installs Miniforge (GDAL, PostgreSQL/PostGIS, osm2pgsql, Node.js, Python), Rust with the MSVC build tools, and Docker Desktop through `winget`. When no database is configured in `.env`, it creates a private PostgreSQL cluster under `%LOCALAPPDATA%\livability\pgdata`.
+- Linux installs packages through `apt` and Docker Engine through Docker's official installer, then provisions the local PostgreSQL service.
+- Datasets come from the project mirror release (`DATASET_MIRROR_BASE_URL`, default `livability-data` v2) with official fallbacks; see `python scripts/fetch_datasets.py --list`.
+- The full build takes several hours and needs roughly 60 GB of free disk (the accurate noise overlay alone requires 30 GB free). Reruns reuse every finished step.
+- When it finishes, start the map with `python main.py serve --deployment` (Windows: `scripts\win\geo_env.cmd python main.py serve --deployment`) and open <http://127.0.0.1:8000>.
+
+The sections below describe the same steps for a manual setup.
 
 ## Prerequisites
 
@@ -527,9 +545,15 @@ The hosted demo is the project's public moment, and it deliberately sits at the 
 ## Attribution And Data Sources
 
 - **OpenStreetMap** — amenity, network, and POI data. © OpenStreetMap contributors, available under the [Open Database License (ODbL)](https://www.openstreetmap.org/copyright). Any derived tiles or screenshots must preserve this attribution.
-- **Overture Maps Foundation** — optional Places data used to rescue missing shop, healthcare, and park POIs before canonical amenity scoring. See [Overture Maps](https://overturemaps.org/) and preserve any release-specific attribution required by the dataset.
-- **Republic of Ireland county boundaries** — Tailte Éireann (formerly Ordnance Survey Ireland), National Statutory Boundaries 2024.
-- **Northern Ireland outline** — OSNI Open Data, Largescale Boundaries.
+- **Overture Maps Foundation** — optional Places data used to rescue missing shop, healthcare, and park POIs before canonical amenity scoring. Places data is licensed under [CDLA-Permissive-2.0](https://cdla.dev/permissive-2-0/); see [Overture Maps](https://overturemaps.org/) and preserve any release-specific attribution required by the dataset.
+- **Republic of Ireland public transport** — static GTFS from the [National Transport Authority / Transport for Ireland](https://www.transportforireland.ie/transitData/PT_Data.html), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Northern Ireland public transport** — Translink static GTFS via [OpenDataNI](https://www.opendatani.gov.uk/), licensed under the [Open Government Licence](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+- **Republic of Ireland noise maps** — [EPA Ireland](https://www.epa.ie/our-services/monitoring--assessment/noise/noise-mapping-and-action-plans/strategic-noise-maps/) strategic noise mapping Rounds 2–4, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Northern Ireland noise maps** — DAERA [Environmental Noise Directive noise mapping](https://www.opendatani.gov.uk/dataset/environmental-noise-directive-noise-mapping) Rounds 1–3 via OpenDataNI, licensed under the [Open Government Licence](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+- **Republic of Ireland county boundaries** — Tailte Éireann (formerly Ordnance Survey Ireland), National Statutory Boundaries 2024, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+- **Northern Ireland outline** — OSNI Open Data, Largescale Boundaries. © Crown copyright, licensed under the [Open Government Licence](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
+
+The map UI shows these credits in its attribution control: the livability layer carries the OSM, Overture, transit, and boundary credits, and the noise overlay carries the EPA and DAERA credits, so attribution remains visible even without the self-hosted basemap.
 - **Basemap rendering** — [MapLibre GL](https://maplibre.org/) on the frontend;
   the livability layers and an optional self-hosted Protomaps background are
   served locally from PMTiles archives. See [self-hosted basemap setup](docs/BASEMAP.md).

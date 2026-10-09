@@ -4,6 +4,45 @@ Format: date, version tag (where applicable), what changed, what scoring logic c
 
 ---
 
+## 2026-09-25 - Release prep: one-command setup, accurate noise for full, attribution
+
+### Added
+
+- `setup.cmd` / `setup.ps1` Windows bootstrap and a reworked `setup.sh`: one command installs every prerequisite (Windows via winget + a conda-forge env; Linux via apt + Docker's installer), provisions PostgreSQL/PostGIS, downloads every dataset, builds walkgraph and the frontend, then runs import → transit → full precompute → sanity check. `--skip-build` / `-SkipBuild` and `--refresh-data` / `-RefreshData` are available; reruns reuse finished work.
+- `scripts/fetch_datasets.py`: the single dataset list for both setup scripts (OSM, boundaries, GTFS, Overture, main-island coastline, six noise archives) with env override → mirror (`livability-data` release v2) → official fallback, atomic downloads, retries, and zip validation.
+- `environment.yml` now includes PostGIS, osm2pgsql, and Node.js so the Windows toolchain comes from one conda env.
+
+### Changed
+
+- The `full` profile now builds and publishes the **accurate** noise artifact by default; `dev`/`test` stay `dev_fast`. Precedence is CLI `--noise-accurate` > `NOISE_ACCURACY_MODE` > profile default.
+- Map attribution: the livability source now credits OpenStreetMap (ODbL), Overture, NTA (CC BY 4.0), Translink/OpenDataNI (OGL), Tailte Éireann (CC BY 4.0), and OSNI (OGL); the noise source credits EPA (CC BY 4.0) and DAERA/OpenDataNI (OGL). Credits no longer depend on the optional basemap. PMTiles metadata and the README carry the same credits. The basemap source now also credits Daylight Landcover (ESA WorldCover, CC BY 4.0).
+
+### Fixed
+
+- A PMTiles bake that failed after publish left the previous archive in place while `build_manifest` already marked the new build complete; reruns then skipped the bake because the planner only checked that the file existed, so the runtime would have served another build's tiles. Main and noise archives now carry `build_key` in their metadata, and the planner rebakes any archive that is missing, unreadable, or stamped for a different build (archives baked before this change are rebaked once).
+- The accurate noise artifact could never be built: dissolve pass 1 built its processing grid from `ST_Extent(geom)::geometry`, which has SRID 0, so `ST_Intersection` with EPSG:2157 rows failed with "mixed SRID geometries". The extent is now stamped with SRID 2157.
+- Accurate noise resolve did not scale. Each row was intersected with the whole island polygon and differenced against a union of the entire newer-round coverage, and the inlined CTEs re-evaluated those operations per filter, so one group ran for 3.5+ hours. Resolve now clips against GiST-indexed island parts, subtracts only touching newer pieces from a GiST-only per-group table, and materializes every CTE. On real data it matches the old query to within 0.05% of area per round (masking now uses fixed-precision `ST_Difference(a, b, gridSize)` on the 1 m topology grid; snapping the neighbour union separately raised GEOS "side location conflict" errors).
+- The basemap showed no labels at all: `serve_routes` did not percent-decode `/static/` paths, and every glyph folder name contains spaces (`Noto Sans Regular`), so all font requests 404ed. Static paths are now decoded; `_serve_static` still rejects anything resolving outside `static/`.
+- Accurate noise artifacts published zero noise polygons: `copy_noise_artifact_to_noise_polygons` required the dev_fast grid artifact and returned early without it. Accurate artifacts now publish road, rail, airport and industry as exact resolved polygons (dev_fast keeps its grid road/rail + exact airport/industry split; NI `consolidated` stays unpublished in both modes).
+- Single GEOS TopologyExceptions ("side location conflict", "Ring edge missing") on NI road polygons aborted the whole accurate build. Resolve overlays now run through session-local PL/pgSQL wrappers that retry with more forgiving operations and report fallback counts per round.
+- `noise_resolved_provenance.source_ref_count` was summed over dissolve pass-2 dump pieces that all repeat their band group's count, inflating it (4.8 billion for NI road Lden) and overflowing INTEGER; provenance now counts each band group once.
+- Accurate noise retries no longer redo hours of work: the source artifact is checkpointed after ingest, and a finished round staging table is kept after a failure and reused, skipping dissolve.
+- On a 16 GB Windows host, `NOISE_OGR2OGR_GDB_WORKERS=6` exhausted memory while importing the ROI Round 4 road FileGDB (`ogr2ogr: bad allocation`); 2 workers with 10-feature chunks completed.
+- The Ireland + NI basemap build ran out of JVM heap (the JVM default is a quarter of the Docker VM, about 2 GB on Docker Desktop). `basemap/docker-compose.yml` now sets `-Xmx5g`, overridable with `BASEMAP_JAVA_HEAP`.
+- `setup.sh` on Ubuntu 24.04 / Debian 12: installs Node.js 22 when the distro Node is too old for Vite 7, and falls back to rustup stable when the distro Cargo cannot build walkgraph (its `Cargo.lock` v4 needs Cargo ≥ 1.78). `setup.sh` is now committed as executable.
+
+### Notes
+
+- A `full` precompute without an active accurate artifact needs all six raw noise archives in `noise_datasets/` and at least 30 GB free disk.
+- `osm/flat-nodes.bin` is only produced when `OSM2PGSQL_FLAT_NODES` is set; imports always run `--create`, so a leftover copy can be deleted.
+
+### Scoring logic
+
+- **Railway proximity penalty now actually applies.** `transit/railway_corridors.py:_node_coordinate_arrays` read `graph.vs["lon"]` unconditionally (mis-indented), which raises on the production `WalkGraphIndex`; `phase_grids_impl` caught the error and printed `railway proximity penalties unavailable`, so every published build since the feature landed scored with a zero railway penalty. Cells within 50–200 m of GTFS rail/tram corridors now lose up to 4 points as documented. `SCORING_MODEL_VERSION` is bumped to `v3-gtfs-only-transport-rail-proximity-2026-09-25` to invalidate score caches; reachability caches are reused.
+- Noise remains display-only.
+
+---
+
 ## 2026-08-31 - Transport publish gate and GTFS bootstrap docs
 
 ### Added
