@@ -454,6 +454,45 @@ class DissolveSqlTests(TestCase):
         src = inspect.getsource(_pass1_dissolve)
         self.assertIn("ST_UnaryUnion", src)
 
+    def test_dissolve_reuses_finished_round_staging(self) -> None:
+        from unittest.mock import MagicMock, patch
+        from noise_artifacts import dissolve
+        engine = MagicMock()
+        with patch.object(dissolve, "round_staging_complete_rows", return_value=1234), \
+             patch.object(dissolve, "_pass1_dissolve") as pass1, \
+             patch.object(dissolve, "_pass2_dissolve") as pass2:
+            tables = dissolve.dissolve_noise_into_staging(
+                engine, source_hash="srchash0000000", resolved_hash="reshash0000000",
+            )
+        pass1.assert_not_called()
+        pass2.assert_not_called()
+        self.assertEqual(tables, ("_noise_dissolve_staging_srchash00000", "_noise_round_staging_reshash00000"))
+
+    def test_dissolve_runs_passes_when_round_staging_incomplete(self) -> None:
+        from unittest.mock import MagicMock, patch
+        from noise_artifacts import dissolve
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(dissolve, "round_staging_complete_rows", return_value=0), \
+             patch.object(dissolve, "_has_square_grid", return_value=True), \
+             patch.object(dissolve, "_pass1_dissolve", return_value=1) as pass1, \
+             patch.object(dissolve, "_pass2_dissolve", return_value=1) as pass2:
+            dissolve.dissolve_noise_into_staging(
+                engine, source_hash="srchash0000000", resolved_hash="reshash0000000",
+            )
+        pass1.assert_called_once()
+        pass2.assert_called_once()
+
+    def test_pass1_dissolve_grid_extent_keeps_srid_2157(self) -> None:
+        # ST_Extent returns box2d (no SRID); an unstamped extent made SRID-0
+        # tiles and ST_Intersection failed with "mixed SRID geometries".
+        import inspect
+        from noise_artifacts.dissolve import _pass1_dissolve
+        src = inspect.getsource(_pass1_dissolve)
+        self.assertIn("ST_SetSRID(ST_Extent(geom)::geometry, 2157)", src)
+
     def test_pass1_dissolve_sql_contains_st_reduce_precision(self) -> None:
         import inspect
         from noise_artifacts.dissolve import _pass1_dissolve
@@ -494,15 +533,88 @@ class ResolveSqlTests(TestCase):
 
     def test_insert_resolved_round_sql_contains_st_difference(self) -> None:
         import inspect
-        from noise_artifacts.resolve import _insert_resolved_round
-        src = inspect.getsource(_insert_resolved_round)
-        self.assertIn("ST_Difference", src)
+        from noise_artifacts import resolve
+        src = inspect.getsource(resolve._insert_resolved_round)
+        self.assertIn("pg_temp.noise_safe_difference(", src)
+        self.assertIn("ST_Difference(a, b, grid)", resolve._SAFE_OVERLAY_SQL)
+
+    def test_overlays_go_through_geos_safe_wrappers(self) -> None:
+        # Single GEOS TopologyExceptions on NI road polygons aborted the whole
+        # build; wrappers must fall back and record instead of raising.
+        import inspect
+        from noise_artifacts import resolve
+        src = inspect.getsource(resolve._insert_resolved_round)
+        self.assertIn("_ensure_safe_overlay_functions(conn)", src)
+        self.assertIn("pg_temp.noise_safe_intersection(s.precise_geom, d.geom)", src)
+        self.assertNotIn("ST_Intersection(s.precise_geom", src)
+        sql = resolve._SAFE_OVERLAY_SQL
+        self.assertIn("EXCEPTION WHEN OTHERS", sql)
+        for kind in ("difference_floating", "difference_buffered", "difference_unmasked",
+                     "intersection_makevalid", "intersection_unclipped"):
+            self.assertIn(kind, sql)
 
     def test_insert_resolved_round_sql_contains_st_subdivide(self) -> None:
         import inspect
         from noise_artifacts.resolve import _insert_resolved_round
         src = inspect.getsource(_insert_resolved_round)
         self.assertIn("ST_Subdivide", src)
+
+    def test_insert_resolved_round_uses_indexed_local_operations(self) -> None:
+        # Regression: whole-island ST_Intersection and whole-group ST_UnaryUnion
+        # per row made resolve take hours per group.
+        import inspect
+        from noise_artifacts.resolve import _insert_resolved_round
+        src = inspect.getsource(_insert_resolved_round)
+        self.assertNotIn("newer_coverage", src)
+        self.assertNotIn("CROSS JOIN", src)
+        self.assertIn('JOIN "{domain_table}" d ON s.precise_geom && d.geom', src)
+        self.assertIn("LEFT JOIN LATERAL", src)
+        self.assertIn('FROM "{newer_table}" r', src)
+        self.assertIn("r.geom && c.clipped_geom", src)
+        # Inlined CTEs made PostgreSQL recompute intersections per filter.
+        for cte in ("source_round", "pairs", "clipped", "masked", "subdivided"):
+            self.assertIn(f"{cte} AS MATERIALIZED", src)
+
+    def test_provenance_counts_each_band_group_once(self) -> None:
+        # Pass 2 repeats a band group's count on every dumped polygon; summing
+        # raw rows overflowed INTEGER for NI road (4.8 billion "refs").
+        import inspect
+        from noise_artifacts.resolve import _insert_provenance
+        src = inspect.getsource(_insert_provenance)
+        self.assertIn("SELECT DISTINCT", src)
+        self.assertIn(") AS band_groups", src)
+
+    def test_masking_uses_fixed_precision_difference(self) -> None:
+        import inspect
+        from noise_artifacts.resolve import _insert_resolved_round
+        src = inspect.getsource(_insert_resolved_round)
+        self.assertIn("nb.geom,\n                                         :topology_grid_m", src)
+        self.assertNotIn("ST_ReducePrecision(nb.geom", src)
+
+    def test_materialize_resolved_display_drops_domain_parts_even_on_failure(self) -> None:
+        from unittest.mock import MagicMock, patch
+        from noise_artifacts import resolve
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(resolve, "_fetch_groups", return_value=[("ni", "road", "Lden")]), \
+             patch.object(resolve, "_fetch_rounds", return_value=[3]), \
+             patch.object(resolve, "_create_domain_parts_table", return_value=10) as create_mock, \
+             patch.object(resolve, "_insert_resolved_round", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                resolve.materialize_resolved_display(
+                    engine,
+                    noise_resolved_hash="abcdef1234567890",
+                    round_table="round_tbl",
+                    domain_wkb=b"\x00",
+                )
+        create_mock.assert_called_once()
+        executed = " ".join(str(c.args[0]) for c in conn.execute.call_args_list)
+        self.assertIn('DROP TABLE IF EXISTS "_noise_domain_parts_abcdef123456"', executed)
+        self.assertIn('DROP TABLE IF EXISTS "_noise_newer_pieces_abcdef123456"', executed)
 
     def test_insert_resolved_round_sql_contains_st_reduce_precision(self) -> None:
         import inspect
@@ -1027,6 +1139,55 @@ class BuilderTests(TestCase):
                                             resolved_hash="res",
                                         )
                         mock_set.assert_called_once_with(engine, "resolved", "res")
+
+    def _run_builder_failing_in_resolve(self):
+        from unittest.mock import patch, MagicMock, call
+        engine = MagicMock()
+        conn = MagicMock()
+        engine.begin.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.begin.return_value.__exit__ = MagicMock(return_value=False)
+        engine.connect.return_value.__enter__ = MagicMock(return_value=conn)
+        engine.connect.return_value.__exit__ = MagicMock(return_value=False)
+        conn.execute.return_value.mappings.return_value.first.return_value = None
+        conn.execute.return_value.scalar.return_value = 7
+        events: list[str] = []
+        with patch("noise_artifacts.builder.ingest_noise_normalized", return_value=7), \
+             patch("noise_artifacts.builder._assert_disk_preflight", return_value=None), \
+             patch("noise_artifacts.builder.upsert_artifact"), \
+             patch("noise_artifacts.builder.record_lineage"), \
+             patch("noise_artifacts.builder.dissolve_noise_into_staging",
+                   side_effect=lambda *a, **k: events.append("dissolve") or ("dissolve_tbl", "round_tbl")), \
+             patch("noise_artifacts.builder.materialize_resolved_display",
+                   side_effect=RuntimeError("resolve exploded")), \
+             patch("noise_artifacts.builder.mark_artifact_complete",
+                   side_effect=lambda engine, h, **k: events.append(f"complete:{h}")) as mock_complete, \
+             patch("noise_artifacts.builder.mark_artifact_failed") as mock_fail, \
+             patch("noise_artifacts.builder.drop_staging_tables") as mock_drop:
+            from noise_artifacts.builder import build_noise_artifact
+            with self.assertRaisesRegex(RuntimeError, "resolve exploded"):
+                build_noise_artifact(
+                    engine,
+                    data_dir="/fake",
+                    domain_wgs84=MagicMock(),
+                    domain_wkb=b"\x00",
+                    source_hash="src",
+                    domain_hash="dom",
+                    resolved_hash="res",
+                    noise_accuracy_mode="accurate",
+                )
+        return events, mock_complete, mock_fail, mock_drop, call
+
+    def test_builder_checkpoints_source_before_dissolve(self) -> None:
+        events, _complete, mock_fail, _drop, _call = self._run_builder_failing_in_resolve()
+        self.assertLess(events.index("complete:src"), events.index("dissolve"))
+        failed = [c.args[1] for c in mock_fail.call_args_list]
+        self.assertNotIn("src", failed)
+        self.assertEqual(sorted(failed), ["dom", "res"])
+
+    def test_builder_keeps_round_staging_after_failure(self) -> None:
+        _events, _complete, _fail, mock_drop, call = self._run_builder_failing_in_resolve()
+        mock_drop.assert_called_once()
+        self.assertEqual(mock_drop.call_args.args[1:], ("dissolve_tbl", None))
 
     def test_builder_uses_postgres_advisory_lock(self) -> None:
         import inspect

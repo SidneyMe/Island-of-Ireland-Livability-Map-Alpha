@@ -259,6 +259,39 @@ class ArtifactCopyTests(TestCase):
         self.assertTrue(summary.get("noise_proxy_blocked"))
         self.assertIn("grid artifact hash", str(summary.get("noise_proxy_blocked_reason", "")))
 
+    def test_copy_publishes_all_sources_from_resolved_for_accurate_artifact(self) -> None:
+        # Accurate artifacts have no grid: road/rail must come from resolved
+        # polygons too (they used to publish zero noise rows).
+        connection = mock.MagicMock()
+        manifest_result = mock.MagicMock()
+        manifest_result.mappings.return_value.first.return_value = {
+            "grid_artifact_hash": "",
+            "noise_accuracy_mode": "accurate",
+        }
+        insert_result = mock.MagicMock(rowcount=42)
+        empty_rows = mock.MagicMock()
+        empty_rows.mappings.return_value = []
+        connection.execute.side_effect = [manifest_result, insert_result, empty_rows, empty_rows]
+        summary: dict[str, object] = {}
+
+        inserted = db_writes.copy_noise_artifact_to_noise_polygons(
+            connection,
+            noise_resolved_hash="res-acc",
+            build_key="bk",
+            config_hash="ch",
+            import_fingerprint="ifp",
+            study_area_wgs84=None,
+            summary_json=summary,
+        )
+
+        self.assertEqual(inserted, 42)
+        from db_postgis import write_noise as noise_writes
+        insert_call = connection.execute.call_args_list[1]
+        self.assertIs(insert_call.args[0], noise_writes._INSERT_EXACT_FROM_RESOLVED_SQL)
+        self.assertEqual(insert_call.args[1]["exact_source_types"], ["road", "rail", "airport", "industry"])
+        self.assertNotIn("grid_artifact_hash", insert_call.args[1])
+        self.assertFalse(summary.get("noise_proxy_blocked"))
+
     def test_copy_executes_insert_with_noise_resolved_hash(self) -> None:
         connection = mock.MagicMock()
         grid_result = mock.MagicMock()
@@ -486,7 +519,7 @@ class ArtifactCopyTests(TestCase):
 
         sql_text = str(noise_writes._INSERT_EXACT_FROM_RESOLVED_SQL)
         self.assertIn("FROM noise_resolved_display r", sql_text)
-        self.assertIn("r.source_type IN ('airport', 'industry')", sql_text)
+        self.assertIn("r.source_type = ANY(:exact_source_types)", sql_text)
         self.assertIn("r.metric IN ('Lden', 'Lnight')", sql_text)
         self.assertIn("s.source_type AS source_type", sql_text)
         self.assertIn("'noise_resolved_display' AS source_dataset", sql_text)

@@ -220,6 +220,8 @@ def build_noise_artifact(
 
             dissolve_table = None
             round_table = None
+            build_succeeded = False
+            source_checkpointed = False
             try:
                 mode_norm = str(noise_accuracy_mode or "dev_fast").strip().lower()
                 _assert_disk_preflight(engine, mode=mode_norm, progress_cb=progress_cb)
@@ -269,6 +271,20 @@ def build_noise_artifact(
                 _timing(progress_cb, "ingest.total", time.perf_counter() - ingest_started)
                 source_rows_total = _source_row_count(engine, source_hash)
                 _progress(progress_cb, f"source ingest complete rows={source_rows_total:,}")
+                # Checkpoint the source now: a later dissolve/resolve failure must
+                # not force a fresh hour-long raw ingest on retry (ingest reuses
+                # rows only for a complete source manifest with matching counts).
+                source_manifest_json = {
+                    "row_count": source_rows_total,
+                    "ingest_schema_version": INGEST_SCHEMA_VERSION,
+                    "ingest_complete": True,
+                    "noise_accuracy_mode": mode_norm,
+                    "grid_size_m": int(grid_size_m),
+                    "accurate_simplify_m": float(accurate_simplify_m),
+                    "latest_rounds_by_group": dict(latest_rounds_by_group or {}),
+                }
+                mark_artifact_complete(engine, source_hash, updated_manifest_json=source_manifest_json)
+                source_checkpointed = True
                 _progress(progress_cb, f"ingest done: {n_ingested} rows")
                 grid_artifact_hash = None
                 if mode_norm == "dev_fast":
@@ -362,20 +378,9 @@ def build_noise_artifact(
                         "latest_rounds_by_group": dict(latest_rounds_by_group or {}),
                     },
                 )
-                mark_artifact_complete(
-                    engine,
-                    source_hash,
-                    updated_manifest_json={
-                        "row_count": source_rows_total,
-                        "ingest_schema_version": INGEST_SCHEMA_VERSION,
-                        "ingest_complete": True,
-                        "noise_accuracy_mode": mode_norm,
-                        "grid_size_m": int(grid_size_m),
-                        "accurate_simplify_m": float(accurate_simplify_m),
-                        "latest_rounds_by_group": dict(latest_rounds_by_group or {}),
-                    },
-                )
+                mark_artifact_complete(engine, source_hash, updated_manifest_json=source_manifest_json)
                 mark_artifact_complete(engine, domain_hash, updated_manifest_json={})
+                build_succeeded = True
                 set_active_artifact(engine, "resolved", resolved_hash)
 
                 _progress(progress_cb, f"artifact build complete resolved_hash={resolved_hash}")
@@ -387,7 +392,12 @@ def build_noise_artifact(
             except Exception:
                 detail = traceback.format_exc()
                 log.error("artifact build failed: %s", detail)
-                for h in (resolved_hash, source_hash, domain_hash):
+                # A source that reached its post-ingest checkpoint stays complete
+                # so a retry reuses it; everything still building is failed.
+                failed_hashes = [resolved_hash, domain_hash]
+                if not source_checkpointed:
+                    failed_hashes.insert(1, source_hash)
+                for h in failed_hashes:
                     try:
                         mark_artifact_failed(engine, h, error_detail=detail)
                     except Exception:
@@ -396,7 +406,12 @@ def build_noise_artifact(
             finally:
                 if dissolve_table and round_table:
                     try:
-                        drop_staging_tables(engine, dissolve_table, round_table)
+                        if build_succeeded:
+                            drop_staging_tables(engine, dissolve_table, round_table)
+                        else:
+                            # Keep the finished round table so a retry skips
+                            # dissolve (see dissolve.round_staging_complete_rows).
+                            drop_staging_tables(engine, dissolve_table, None)
                     except Exception:
                         log.warning("failed to drop staging tables", exc_info=True)
         finally:

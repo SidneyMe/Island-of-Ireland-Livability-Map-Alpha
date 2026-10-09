@@ -68,10 +68,22 @@ def dissolve_noise_into_staging(
     for dropping these tables after noise_resolved_display is populated.
     """
     total_started = time.perf_counter()
-    use_square_grid = _has_square_grid(engine)
     dissolve_table = _staging_table_name(source_hash, "dissolve_staging")
     round_table = _staging_table_name(resolved_hash, "round_staging")
 
+    # Both passes commit in one transaction and the GiST index is added last,
+    # so an indexed, non-empty round table is a finished dissolve for this
+    # resolved_hash (kept by the builder after a later failure). Reuse it
+    # instead of repeating hours of dissolve work.
+    reused_rows = round_staging_complete_rows(engine, round_table)
+    if reused_rows:
+        _progress(
+            progress_cb,
+            f"reusing round staging {round_table} rows={reused_rows:,} (dissolve skipped)",
+        )
+        return dissolve_table, round_table
+
+    use_square_grid = _has_square_grid(engine)
     indexes_seconds = 0.0
     with engine.begin() as conn:
         _create_dissolve_staging(conn, dissolve_table)
@@ -106,11 +118,37 @@ def dissolve_noise_into_staging(
     return dissolve_table, round_table
 
 
-def drop_staging_tables(engine: Engine, dissolve_table: str, round_table: str) -> None:
-    """Drop both staging tables created by dissolve_noise_into_staging."""
+def round_staging_complete_rows(engine: Engine, round_table: str) -> int:
+    """Row count of a finished round staging table, or 0 when absent/incomplete.
+
+    UNLOGGED tables come back empty after a PostgreSQL crash, so an empty table
+    is treated as incomplete even when its index survived.
+    """
+    with engine.connect() as conn:
+        exists = conn.execute(
+            text("SELECT to_regclass(:qualified) IS NOT NULL"),
+            {"qualified": f'"{round_table}"'},
+        ).scalar()
+        if not exists:
+            return 0
+        has_gist = conn.execute(
+            text(
+                "SELECT EXISTS (SELECT 1 FROM pg_indexes "
+                "WHERE tablename = :table AND indexdef ILIKE '%USING gist%')"
+            ),
+            {"table": round_table},
+        ).scalar()
+        if not has_gist:
+            return 0
+        return int(conn.execute(text(f'SELECT count(*) FROM "{round_table}"')).scalar() or 0)
+
+
+def drop_staging_tables(engine: Engine, dissolve_table: str, round_table: str | None) -> None:
+    """Drop staging tables created by dissolve_noise_into_staging (round_table=None keeps it)."""
     with engine.begin() as conn:
         conn.execute(text(f'DROP TABLE IF EXISTS "{dissolve_table}"'))
-        conn.execute(text(f'DROP TABLE IF EXISTS "{round_table}"'))
+        if round_table:
+            conn.execute(text(f'DROP TABLE IF EXISTS "{round_table}"'))
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +249,9 @@ def _pass1_dissolve(
                 WHERE noise_source_hash = :source_hash
             ),
             domain_bounds AS (
-                SELECT ST_Extent(geom)::geometry AS ext
+                -- box2d carries no SRID; without ST_SetSRID the square-grid
+                -- tiles are SRID 0 and ST_Intersection with 2157 rows fails.
+                SELECT ST_SetSRID(ST_Extent(geom)::geometry, 2157) AS ext
                 FROM source_rows
                 WHERE geom IS NOT NULL
                   AND NOT ST_IsEmpty(geom)
