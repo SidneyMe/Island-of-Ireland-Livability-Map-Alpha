@@ -35,7 +35,7 @@ Do not open these unless directly required by the task:
 - If `.venv` is broken (for example a namespace-package `pyarrow` with no `__version__`), use the conda env through `scripts\win\geo_env.cmd`; tests that use `TemporaryDirectory` can also fail on `chmod` inside a restricted sandbox — an environment limit, not a code failure.
 - Rust: `cargo test --manifest-path walkgraph/Cargo.toml`. Frontend bundle check: `npm run build --prefix frontend` then `git diff --exit-code -- static/dist`.
 - Planner/behaviour questions are cheapest to answer with `python main.py precompute --profile dev --explain` (no side effects).
-- `tests/test_transit_phase1.py` snapshot regressions are skipped without local GTFS zips — a green run there may mean "skipped".
+- `tests/test_transit_phase1.py` snapshot regressions are skipped unless the local GTFS zips cover the 2026-04-23 snapshot date — a green run there may mean "skipped".
 
 ## Edit discipline
 - Make small focused edits.
