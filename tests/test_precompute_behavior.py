@@ -3219,6 +3219,8 @@ class WorkflowTests(TestCase):
         }
         return engine
 
+    # Explicit: full now defaults to accurate; this scenario is dev_fast reuse.
+    @mock.patch.dict("os.environ", {"NOISE_ACCURACY_MODE": "dev_fast"})
     def test_require_active_artifact_uses_mode_scoped_lookup_without_build(self) -> None:
         engine = self._workflow_db_engine()
         artifact = SimpleNamespace(artifact_hash="res-dev-123")
@@ -3316,6 +3318,8 @@ class WorkflowTests(TestCase):
         self.assertEqual(refresh_kwargs["noise_processing_hash"], "res-new")
         self.assertEqual(refresh_kwargs["noise_artifact_hash"], "res-new")
 
+    # Explicit: full now defaults to accurate; this scenario is dev_fast reuse.
+    @mock.patch.dict("os.environ", {"NOISE_ACCURACY_MODE": "dev_fast"})
     def test_require_active_artifact_missing_raises_fast_for_dev_fast(self) -> None:
         engine = self._workflow_db_engine()
         kwargs = _workflow_kwargs(

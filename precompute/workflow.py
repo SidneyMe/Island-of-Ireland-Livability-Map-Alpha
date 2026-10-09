@@ -395,7 +395,10 @@ def run_precompute_impl(
     from noise_artifacts.modes import noise_accuracy_mode_label as _mode_label
     from noise_artifacts.modes import resolve_noise_accuracy_mode as _resolve_accuracy_mode
 
-    noise_accuracy_mode = _resolve_accuracy_mode(cli_noise_accurate=bool(noise_accurate))
+    noise_accuracy_mode = _resolve_accuracy_mode(
+        cli_noise_accurate=bool(noise_accurate),
+        profile=build_profile,
+    )
     print(f"[noise] noise mode: {_mode_label(noise_accuracy_mode)}", flush=True)
 
     engine, source_state, hashes = _bootstrap_workflow_context(

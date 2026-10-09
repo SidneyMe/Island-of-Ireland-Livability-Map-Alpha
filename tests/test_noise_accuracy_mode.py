@@ -28,6 +28,26 @@ class NoiseAccuracyModeTests(TestCase):
         with patch.dict(os.environ, {"NOISE_ACCURACY_MODE": "dev_fast"}, clear=True):
             self.assertEqual(resolve_noise_accuracy_mode(cli_noise_accurate=True), "accurate")
 
+    def test_full_profile_defaults_to_accurate(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_noise_accuracy_mode(profile="full"), "accurate")
+
+    def test_dev_and_test_profiles_default_to_dev_fast(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(resolve_noise_accuracy_mode(profile="dev"), "dev_fast")
+            self.assertEqual(resolve_noise_accuracy_mode(profile="test"), "dev_fast")
+
+    def test_env_overrides_full_profile_default(self) -> None:
+        with patch.dict(os.environ, {"NOISE_ACCURACY_MODE": "dev_fast"}, clear=True):
+            self.assertEqual(resolve_noise_accuracy_mode(profile="full"), "dev_fast")
+
+    def test_cli_flag_overrides_dev_profile(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(
+                resolve_noise_accuracy_mode(cli_noise_accurate=True, profile="dev"),
+                "accurate",
+            )
+
     def test_normalize_accepts_hyphen_variant(self) -> None:
         self.assertEqual(normalize_noise_accuracy_mode("dev-fast"), "dev_fast")
 
