@@ -51,6 +51,9 @@ noise_datasets/*.zip
 overture/*.geoparquet
 overture/*.geoparquet.state
 overture/*.parquet
+# In-flight downloads from scripts/fetch_datasets.py and scripts/refresh_osm.py
+*.part
+osm/*.osm.pbf.tmp
 
 # Local databases, logs, and temporary files
 *.db

@@ -10,6 +10,9 @@ dependencies:
   - geos
   - libpq
   - postgresql
+  - postgis
+  - osm2pgsql
+  - nodejs=22
   - shapely
   - pyproj
   - geopandas
