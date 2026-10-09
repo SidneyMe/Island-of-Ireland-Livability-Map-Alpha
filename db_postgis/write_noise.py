@@ -664,7 +664,8 @@ _GRID_ARTIFACT_SOURCE_METRIC_COUNTS_SQL = text(
 
 _GRID_ARTIFACT_HASH_SQL = text(
     """
-    SELECT COALESCE(m.manifest_json ->> 'grid_artifact_hash', '') AS grid_artifact_hash
+    SELECT COALESCE(m.manifest_json ->> 'grid_artifact_hash', '') AS grid_artifact_hash,
+           COALESCE(m.manifest_json ->> 'noise_accuracy_mode', '') AS noise_accuracy_mode
     FROM noise_artifact_manifest m
     WHERE m.artifact_hash = :noise_resolved_hash
       AND m.artifact_type = 'resolved'
@@ -831,7 +832,7 @@ _RESOLVED_EXACT_SOURCE_METRIC_COUNTS_SQL = text(
         COUNT(*) AS row_count
     FROM noise_resolved_display r
     WHERE r.noise_resolved_hash = :noise_resolved_hash
-      AND r.source_type IN ('airport', 'industry')
+      AND r.source_type = ANY(:exact_source_types)
       AND r.metric IN ('Lden', 'Lnight')
     GROUP BY r.source_type, r.metric
     ORDER BY r.source_type, r.metric
@@ -851,7 +852,7 @@ _RESOLVED_EXACT_BAND_COUNTS_BY_METRIC_SQL = text(
             END AS raw_band_min
         FROM noise_resolved_display r
         WHERE r.noise_resolved_hash = :noise_resolved_hash
-          AND r.source_type IN ('airport', 'industry')
+          AND r.source_type = ANY(:exact_source_types)
           AND r.metric IN ('Lden', 'Lnight')
     ),
     snapped AS (
@@ -924,7 +925,7 @@ _INSERT_EXACT_FROM_RESOLVED_SQL = text(
         FROM noise_resolved_display r
         CROSS JOIN study_area_2157 s
         WHERE r.noise_resolved_hash = :noise_resolved_hash
-          AND r.source_type IN ('airport', 'industry')
+          AND r.source_type = ANY(:exact_source_types)
           AND r.metric IN ('Lden', 'Lnight')
           AND r.geom IS NOT NULL
           AND NOT ST_IsEmpty(r.geom)
@@ -1064,6 +1065,8 @@ _PROXY_BAND_MINS_BY_METRIC: dict[str, tuple[int, ...]] = {
 
 _GRID_PROXY_SOURCE_TYPES: tuple[str, ...] = ("road", "rail")
 _RESOLVED_EXACT_SOURCE_TYPES: tuple[str, ...] = ("airport", "industry")
+_DEV_FAST_EXACT_SOURCE_TYPES: tuple[str, ...] = _RESOLVED_EXACT_SOURCE_TYPES
+_ACCURATE_EXACT_SOURCE_TYPES: tuple[str, ...] = ("road", "rail", "airport", "industry")
 
 
 def _load_band_counts_by_metric(
@@ -1116,17 +1119,18 @@ def _load_exact_source_metric_counts_from_resolved(
     connection: Connection,
     *,
     noise_resolved_hash: str,
+    exact_source_types: tuple[str, ...] = _DEV_FAST_EXACT_SOURCE_TYPES,
 ) -> dict[str, dict[str, int]]:
     rows = connection.execute(
         _RESOLVED_EXACT_SOURCE_METRIC_COUNTS_SQL,
-        {"noise_resolved_hash": noise_resolved_hash},
+        {"noise_resolved_hash": noise_resolved_hash, "exact_source_types": list(exact_source_types)},
     ).mappings()
     counts: dict[str, dict[str, int]] = {}
     for row in rows:
         source_type = str(row.get("source_type") or "").strip()
         metric = str(row.get("metric") or "").strip()
         row_count = int(row.get("row_count") or 0)
-        if source_type not in _RESOLVED_EXACT_SOURCE_TYPES:
+        if source_type not in exact_source_types:
             continue
         if metric not in _PROXY_BAND_MINS_BY_METRIC:
             continue
@@ -1140,10 +1144,11 @@ def _load_exact_band_counts_by_metric_from_resolved(
     connection: Connection,
     *,
     noise_resolved_hash: str,
+    exact_source_types: tuple[str, ...] = _DEV_FAST_EXACT_SOURCE_TYPES,
 ) -> dict[str, dict[int, int]]:
     rows = connection.execute(
         _RESOLVED_EXACT_BAND_COUNTS_BY_METRIC_SQL,
-        {"noise_resolved_hash": noise_resolved_hash},
+        {"noise_resolved_hash": noise_resolved_hash, "exact_source_types": list(exact_source_types)},
     ).mappings()
     band_counts: dict[str, dict[int, int]] = {}
     for row in rows:
@@ -1252,7 +1257,18 @@ def copy_noise_artifact_to_noise_polygons(
         {"noise_resolved_hash": noise_resolved_hash},
     ).mappings().first()
     grid_artifact_hash = str((grid_row or {}).get("grid_artifact_hash") or "").strip()
-    if not grid_artifact_hash:
+    accuracy_mode = str((grid_row or {}).get("noise_accuracy_mode") or "").strip().lower()
+    if grid_artifact_hash:
+        # dev_fast: road/rail come from the 1 km grid, airport/industry are exact.
+        exact_source_types = _DEV_FAST_EXACT_SOURCE_TYPES
+    elif accuracy_mode == "accurate":
+        # accurate: every published source type is an exact resolved polygon;
+        # there is no grid artifact. 'consolidated' stays unpublished, as in
+        # dev_fast, because it overlaps the per-source layers.
+        exact_source_types = _ACCURATE_EXACT_SOURCE_TYPES
+        if summary_json is not None:
+            summary_json["noise_proxy_phase"] = "accurate_resolved_road_rail_airport_industry_lden_lnight"
+    else:
         if summary_json is not None:
             summary_json["noise_proxy_blocked"] = True
             summary_json["noise_proxy_blocked_reason"] = (
@@ -1260,17 +1276,22 @@ def copy_noise_artifact_to_noise_polygons(
                 "prepare a noise artifact before publish."
             )
         return 0
-    params["grid_artifact_hash"] = grid_artifact_hash
-    band_counts_by_metric = _load_band_counts_by_metric(
-        connection,
-        grid_artifact_hash=grid_artifact_hash,
-    )
-    source_metric_counts = _load_source_metric_counts(
-        connection,
-        grid_artifact_hash=grid_artifact_hash,
-    )
-    grid_result = connection.execute(_INSERT_ROAD_PROXY_FROM_GRID_SQL, params)
-    inserted_grid = max(int(grid_result.rowcount or 0), 0)
+    params["exact_source_types"] = list(exact_source_types)
+    band_counts_by_metric: dict[str, dict[int, int]] = {}
+    source_metric_counts: dict[str, dict[str, int]] = {}
+    inserted_grid = 0
+    if grid_artifact_hash:
+        params["grid_artifact_hash"] = grid_artifact_hash
+        band_counts_by_metric = _load_band_counts_by_metric(
+            connection,
+            grid_artifact_hash=grid_artifact_hash,
+        )
+        source_metric_counts = _load_source_metric_counts(
+            connection,
+            grid_artifact_hash=grid_artifact_hash,
+        )
+        grid_result = connection.execute(_INSERT_ROAD_PROXY_FROM_GRID_SQL, params)
+        inserted_grid = max(int(grid_result.rowcount or 0), 0)
     resolved_result = connection.execute(_INSERT_EXACT_FROM_RESOLVED_SQL, params)
     inserted_exact = max(int(resolved_result.rowcount or 0), 0)
     inserted = inserted_grid + inserted_exact
@@ -1278,10 +1299,12 @@ def copy_noise_artifact_to_noise_polygons(
     exact_band_counts = _load_exact_band_counts_by_metric_from_resolved(
         connection,
         noise_resolved_hash=noise_resolved_hash,
+        exact_source_types=exact_source_types,
     )
     exact_source_metric_counts = _load_exact_source_metric_counts_from_resolved(
         connection,
         noise_resolved_hash=noise_resolved_hash,
+        exact_source_types=exact_source_types,
     )
     merged_band_counts_by_metric = _merge_band_counts_by_metric(
         band_counts_by_metric,
