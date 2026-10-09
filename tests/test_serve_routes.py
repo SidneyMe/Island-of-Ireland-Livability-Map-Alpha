@@ -27,6 +27,10 @@ class ServeRoutesTests(TestCase):
                 "/tiles/livability.pmtiles": ("pmtiles", Path(tmp_name) / "livability.pmtiles"),
                 "/tiles/surface/250/15/3/4.png": ("surface_tile", None),
                 "/static/dist/app.js": ("static", static_dir / "dist" / "app.js"),
+                "/static/basemap/fonts/Noto%20Sans%20Regular/0-255.pbf": (
+                    "static",
+                    static_dir / "basemap" / "fonts" / "Noto Sans Regular" / "0-255.pbf",
+                ),
                 "/api/runtime": ("api_runtime", None),
                 "/api/inspect": ("api_inspect", None),
             }

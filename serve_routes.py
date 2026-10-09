@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 import re
+from urllib.parse import unquote
 
 
 SURFACE_TILE_RE = re.compile(r"^/tiles/surface/([^/]+)/([^/]+)/([^/]+)/([^/]+)\.png$")
@@ -49,7 +50,10 @@ def resolve_get_route(
         return RouteMatch("surface_tile", groups=surface_match.groups())
 
     if path.startswith("/static/"):
-        return RouteMatch("static", target_path=static_dir / path.removeprefix("/static/"))
+        # Request paths arrive percent-encoded; basemap glyph folders contain
+        # spaces ("Noto Sans Regular"), so an undecoded path 404s every label.
+        # _serve_static still rejects anything resolving outside static_dir.
+        return RouteMatch("static", target_path=static_dir / unquote(path.removeprefix("/static/")))
     if path == "/api/runtime":
         return RouteMatch("api_runtime")
     if path == "/api/inspect":
