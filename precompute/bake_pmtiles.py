@@ -775,6 +775,9 @@ def bake_pmtiles(
         landuse_context_min_zoom=landuse_context_min_zoom,
         landuse_context_max_zoom=landuse_context_max_zoom,
     )
+    # Stamp the build so the planner can tell a stale archive (for example one
+    # left behind by a failed bake) from the archive of the current build.
+    metadata["build_key"] = build_key
 
     if temp_output_path.exists():
         temp_output_path.unlink()

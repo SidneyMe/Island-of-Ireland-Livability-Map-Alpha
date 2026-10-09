@@ -177,11 +177,15 @@ def _plan_precompute_build(
             bake_noise_pmtiles,
             noise_pmtiles_output_path,
         )
-        pmtiles_missing = bool(bake_configured and pmtiles_output_path is not None and not pmtiles_output_path.exists())
+        pmtiles_missing = bool(
+            bake_configured
+            and pmtiles_output_path is not None
+            and not _pmtiles_archive_is_current(pmtiles_output_path, hashes.build_key)
+        )
         noise_pmtiles_missing = bool(
             noise_bake_configured
             and noise_pmtiles_output_path is not None
-            and not noise_pmtiles_output_path.exists()
+            and not _pmtiles_archive_is_current(noise_pmtiles_output_path, hashes.build_key)
         )
         surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
         can_refresh_noise_only = (
@@ -202,6 +206,32 @@ def _plan_precompute_build(
             surface_missing=surface_missing,
         )
     )
+
+
+def pmtiles_archive_build_key(path: Path) -> str | None:
+    """Return the build_key stamped into a baked PMTiles archive, if readable."""
+    try:
+        from pmtiles.reader import Reader
+
+        with Path(path).open("rb") as handle:
+            # Plain seek/read instead of MmapSource: a lingering mapping would
+            # block os.replace of the archive on Windows during a rebake.
+            def _get_bytes(offset: int, length: int) -> bytes:
+                handle.seek(offset)
+                return handle.read(length)
+
+            metadata = Reader(_get_bytes).metadata()
+    except Exception:
+        return None
+    value = metadata.get("build_key") if isinstance(metadata, dict) else None
+    return str(value) if value else None
+
+
+def _pmtiles_archive_is_current(path: Path, build_key: str) -> bool:
+    # A failed bake keeps the previous archive in place, and archives baked
+    # before build stamping carry no build_key: both must be rebaked rather
+    # than served next to a newer build's PostGIS rows.
+    return Path(path).exists() and pmtiles_archive_build_key(path) == str(build_key)
 
 
 def _load_stored_noise_state(engine, build_key: str) -> tuple[str | None, dict]:
@@ -629,9 +659,11 @@ def run_precompute_impl(
             bake_noise_pmtiles,
             noise_pmtiles_output_path,
         )
-        pmtiles_missing = bake_configured and not pmtiles_output_path.exists()
-        noise_pmtiles_missing = (
-            noise_bake_configured and not noise_pmtiles_output_path.exists()
+        pmtiles_missing = bake_configured and not _pmtiles_archive_is_current(
+            pmtiles_output_path, hashes.build_key
+        )
+        noise_pmtiles_missing = noise_bake_configured and not _pmtiles_archive_is_current(
+            noise_pmtiles_output_path, hashes.build_key
         )
         surface_missing = callable(fine_surface_ready) and not bool(fine_surface_ready())
         noise_refresh_requested = _noise_refresh_flags_used(

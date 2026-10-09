@@ -37,10 +37,11 @@ _NOISE_BOUNDS_SQL = text(
 )
 
 
-def _metadata(*, min_zoom: int, max_zoom: int) -> dict[str, object]:
+def _metadata(*, min_zoom: int, max_zoom: int, build_key: str | None = None) -> dict[str, object]:
     return {
         "name": "noise_proxy",
-        "attribution": "(c) OpenStreetMap contributors",
+        **({"build_key": build_key} if build_key else {}),
+        "attribution": "EPA Ireland (CC BY 4.0); DAERA via OpenDataNI (OGL)",
         "vector_layers": [
             {
                 "id": "noise_proxy",
@@ -316,7 +317,10 @@ def bake_noise_pmtiles(
                 )
             for zoom in sorted(per_zoom):
                 print(f"  noise z{zoom}: {per_zoom[zoom]:,} non-empty tiles")
-            writer.finalize(header, _metadata(min_zoom=min_zoom, max_zoom=source_max_zoom))
+            writer.finalize(
+                header,
+                _metadata(min_zoom=min_zoom, max_zoom=source_max_zoom, build_key=build_key),
+            )
         temp_output_path.replace(output_path)
         print(
             f"Noise PMTiles baked: {tiles_written:,} non-empty, "
