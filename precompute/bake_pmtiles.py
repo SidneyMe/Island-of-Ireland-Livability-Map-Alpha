@@ -149,7 +149,11 @@ def _pmtiles_metadata(
 ) -> dict[str, object]:
     return {
         "name": "livability",
-        "attribution": "© OpenStreetMap contributors",
+        "attribution": (
+            "© OpenStreetMap contributors (ODbL); Overture Maps Foundation (CDLA-Permissive-2.0); "
+            "National Transport Authority (CC BY 4.0); Translink via OpenDataNI (OGL); "
+            "Tailte Éireann (CC BY 4.0); © Crown copyright, OSNI (OGL)"
+        ),
         "vector_layers": [
             {
                 "id": "grid",
