@@ -20,10 +20,21 @@ def normalize_noise_accuracy_mode(value: str | None) -> NoiseAccuracyMode:
     return "accurate" if raw == "accurate" else "dev_fast"
 
 
-def resolve_noise_accuracy_mode(*, cli_noise_accurate: bool = False) -> NoiseAccuracyMode:
+def resolve_noise_accuracy_mode(
+    *,
+    cli_noise_accurate: bool = False,
+    profile: str | None = None,
+) -> NoiseAccuracyMode:
+    # Precedence: CLI flag > NOISE_ACCURACY_MODE env > build profile default.
+    # The published full profile defaults to accurate; dev/test stay dev_fast.
     if cli_noise_accurate:
         return "accurate"
-    return normalize_noise_accuracy_mode(os.getenv(_ACCURACY_MODE_ENV))
+    raw_env = (os.getenv(_ACCURACY_MODE_ENV) or "").strip()
+    if raw_env:
+        return normalize_noise_accuracy_mode(raw_env)
+    if (profile or "").strip().lower() == "full":
+        return "accurate"
+    return "dev_fast"
 
 
 def noise_accuracy_mode_label(mode: NoiseAccuracyMode) -> str:
