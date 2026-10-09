@@ -8,6 +8,7 @@ from typing import Any
 from zipfile import ZipFile
 
 import numpy as np
+from shapely import STRtree
 from shapely import distance as shapely_distance
 from shapely import points as shapely_points
 from shapely.geometry import LineString
@@ -34,6 +35,7 @@ from transit.gtfs_zip import route_mode
 
 
 SOURCE_KIND = "gtfs_shapes"
+_RAILWAY_PENALTY_CHUNK_NODES = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +158,7 @@ def _node_coordinate_arrays(graph) -> tuple[np.ndarray, np.ndarray]:
         longitudes = np.asarray(graph["_node_longitudes"], dtype=np.float64)
     else:
         latitudes = np.asarray(graph.vs["lat"], dtype=np.float64)
-    longitudes = np.asarray(graph.vs["lon"], dtype=np.float64)
+        longitudes = np.asarray(graph.vs["lon"], dtype=np.float64)
     return latitudes, longitudes
 
 
@@ -186,19 +188,39 @@ def compute_railway_proximity_penalties(
     if not corridor_metric_geometries:
         return penalties
 
-    corridor_union = unary_union(corridor_metric_geometries)
-    if corridor_union is None or getattr(corridor_union, "is_empty", False):
+    corridor_parts: list[Any] = []
+    for geometry in corridor_metric_geometries:
+        corridor_parts.extend(_line_components(geometry))
+    if not corridor_parts:
         return penalties
 
     latitudes, longitudes = _node_coordinate_arrays(walk_graph)
     if latitudes.size == 0 or longitudes.size == 0:
         return penalties
     metric_x, metric_y = TO_TARGET(longitudes, latitudes)
-    node_points = shapely_points(
-        np.asarray(metric_x, dtype=np.float64),
-        np.asarray(metric_y, dtype=np.float64),
-    )
-    distances_m = np.asarray(shapely_distance(node_points, corridor_union), dtype=np.float32)
+    metric_x = np.asarray(metric_x, dtype=np.float64)
+    metric_y = np.asarray(metric_y, dtype=np.float64)
+
+    # Distance to the corridor union equals the minimum distance to its parts.
+    # Only nodes within the zero-penalty distance matter, so an STRtree
+    # "dwithin" query avoids measuring ~10M walk nodes against every rail line,
+    # and chunking bounds the number of live shapely points.
+    tree = STRtree(corridor_parts)
+    part_array = np.asarray(corridor_parts, dtype=object)
+    distances_m = np.full(node_count, np.inf, dtype=np.float64)
+    for start in range(0, node_count, _RAILWAY_PENALTY_CHUNK_NODES):
+        stop = min(start + _RAILWAY_PENALTY_CHUNK_NODES, node_count)
+        chunk_points = shapely_points(metric_x[start:stop], metric_y[start:stop])
+        point_idx, part_idx = tree.query(
+            chunk_points,
+            predicate="dwithin",
+            distance=RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
+        )
+        if point_idx.size == 0:
+            continue
+        pair_distances = shapely_distance(chunk_points[point_idx], part_array[part_idx])
+        np.minimum.at(distances_m, point_idx + start, pair_distances)
+    distances_m = distances_m.astype(np.float32)
     span = RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M - RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M
     if span <= 0.0:
         penalties.fill(float(RAILWAY_PROXIMITY_MAX_PENALTY))

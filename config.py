@@ -450,7 +450,7 @@ BAKE_PMTILES_WORKERS = _positive_int_env(
 )
 
 
-SCORING_MODEL_VERSION = "v3-gtfs-only-transport-2026-08-31"
+SCORING_MODEL_VERSION = "v3-gtfs-only-transport-rail-proximity-2026-09-25"
 MODE_AWARE_SCORING_ENABLED = True
 MODE_AWARE_SCORE_WEIGHTS = {"walk": 0.50, "bike": 0.25, "transit": 0.25}
 
