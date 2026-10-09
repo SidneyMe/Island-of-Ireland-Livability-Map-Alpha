@@ -177,6 +177,32 @@ def _empty_amenity_data() -> dict[str, list[tuple[float, float]]]:
     return {category: [] for category in precompute.TAGS}
 
 
+def _write_stamped_pmtiles(path: Path, build_key: str | None) -> None:
+    """Write a tiny real PMTiles archive whose metadata optionally carries build_key."""
+    from pmtiles.tile import Compression, TileType, zxy_to_tileid
+    from pmtiles.writer import Writer
+
+    with path.open("wb") as handle:
+        writer = Writer(handle)
+        writer.write_tile(zxy_to_tileid(0, 0, 0), b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00")
+        writer.finalize(
+            {
+                "tile_type": TileType.MVT,
+                "tile_compression": Compression.GZIP,
+                "min_zoom": 0,
+                "max_zoom": 0,
+                "min_lon_e7": 0,
+                "min_lat_e7": 0,
+                "max_lon_e7": 0,
+                "max_lat_e7": 0,
+                "center_zoom": 0,
+                "center_lon_e7": 0,
+                "center_lat_e7": 0,
+            },
+            {"name": "livability", **({"build_key": build_key} if build_key else {})},
+        )
+
+
 def _amenity_data_with_transport() -> dict[str, list[tuple[float, float]]]:
     data = _empty_amenity_data()
     data["transport"] = [(53.35, -6.26)]
@@ -2993,7 +3019,7 @@ class WorkflowTests(TestCase):
     def test_precompute_skips_when_complete_build_and_pmtiles_present(self) -> None:
         with TemporaryDirectory() as tmp_name:
             pmtiles_path = Path(tmp_name) / "livability.pmtiles"
-            pmtiles_path.write_bytes(b"PMTILESFAKE")
+            _write_stamped_pmtiles(pmtiles_path, "build-key-123")
             bake_mock = mock.Mock()
             kwargs = _workflow_kwargs(has_complete_build=mock.Mock(return_value=True))
 
@@ -3029,6 +3055,35 @@ class WorkflowTests(TestCase):
         )
         kwargs["phase_geometry"].assert_called_once()
         kwargs["publish_precomputed_artifacts"].assert_not_called()
+
+    def test_precompute_rebakes_archive_left_by_another_build(self) -> None:
+        # A failed bake keeps the previous archive; it must not be treated as current.
+        for stale_stamp in ("older-build", None):
+            with self.subTest(stale_stamp=stale_stamp):
+                with TemporaryDirectory() as tmp_name:
+                    pmtiles_path = Path(tmp_name) / "livability.pmtiles"
+                    _write_stamped_pmtiles(pmtiles_path, stale_stamp)
+                    bake_mock = mock.Mock()
+                    kwargs = _workflow_kwargs(has_complete_build=mock.Mock(return_value=True))
+
+                    precompute._workflow.run_precompute_impl(
+                        bake_pmtiles=bake_mock,
+                        pmtiles_output_path=pmtiles_path,
+                        **kwargs,
+                    )
+
+                bake_mock.assert_called_once_with(mock.sentinel.engine, "build-key-123", pmtiles_path)
+                kwargs["publish_precomputed_artifacts"].assert_not_called()
+
+    def test_pmtiles_archive_build_key_reads_stamp_and_tolerates_garbage(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            stamped = Path(tmp_name) / "stamped.pmtiles"
+            _write_stamped_pmtiles(stamped, "abc123")
+            garbage = Path(tmp_name) / "garbage.pmtiles"
+            garbage.write_bytes(b"PMTILESFAKE")
+            self.assertEqual(precompute._workflow.pmtiles_archive_build_key(stamped), "abc123")
+            self.assertIsNone(precompute._workflow.pmtiles_archive_build_key(garbage))
+            self.assertIsNone(precompute._workflow.pmtiles_archive_build_key(Path(tmp_name) / "missing.pmtiles"))
 
     def test_precompute_propagates_pmtiles_bake_failure(self) -> None:
         with TemporaryDirectory() as tmp_name:
