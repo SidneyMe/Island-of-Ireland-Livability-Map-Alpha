@@ -7,7 +7,9 @@ import {
   BASEMAP_SPRITE_PATH,
   DEFAULT_NOISE_OPACITY,
   GRID_INSERT_BEFORE_LAYER_ID,
+  LIVABILITY_ATTRIBUTION,
   MAX_NOISE_OUTLINE_OPACITY,
+  NOISE_ATTRIBUTION,
   NOISE_OUTLINE_OPACITY_MULTIPLIER,
   activeDebugGridFilter,
   activeDebugGridLayerId,
@@ -238,6 +240,21 @@ const devRuntime = {
   const style = buildStyle(runtimeWithoutNoiseArchive, { windowOrigin: "http://127.0.0.1:8000" });
   assert.equal(style.sources.noise, undefined);
   assert.equal(style.layers.some(function (layer) { return layer.id === "noise-proxy-fill"; }), false);
+}
+
+{
+  // Attribution must not depend on the optional basemap archive being present.
+  const runtimeWithoutBasemap = { ...devRuntime, basemap_pmtiles_url: null };
+  const style = buildStyle(runtimeWithoutBasemap, { windowOrigin: "http://127.0.0.1:8000" });
+  assert.equal(style.sources[BASEMAP_SOURCE_ID], undefined);
+  assert.equal(style.sources.livability.attribution, LIVABILITY_ATTRIBUTION);
+  assert.equal(style.sources.noise.attribution, NOISE_ATTRIBUTION);
+  for (const required of ["OpenStreetMap", "ODbL", "Overture", "National Transport Authority", "Translink", "Tailte", "OSNI"]) {
+    assert.ok(LIVABILITY_ATTRIBUTION.includes(required), "livability attribution is missing " + required);
+  }
+  for (const required of ["EPA", "DAERA"]) {
+    assert.ok(NOISE_ATTRIBUTION.includes(required), "noise attribution is missing " + required);
+  }
 }
 
 {

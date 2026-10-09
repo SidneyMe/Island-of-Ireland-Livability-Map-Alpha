@@ -5,6 +5,19 @@ import {
 } from "./landuse_filters.js";
 import PROTOMAPS_LIGHT_STYLE from "./basemap_style.generated.json" with { type: "json" };
 
+// Every licence below requires attribution wherever the derived tiles are shown.
+const LIVABILITY_ATTRIBUTION = [
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (ODbL)',
+  '<a href="https://overturemaps.org/">Overture Maps Foundation</a> (CDLA-Permissive-2.0)',
+  'Transit data: <a href="https://www.transportforireland.ie/transitData/PT_Data.html">National Transport Authority</a> (CC BY 4.0)',
+  '<a href="https://www.opendatani.gov.uk/">Translink via OpenDataNI</a> (OGL)',
+  'Boundaries: <a href="https://data-osi.opendata.arcgis.com/">Tailte &Eacute;ireann</a> (CC BY 4.0)',
+  '&copy; Crown copyright, <a href="https://www.opendatani.gov.uk/">OSNI</a> (OGL)'
+].join(" | ");
+const NOISE_ATTRIBUTION = [
+  'Noise maps: <a href="https://www.epa.ie/our-services/monitoring--assessment/noise/">EPA Ireland</a> (CC BY 4.0)',
+  '<a href="https://www.opendatani.gov.uk/dataset/environmental-noise-directive-noise-mapping">DAERA via OpenDataNI</a> (OGL)'
+].join(" | ");
 const BASEMAP_SOURCE_ID = "basemap";
 const BASEMAP_SOURCE_LAYER_ID = "protomaps";
 const BASEMAP_GLYPHS_PATH = "/static/basemap/fonts/{fontstack}/{range}.pbf";
@@ -699,20 +712,22 @@ function buildStyle(runtime, options = {}) {
   const sources = {
     livability: {
       type: "vector",
-      url: pmtilesUrl
+      url: pmtilesUrl,
+      attribution: LIVABILITY_ATTRIBUTION
     },
   };
   if (noisePmtilesUrl) {
     sources.noise = {
       type: "vector",
-      url: noisePmtilesUrl
+      url: noisePmtilesUrl,
+      attribution: NOISE_ATTRIBUTION
     };
   }
   if (basemapPmtilesUrl) {
     sources[BASEMAP_SOURCE_ID] = {
       type: "vector",
       url: basemapPmtilesUrl,
-      attribution: '<a href="https://github.com/protomaps/basemaps">Protomaps</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+      attribution: '<a href="https://github.com/protomaps/basemaps">Protomaps</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> | Landcover: <a href="https://daylightmap.org/">Daylight</a> (ESA WorldCover, CC BY 4.0)'
     };
   }
 
@@ -740,7 +755,9 @@ export {
   LANDUSE_CONTEXT_FILL_LAYER_ID,
   LANDUSE_CONTEXT_OUTLINE_LAYER_ID,
   LANDUSE_CONTEXT_SOURCE_LAYER_ID,
+  LIVABILITY_ATTRIBUTION,
   MAX_NOISE_OUTLINE_OPACITY,
+  NOISE_ATTRIBUTION,
   NOISE_OUTLINE_OPACITY_MULTIPLIER,
   activeDebugGridFilter,
   activeDebugGridLayerId,
