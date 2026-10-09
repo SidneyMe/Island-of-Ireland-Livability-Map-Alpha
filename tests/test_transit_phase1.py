@@ -49,6 +49,34 @@ TRANSLINK_GTFS_SNAPSHOT_PATH = Path("gtfs/translink_gtfs.zip")
 SNAPSHOT_ANALYSIS_DATE = date(2026, 4, 23)
 
 
+def _snapshot_covers_analysis_date(zip_path: Path) -> bool:
+    """True when a local feed is the snapshot these regressions were written against.
+
+    The expected stop rows were captured from feeds active on SNAPSHOT_ANALYSIS_DATE;
+    a refreshed feed whose calendar starts later legitimately disagrees.
+    """
+    if not zip_path.is_file():
+        return False
+    target = SNAPSHOT_ANALYSIS_DATE.strftime("%Y%m%d")
+    try:
+        with ZipFile(zip_path) as bundle:
+            if "calendar.txt" not in bundle.namelist():
+                return True
+            text = bundle.read("calendar.txt").decode("utf-8-sig")
+    except Exception:
+        return False
+    lines = text.splitlines()
+    if not lines:
+        return False
+    header = [name.strip().strip('"') for name in lines[0].split(",")]
+    start_idx, end_idx = header.index("start_date"), header.index("end_date")
+    for line in lines[1:]:
+        fields = [value.strip().strip('"') for value in line.split(",")]
+        if len(fields) > max(start_idx, end_idx) and fields[start_idx] <= target <= fields[end_idx]:
+            return True
+    return False
+
+
 def _write_gtfs_zip(path: Path, files: dict[str, str]) -> None:
     with ZipFile(path, "w") as archive:
         for file_name, content in files.items():
@@ -1258,8 +1286,8 @@ class TransitWorkflowTests(TestCase):
 
 
 @unittest.skipUnless(
-    NTA_GTFS_SNAPSHOT_PATH.is_file(),
-    "Local NTA GTFS snapshot is required for exact stop regression checks.",
+    _snapshot_covers_analysis_date(NTA_GTFS_SNAPSHOT_PATH),
+    "Local NTA GTFS snapshot covering SNAPSHOT_ANALYSIS_DATE is required for exact stop regression checks.",
 )
 class TransitSnapshotNtaRegressionTests(TestCase):
     @classmethod
@@ -1307,8 +1335,8 @@ class TransitSnapshotNtaRegressionTests(TestCase):
 
 
 @unittest.skipUnless(
-    TRANSLINK_GTFS_SNAPSHOT_PATH.is_file(),
-    "Local Translink GTFS snapshot is required for exact stop regression checks.",
+    _snapshot_covers_analysis_date(TRANSLINK_GTFS_SNAPSHOT_PATH),
+    "Local Translink GTFS snapshot covering SNAPSHOT_ANALYSIS_DATE is required for exact stop regression checks.",
 )
 class TransitSnapshotTranslinkRegressionTests(TestCase):
     @classmethod
