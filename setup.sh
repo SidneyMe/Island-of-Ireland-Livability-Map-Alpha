@@ -1,62 +1,43 @@
 #!/usr/bin/env bash
-# Bootstrap a local Linux/PostgreSQL development environment. On Debian/Ubuntu
-# it installs missing prerequisites; other distributions must provide them.
+# One-command bootstrap for a Linux host: installs every prerequisite (Debian/
+# Ubuntu), provisions a local PostgreSQL/PostGIS database, downloads every
+# dataset, builds the helpers, and runs the full pipeline up to a servable map.
+#
+#   ./setup.sh                 install everything and build the published map
+#   ./setup.sh --skip-build    install everything, skip the multi-hour pipeline
+#   ./setup.sh --refresh-data  re-download OSM and GTFS from official sources
+#
+# Reruns are safe: finished downloads, installs, and pipeline stages are reused.
 set -Eeuo pipefail
 IFS=$'\n\t'
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
+SKIP_BUILD=0
+REFRESH_DATA=0
+for arg in "$@"; do
+    case "$arg" in
+        --skip-build) SKIP_BUILD=1 ;;
+        --refresh-data) REFRESH_DATA=1 ;;
+        -h|--help)
+            sed -n '2,10p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0
+            ;;
+        *)
+            echo "setup.sh: unknown option: $arg (see --help)" >&2
+            exit 2
+            ;;
+    esac
+done
+
 DB_HOST="${POSTGRES_HOST:-localhost}"
 DB_PORT="${POSTGRES_PORT:-5432}"
 DB_NAME="${POSTGRES_DB:-livability}"
 DB_USER="${POSTGRES_USER:-livability}"
 DB_PASSWORD="${POSTGRES_PASSWORD:-}"
-# The project-maintained release carries the required remote-install inputs.
-# Set DATASET_MIRROR_BASE_URL to replace it with another full mirror.
-MIRROR_BASE_URL="${DATASET_MIRROR_BASE_URL:-https://github.com/SidneyMe/livability-data/releases/download/v1}"
-MIRROR_BASE_URL="${MIRROR_BASE_URL%/}"
-
-if [[ -n "$MIRROR_BASE_URL" ]]; then
-    MIRROR_OSM_URL="$MIRROR_BASE_URL/ireland-and-northern-ireland-latest.osm.pbf"
-    MIRROR_ROI_BOUNDARY_URL="$MIRROR_BASE_URL/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson"
-    MIRROR_NI_BOUNDARY_URL="$MIRROR_BASE_URL/osni_open_data_largescale_boundaries_ni_outline.geojson"
-    MIRROR_NTA_GTFS_URL="$MIRROR_BASE_URL/nta_gtfs.zip"
-    MIRROR_TRANSLINK_GTFS_URL="$MIRROR_BASE_URL/translink_gtfs.zip"
-    # The v1 release deliberately contains only the five required bootstrap
-    # inputs above. Optional inputs are never guessed from the mirror URL:
-    # configure their individual *_URL variables when they are available.
-fi
-
-OSM_URL="${OSM_URL:-${MIRROR_OSM_URL:-https://download.geofabrik.de/europe/ireland-and-northern-ireland-latest.osm.pbf}}"
-OSM_PATH="osm/ireland-and-northern-ireland-latest.osm.pbf"
-ROI_BOUNDARY_PATH="boundaries/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson"
-NI_BOUNDARY_PATH="boundaries/osni_open_data_largescale_boundaries_ni_outline.geojson"
-NTA_GTFS_PATH="${GTFS_NTA_ZIP_PATH:-gtfs/nta_gtfs.zip}"
-TRANSLINK_GTFS_PATH="${GTFS_TRANSLINK_ZIP_PATH:-gtfs/translink_gtfs.zip}"
-OVERTURE_PATH="overture/ireland_places.geoparquet"
-MAIN_ISLAND_SHAPEFILE="ireland_main_island_shp/ireland_main_island.shp"
-
-# The official boundary download endpoints are stable enough to provide
-# defaults. Configure the remaining source URLs because portal release links
-# change frequently.
-ROI_BOUNDARY_URL="${ROI_BOUNDARY_URL:-${MIRROR_ROI_BOUNDARY_URL:-https://data-osi.opendata.arcgis.com/api/download/v1/items/dc24df2a5ce84ee9a38d9afe8431ee9b/geojson?layers=1}}"
-# OSNI's portals currently return transient resets and 403s to unattended
-# downloads. Use a stable GitHub mirror of the NI coastline/outline instead;
-# the pipeline consumes this file's geometry only. Override either URL when an
-# official source becomes reliably downloadable again.
-NI_BOUNDARY_URL="${NI_BOUNDARY_URL:-${MIRROR_NI_BOUNDARY_URL:-https://github.com/SidneyMe/livability-data/releases/download/v1/osni_open_data_largescale_boundaries_ni_outline.geojson}}"
-NI_BOUNDARY_FALLBACK_URL="${NI_BOUNDARY_FALLBACK_URL:-https://hub.arcgis.com/api/v3/datasets/159c80fe1ad54140b429f8799f624962_0/downloads/data?format=geojson&spatialRefId=4326&where=1%3D1}"
-NTA_GTFS_URL="${GTFS_NTA_URL:-${MIRROR_NTA_GTFS_URL:-}}"
-TRANSLINK_GTFS_URL="${GTFS_TRANSLINK_URL:-${MIRROR_TRANSLINK_GTFS_URL:-}}"
-OVERTURE_PLACES_URL="${OVERTURE_PLACES_URL:-${MIRROR_OVERTURE_PLACES_URL:-}}"
-MAIN_ISLAND_BOUNDARY_ARCHIVE_URL="${MAIN_ISLAND_BOUNDARY_ARCHIVE_URL:-${MIRROR_MAIN_ISLAND_BOUNDARY_ARCHIVE_URL:-}}"
-NOISE_ROUND4_URL="${NOISE_ROUND4_URL:-${MIRROR_NOISE_ROUND4_URL:-}}"
-NOISE_ROUND3_URL="${NOISE_ROUND3_URL:-${MIRROR_NOISE_ROUND3_URL:-}}"
-NOISE_ROUND2_URL="${NOISE_ROUND2_URL:-${MIRROR_NOISE_ROUND2_URL:-}}"
-NOISE_NI_ROUND3_URL="${NOISE_NI_ROUND3_URL:-${MIRROR_NOISE_NI_ROUND3_URL:-}}"
-NOISE_NI_ROUND2_URL="${NOISE_NI_ROUND2_URL:-${MIRROR_NOISE_NI_ROUND2_URL:-}}"
-NOISE_NI_ROUND1_URL="${NOISE_NI_ROUND1_URL:-${MIRROR_NOISE_NI_ROUND1_URL:-}}"
+# Dataset sources (mirror, per-dataset *_URL overrides, official fallbacks)
+# live in scripts/fetch_datasets.py, shared with setup.ps1.
 
 die() {
     echo "setup.sh: $*" >&2
@@ -67,12 +48,25 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
 }
 
+if [[ "$EUID" -eq 0 ]]; then
+    ADMIN=()
+elif command -v sudo >/dev/null 2>&1; then
+    ADMIN=(sudo)
+else
+    ADMIN=()
+fi
+
+require_admin() {
+    [[ "$EUID" -eq 0 || ${#ADMIN[@]} -gt 0 ]] || die "$1 Rerun as root or install sudo."
+}
+
 install_system_dependencies() {
     local -a missing_commands=()
     local command_name
-    for command_name in cargo curl node npm osm2pgsql pg_isready psql python3 unzip; do
+    for command_name in cargo curl ogr2ogr osm2pgsql pg_isready psql python3 unzip; do
         command -v "$command_name" >/dev/null 2>&1 || missing_commands+=("$command_name")
     done
+    python3 -m venv --help >/dev/null 2>&1 || missing_commands+=("python3-venv")
 
     if [[ ${#missing_commands[@]} -eq 0 ]]; then
         return
@@ -80,27 +74,84 @@ install_system_dependencies() {
     if ! command -v apt-get >/dev/null 2>&1; then
         die "Missing required commands: ${missing_commands[*]}. Install them with your system package manager, then rerun setup.sh."
     fi
-
-    local -a apt_admin=()
-    if [[ "$EUID" -ne 0 ]]; then
-        command -v sudo >/dev/null 2>&1 || die "Missing required commands: ${missing_commands[*]}. Rerun as root or install sudo so setup.sh can install them."
-        apt_admin=(sudo)
-    fi
+    require_admin "Missing required commands: ${missing_commands[*]}."
 
     echo "=== 0. Installing missing system dependencies: ${missing_commands[*]} ==="
-    "${apt_admin[@]}" apt-get update
-    DEBIAN_FRONTEND=noninteractive "${apt_admin[@]}" apt-get install --yes \
-        build-essential cargo curl gdal-bin libgdal-dev libgeos-dev libpq-dev libproj-dev \
-        nodejs npm osm2pgsql postgis postgresql postgresql-contrib postgresql-postgis \
+    "${ADMIN[@]}" apt-get update
+    DEBIAN_FRONTEND=noninteractive "${ADMIN[@]}" apt-get install --yes \
+        build-essential ca-certificates cargo curl gdal-bin git libgdal-dev libgeos-dev libpq-dev \
+        libproj-dev osm2pgsql postgis postgresql postgresql-contrib postgresql-postgis \
         python3 python3-dev python3-venv unzip
 }
 
-ensure_supported_rust_toolchain() {
-    if cargo metadata --manifest-path walkgraph/Cargo.toml --format-version 1 --no-deps >/dev/null 2>&1; then
+node_is_supported() {
+    # The frontend build (Vite 7, JSON import attributes) needs Node >= 22,
+    # matching CI; distro packages on Debian 12 / Ubuntu 24.04 ship Node 18.
+    command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
+        && node -e 'process.exit(Number(process.versions.node.split(".")[0]) >= 22 ? 0 : 1)'
+}
+
+install_node() {
+    if node_is_supported; then
         return
     fi
+    command -v apt-get >/dev/null 2>&1 || die "Node.js 22+ is required. Install it, then rerun setup.sh."
+    require_admin "Node.js 22+ is required for the frontend build."
+    echo "=== 0a. Installing Node.js 22 (NodeSource) ==="
+    local node_installer
+    node_installer="$(mktemp)"
+    curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
+        https://deb.nodesource.com/setup_22.x -o "$node_installer"
+    "${ADMIN[@]}" bash "$node_installer"
+    rm -f "$node_installer"
+    DEBIAN_FRONTEND=noninteractive "${ADMIN[@]}" apt-get install --yes nodejs
+    node_is_supported || die "Node.js 22+ is still unavailable after installing NodeSource nodejs."
+}
 
-    echo "=== Rust toolchain upgrade required for walkgraph/Cargo.lock ==="
+install_docker() {
+    # The self-hosted basemap build uses `docker compose run --build`, which
+    # needs the Compose v2 plugin; distro docker-compose v1 packages are not
+    # enough, so use Docker's official installer when Compose v2 is missing.
+    if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
+        require_admin "Docker with the Compose v2 plugin is required for the basemap."
+        echo "=== 0b. Installing Docker Engine + Compose plugin ==="
+        local docker_installer
+        docker_installer="$(mktemp)"
+        curl --fail --location --proto '=https' --tlsv1.2 --retry 2 \
+            https://get.docker.com -o "$docker_installer"
+        "${ADMIN[@]}" sh "$docker_installer"
+        rm -f "$docker_installer"
+    fi
+    if ! "${ADMIN[@]}" docker info >/dev/null 2>&1; then
+        if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
+            "${ADMIN[@]}" systemctl enable --now docker || true
+        elif command -v service >/dev/null 2>&1; then
+            "${ADMIN[@]}" service docker start || true
+        fi
+    fi
+    local current_user="${USER:-$(id -un)}"
+    if [[ "$EUID" -ne 0 ]] && ! id -nG "$current_user" | tr ' ' '\n' | grep -qx docker; then
+        "${ADMIN[@]}" usermod -aG docker "$current_user"
+        echo "Added $current_user to the docker group (takes effect in new login shells)."
+    fi
+}
+
+# Run a command that talks to the Docker daemon, even when the docker group
+# membership added above is not active in this shell yet.
+with_docker() {
+    if docker info >/dev/null 2>&1 || [[ "$EUID" -eq 0 ]]; then
+        "$@"
+    elif command -v sg >/dev/null 2>&1; then
+        local quoted
+        quoted="$(printf '%q ' "$@")"
+        sg docker -c "$quoted"
+    else
+        die "Docker is installed but not usable by ${USER:-$(id -un)}; log out and back in, then rerun setup.sh."
+    fi
+}
+
+install_stable_rust() {
+    echo "=== Installing the current stable Rust toolchain (rustup) ==="
     if ! command -v rustup >/dev/null 2>&1; then
         local rustup_installer
         rustup_installer="$(mktemp)"
@@ -114,65 +165,32 @@ ensure_supported_rust_toolchain() {
     command -v rustup >/dev/null 2>&1 || die "rustup installation did not provide a usable toolchain."
     rustup toolchain install stable --profile minimal
     rustup default stable
-    cargo metadata --manifest-path walkgraph/Cargo.toml --format-version 1 --no-deps >/dev/null \
-        || die "Current stable Rust still cannot read walkgraph/Cargo.lock."
 }
 
-download_dataset() {
-    local label="$1"
-    local target="$2"
-    local url="$3"
-    local required="$4"
-    local fallback_url="${5:-}"
-
-    if [[ -s "$target" ]]; then
-        echo "Reusing $label: $target"
+build_walkgraph() {
+    # Distro Cargo can be too old for walkgraph (Cargo.lock v4 needs >= 1.78,
+    # and `cargo metadata --no-deps` does not read the lockfile, so only a real
+    # build proves it). Fall back to rustup stable once, then fail loudly.
+    [[ -d "$HOME/.cargo/bin" ]] && export PATH="$HOME/.cargo/bin:$PATH"
+    if cargo build --release --manifest-path walkgraph/Cargo.toml; then
         return
     fi
-    if [[ -z "$url" ]]; then
-        if [[ "$required" == "required" ]]; then
-            die "Missing $label at $target. Set the corresponding download URL or place the file there."
-        fi
-        echo "Skipping optional $label; no download URL was configured."
-        return
-    fi
-
-    mkdir -p "$(dirname "$target")"
-    echo "Downloading $label..."
-    if ! curl --fail --location --http1.1 --retry 2 --retry-delay 2 \
-        --connect-timeout 30 --output "${target}.part" "$url"; then
-        rm -f "${target}.part"
-        if [[ -z "$fallback_url" ]]; then
-            if [[ "$required" == "required" ]]; then
-                die "Download failed for $label."
-            fi
-            echo "Skipping optional $label; its configured download is unavailable."
-            return
-        fi
-        echo "Primary download failed; trying the fallback source for $label..."
-        if ! curl --fail --location --http1.1 --retry 2 --retry-delay 2 \
-            --connect-timeout 30 --output "${target}.part" "$fallback_url"; then
-            rm -f "${target}.part"
-            if [[ "$required" == "required" ]]; then
-                die "Download failed for $label from both configured sources."
-            fi
-            echo "Skipping optional $label; both configured downloads are unavailable."
-            return
-        fi
-    fi
-    mv "${target}.part" "$target"
+    install_stable_rust
+    cargo build --release --manifest-path walkgraph/Cargo.toml \
+        || die "walkgraph failed to build with the current stable Rust toolchain."
 }
 
 install_system_dependencies
+install_node
+install_docker
 
 if [[ "$DB_HOST" != "localhost" && "$DB_HOST" != "127.0.0.1" && "$DB_HOST" != "::1" ]]; then
     die "This script provisions a local PostgreSQL instance; POSTGRES_HOST must be localhost, 127.0.0.1, or ::1."
 fi
 
-for command_name in cargo curl node npm osm2pgsql pg_isready psql python3 unzip; do
+for command_name in cargo curl docker node npm ogr2ogr osm2pgsql pg_isready psql python3 unzip; do
     require_command "$command_name"
 done
-ensure_supported_rust_toolchain
 
 if [[ -z "$DB_PASSWORD" ]]; then
     if [[ -t 0 ]]; then
@@ -218,21 +236,18 @@ write_runtime_env() {
 
 if [[ "$EUID" -eq 0 ]]; then
     PG_ADMIN=(runuser -u postgres --)
-    SERVICE_ADMIN=()
-elif command -v sudo >/dev/null 2>&1; then
-    PG_ADMIN=(sudo -u postgres)
-    SERVICE_ADMIN=(sudo)
 else
-    die "Run as root or install sudo so the local postgres service can be administered."
+    require_admin "The local postgres service must be administered."
+    PG_ADMIN=(sudo -u postgres)
 fi
 
 echo "=== 1. Starting PostgreSQL ==="
 if ! pg_isready -q -h "$DB_HOST" -p "$DB_PORT"; then
     if [[ -d /run/systemd/system ]] && command -v systemctl >/dev/null 2>&1; then
-        "${SERVICE_ADMIN[@]}" systemctl start postgresql || true
+        "${ADMIN[@]}" systemctl start postgresql || true
     fi
     if ! pg_isready -q -h "$DB_HOST" -p "$DB_PORT" && command -v service >/dev/null 2>&1; then
-        "${SERVICE_ADMIN[@]}" service postgresql start || true
+        "${ADMIN[@]}" service postgresql start || true
     fi
 fi
 pg_isready -q -h "$DB_HOST" -p "$DB_PORT" || die "PostgreSQL is not accepting connections on $DB_HOST:$DB_PORT."
@@ -258,38 +273,12 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 SQL
 
 echo "=== 3. Downloading and validating local datasets ==="
-mkdir -p osm gtfs boundaries ireland_main_island_shp noise_datasets overture
-download_dataset "OSM extract" "$OSM_PATH" "$OSM_URL" required
-download_dataset "Republic of Ireland boundary" "$ROI_BOUNDARY_PATH" "$ROI_BOUNDARY_URL" required
-download_dataset "Northern Ireland boundary" "$NI_BOUNDARY_PATH" "$NI_BOUNDARY_URL" required "$NI_BOUNDARY_FALLBACK_URL"
-download_dataset "NTA GTFS feed" "$NTA_GTFS_PATH" "$NTA_GTFS_URL" required
-download_dataset "Translink GTFS feed" "$TRANSLINK_GTFS_PATH" "$TRANSLINK_GTFS_URL" required
-download_dataset "Overture places dataset" "$OVERTURE_PATH" "$OVERTURE_PLACES_URL" optional
-
-if [[ ! -s "$MAIN_ISLAND_SHAPEFILE" && -n "$MAIN_ISLAND_BOUNDARY_ARCHIVE_URL" ]]; then
-    main_island_archive="ireland_main_island_shp/ireland_main_island.zip"
-    download_dataset "main-island boundary archive" "$main_island_archive" "$MAIN_ISLAND_BOUNDARY_ARCHIVE_URL" optional
-    if [[ -s "$main_island_archive" ]]; then
-        require_command unzip
-        unzip -o "$main_island_archive" -d ireland_main_island_shp
-        [[ -s "$MAIN_ISLAND_SHAPEFILE" ]] || die "Main-island archive did not extract $MAIN_ISLAND_SHAPEFILE."
-    fi
-fi
-if [[ -s "$MAIN_ISLAND_SHAPEFILE" ]]; then
-    echo "Reusing main-island boundary: $MAIN_ISLAND_SHAPEFILE"
-else
-    echo "Main-island boundary is optional; the two required GeoJSON boundaries will be merged instead."
-fi
-
-download_dataset "ROI Round 4 noise archive" "noise_datasets/NOISE_Round4.zip" "$NOISE_ROUND4_URL" optional
-download_dataset "ROI Round 3 noise archive" "noise_datasets/NOISE_Round3.zip" "$NOISE_ROUND3_URL" optional
-download_dataset "ROI Round 2 noise archive" "noise_datasets/NOISE_Round2.zip" "$NOISE_ROUND2_URL" optional
-download_dataset "NI Round 3 noise archive" "noise_datasets/end_noisedata_round3.zip" "$NOISE_NI_ROUND3_URL" optional
-download_dataset "NI Round 2 noise archive" "noise_datasets/end_noisedata_round2.zip" "$NOISE_NI_ROUND2_URL" optional
-download_dataset "NI Round 1 noise archive" "noise_datasets/end_noisedata_round1.zip" "$NOISE_NI_ROUND1_URL" optional
+fetch_args=()
+[[ "$REFRESH_DATA" -eq 1 ]] && fetch_args+=(--refresh)
+python3 scripts/fetch_datasets.py "${fetch_args[@]}"
 
 echo "=== 4. Building Rust walkgraph ==="
-cargo build --release --manifest-path walkgraph/Cargo.toml
+build_walkgraph
 export WALKGRAPH_BIN="$PROJECT_ROOT/walkgraph/target/release/walkgraph"
 write_runtime_env
 
@@ -305,6 +294,23 @@ echo "=== 6. Building frontend bundle ==="
 npm ci --prefix frontend
 npm run build --prefix frontend
 
+if [[ "$SKIP_BUILD" -eq 1 ]]; then
+    echo "=== Setup complete (pipeline skipped: --skip-build) ==="
+    echo "Build the map later with: ./setup.sh   (reruns reuse everything already done)"
+    exit 0
+fi
+
+echo "=== 7. Importing OSM and building the self-hosted basemap ==="
+with_docker .venv/bin/python main.py import
+
+echo "=== 8. Building GTFS transit reality ==="
+.venv/bin/python main.py transit
+
+echo "=== 9. Precomputing the full map (accurate noise overlay) ==="
+.venv/bin/python main.py precompute --profile full
+
+echo "=== 10. Sanity-checking the published build ==="
+.venv/bin/python scripts/sanity_check.py --profile full
+
 echo "=== Setup complete ==="
-echo "Database settings are available through .env in future shells."
-echo "Optional Overture and noise source URLs are documented in .env.example; raw noise files must be converted to an artifact before use."
+echo "Start the map with: .venv/bin/python main.py serve --deployment   (then open http://127.0.0.1:8000)"
