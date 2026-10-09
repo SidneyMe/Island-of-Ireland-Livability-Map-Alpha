@@ -24,6 +24,12 @@ The output is `.livability_cache/basemap/basemap.pmtiles`. The normal
 rebuilds it only when its manifest is stale. Use `python main.py basemap --force`
 for an explicit rebuild.
 
+The Planetiler JVM heap defaults to 5 GB (`-Xmx5g` via `JAVA_TOOL_OPTIONS` in
+`basemap/docker-compose.yml`) because the JVM's own default, a quarter of the
+Docker VM, is about 2 GB on an 8 GB Docker Desktop VM and runs out of heap in
+the OSM stage. Override it with `BASEMAP_JAVA_HEAP` (for example `6g`), and
+keep it below the memory Docker Desktop gives its VM.
+
 Run locally with a missing basemap only when inspecting the rest of the stack:
 
 ```text
@@ -48,9 +54,13 @@ assets are independently locked to basemaps-assets commit
 pins, the PBF fingerprint, ancillary input checksums, the Docker image ID, and
 the PMTiles and vendored-asset checksums.
 
-The first successful production build should append observed elapsed time, peak
-disk use, peak memory, and ancillary download sizes here. They are deliberately
-not guessed in advance.
+Observed production build (2026-09-25, Geofabrik extract of 2026-09-25, Docker
+Desktop VM with 8 GB / 16 CPUs, `-Xmx5g`): 21m54s once ancillary inputs are
+cached, a 567 MB `basemap.pmtiles` (1.8 GB of intermediate features), and 2.7 GB
+of cached ancillary downloads under `.livability_cache/basemap/work/data`
+(OSM water and land polygons are about 0.9 GB each; the first run spends most
+of its time downloading them). The default 2 GB JVM heap failed in the OSM
+stage with `OutOfMemoryError`.
 
 CI builds the documented `--area=monaco` Docker fixture to validate the pinned
 profile path. It does not build, and is not evidence for, the Ireland/NI
