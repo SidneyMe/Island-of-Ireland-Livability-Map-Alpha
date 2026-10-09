@@ -23,6 +23,31 @@ class _Graph:
         return []
 
 
+class RailwayProximityTests(TestCase):
+    def test_penalties_work_with_production_walk_graph_index(self) -> None:
+        # Production graphs are WalkGraphIndex (no igraph `.vs`); coordinates
+        # come from _node_latitudes/_node_longitudes. A regression here used to
+        # raise and silently zero every railway penalty.
+        from pathlib import Path
+
+        from network.loader import WalkGraphIndex
+        from transit.railway_corridors import compute_railway_proximity_penalties
+
+        graph = WalkGraphIndex(
+            graph_dir=Path("."),
+            meta={"node_count": 2},
+            node_latitudes=np.array([53.35, 53.36], dtype=np.float32),
+            node_longitudes=np.array([-6.255, -6.255], dtype=np.float32),
+        )
+        corridor = {"geom": LineString([(-6.26, 53.35), (-6.25, 53.35)])}
+
+        penalties = compute_railway_proximity_penalties(graph, [corridor])
+
+        self.assertEqual(penalties.shape, (2,))
+        self.assertAlmostEqual(float(penalties[0]), 4.0)
+        self.assertEqual(float(penalties[1]), 0.0)
+
+
 class RoadProximityTests(TestCase):
     def test_maxspeed_parser_accepts_kmh_and_mph(self) -> None:
         self.assertEqual(parse_maxspeed_kmh("100 km/h", 80), 100.0)
