@@ -77,6 +77,9 @@ def _write_adjacency_sidecars(
     np.asarray(lengths, dtype=loader.ADJ_LENGTHS_DTYPE).tofile(
         graph_dir / "walk_graph.adjacency_lengths.bin"
     )
+    # Format 4 sidecars: per-slot edge flags and per-node component ids.
+    np.zeros(len(targets), dtype=np.uint8).tofile(graph_dir / "walk_graph.edge_flags.bin")
+    np.zeros(len(offsets) - 1, dtype="<u4").tofile(graph_dir / "walk_graph.components.bin")
 
 
 class NetworkLoaderTests(TestCase):

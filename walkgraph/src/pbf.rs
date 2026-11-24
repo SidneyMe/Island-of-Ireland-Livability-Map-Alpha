@@ -29,6 +29,12 @@ pub const BIKE_EXCLUDED: [&str; 8] = [
     "steps",
 ];
 pub const BIKE_PRIVATE_VALUES: [&str; 3] = ["private", "no", "use_sidepath"];
+/// Highway classes that count as recreation edges (national-park approaches).
+pub const RECREATION_HIGHWAYS: [&str; 5] = ["path", "footway", "track", "bridleway", "steps"];
+/// `footway=*` values that disqualify a recreation edge (street furniture).
+pub const NON_RECREATION_FOOTWAYS: [&str; 2] = ["sidewalk", "crossing"];
+/// Bit set in `walk_graph.edge_flags.bin` for recreation edges.
+pub const EDGE_FLAG_RECREATION: u8 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GraphProfile {
@@ -70,6 +76,8 @@ impl Bbox {
 pub struct Pass1Artifacts {
     pub referenced_node_ids: Vec<i64>,
     pub edge_spool: NamedTempFile,
+    /// One flag byte per directed pair in `edge_spool`, same order.
+    pub edge_flag_spool: NamedTempFile,
     pub walkable_way_count: u64,
     pub raw_directed_edge_pairs: u64,
 }
@@ -190,6 +198,36 @@ where
     true
 }
 
+/// Edge flags for every segment of a way (see `EDGE_FLAG_RECREATION`).
+pub fn way_edge_flags<I, K, V>(tags: I) -> u8
+where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+{
+    let mut highway: Option<String> = None;
+    let mut footway: Option<String> = None;
+    for (key, value) in tags {
+        match key.as_ref() {
+            "highway" => highway = Some(value.as_ref().to_string()),
+            "footway" => footway = Some(value.as_ref().to_ascii_lowercase()),
+            _ => {}
+        }
+    }
+    let Some(highway) = highway else {
+        return 0;
+    };
+    if !RECREATION_HIGHWAYS.contains(&highway.as_str()) {
+        return 0;
+    }
+    if let Some(footway) = footway.as_deref() {
+        if NON_RECREATION_FOOTWAYS.contains(&footway) {
+            return 0;
+        }
+    }
+    EDGE_FLAG_RECREATION
+}
+
 pub fn is_reachable_way_tags<I, K, V>(profile: GraphProfile, tags: I) -> bool
 where
     I: IntoIterator<Item = (K, V)>,
@@ -208,6 +246,7 @@ pub fn scan_reachable_ways(
 ) -> Result<Pass1Artifacts, Box<dyn Error>> {
     let reader = ElementReader::from_path(pbf_path)?;
     let mut edge_spool = NamedTempFile::new()?;
+    let mut edge_flag_spool = NamedTempFile::new()?;
     let mut referenced_node_ids = Vec::<i64>::new();
     let mut walkable_way_count = 0_u64;
     let mut raw_directed_edge_pairs = 0_u64;
@@ -215,6 +254,7 @@ pub fn scan_reachable_ways(
 
     {
         let mut spool_writer = BufWriter::new(edge_spool.as_file_mut());
+        let mut flag_writer = BufWriter::new(edge_flag_spool.as_file_mut());
 
         reader.for_each(|element| {
             if write_error.is_some() {
@@ -230,6 +270,7 @@ pub fn scan_reachable_ways(
             if refs.len() < 2 {
                 return;
             }
+            let flags = way_edge_flags(way.tags());
 
             walkable_way_count += 1;
             referenced_node_ids.extend(refs.iter().copied());
@@ -246,12 +287,17 @@ pub fn scan_reachable_ways(
                         write_error = Some(err);
                         return;
                     }
+                    if let Err(err) = flag_writer.write_all(&[flags]) {
+                        write_error = Some(err);
+                        return;
+                    }
                     raw_directed_edge_pairs += 1;
                 }
             }
         })?;
 
         spool_writer.flush()?;
+        flag_writer.flush()?;
     }
 
     if let Some(err) = write_error {
@@ -264,6 +310,7 @@ pub fn scan_reachable_ways(
     Ok(Pass1Artifacts {
         referenced_node_ids,
         edge_spool,
+        edge_flag_spool,
         walkable_way_count,
         raw_directed_edge_pairs,
     })

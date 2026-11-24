@@ -10,6 +10,8 @@ export const CLICK_ACTIONS = {
 
 function queryLayer(map, point, layerId) {
   if (!map || !layerId) return [];
+  // Optional overlays (noise, deserts) are absent from some builds' styles.
+  if (typeof map.getLayer === "function" && !map.getLayer(layerId)) return [];
   return map.queryRenderedFeatures(point, { layers: [layerId] });
 }
 

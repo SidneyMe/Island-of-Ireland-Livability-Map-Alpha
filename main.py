@@ -11,6 +11,7 @@ _COMMAND_TRANSIT = "transit"
 _COMMAND_PRECOMPUTE = "precompute"
 _COMMAND_BASEMAP = "basemap"
 _COMMAND_GTFS = "gtfs"
+_COMMAND_DAILY_ACCESS = "daily-access"
 _GTFS_STATUS = "status"
 _GTFS_REFRESH = "refresh"
 _PROFILE_CHOICES = ("full", "dev", "test")
@@ -170,6 +171,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_precompute_noise_arguments(precompute_parser)
     precompute_parser.set_defaults(command=_COMMAND_PRECOMPUTE)
+
+    daily_access_parser = subparsers.add_parser(
+        _COMMAND_DAILY_ACCESS,
+        help="Build the daily access score (v4) shell/reach/score artifacts; --publish makes them the active map build.",
+    )
+    _add_profile_argument(daily_access_parser)
+    daily_access_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rebuild every v4 tier even when its manifest is complete.",
+    )
+    daily_access_parser.add_argument(
+        "--allow-missing-transport",
+        action="store_true",
+        help="Build/publish even when no eligible GTFS stops exist (transport access will be zero).",
+    )
+    daily_access_parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="After the build, publish the complete v4 shards (coarse grid + PMTiles) as the active build.",
+    )
+    daily_access_parser.set_defaults(command=_COMMAND_DAILY_ACCESS)
 
     serve_parser = subparsers.add_parser(
         _COMMAND_SERVE,
@@ -348,6 +371,18 @@ def main(argv: list[str] | None = None) -> int:
                     "--reimport-noise-source, --force-noise-artifact, or --force-noise-all"
                 )
             _handle_precompute(args)
+        elif args.command == _COMMAND_DAILY_ACCESS:
+            import json
+
+            from precompute.daily_access_build import run_daily_access_build
+
+            summary = run_daily_access_build(
+                args.profile,
+                force=args.force,
+                allow_missing_transport=args.allow_missing_transport,
+                publish=args.publish,
+            )
+            print(json.dumps(summary, indent=2, sort_keys=True, default=str))
         elif args.command == _COMMAND_SERVE:
             _handle_serve(args)
         else:

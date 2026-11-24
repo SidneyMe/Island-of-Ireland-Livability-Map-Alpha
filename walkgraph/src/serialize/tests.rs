@@ -49,6 +49,7 @@ fn metadata_is_serializable() {
         bbox_padding_m: 500.0,
         node_count: 2,
         edge_count: 4,
+        component_count: None,
         created_utc,
     };
     let payload = serde_json::to_string(&meta).expect("json");
@@ -75,6 +76,7 @@ fn metadata_json_writes_and_round_trips() {
         bbox_padding_m: 500.0,
         node_count: 2,
         edge_count: 4,
+        component_count: None,
         created_utc: "2026-01-01T00:00:00Z".to_string(),
     };
 

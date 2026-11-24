@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import csv
+import io
+import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,7 +38,7 @@ from transit.gtfs_zip import route_mode
 
 
 SOURCE_KIND = "gtfs_shapes"
-_RAILWAY_PENALTY_CHUNK_NODES = 1_000_000
+_RAILWAY_PENALTY_CHUNK_NODES = 250_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,18 +93,34 @@ def _shape_points_by_id(zip_path: Path) -> dict[str, list[tuple[int, float, floa
     with ZipFile(zip_path) as archive:
         try:
             with archive.open("shapes.txt") as handle:
-                reader = csv.DictReader(
-                    line.decode("utf-8") for line in handle
-                )
+                # TextIOWrapper reads the member in buffered chunks; iterating the
+                # ZipExtFile line by line (pure-Python readline) took ~30 s for
+                # the NTA feed. Fields mirror csv.DictReader: last duplicate
+                # header wins, missing columns read as "".
+                reader = csv.reader(io.TextIOWrapper(handle, encoding="utf-8", newline=""))
+                header = next(reader, None) or []
+                columns = {name: index for index, name in enumerate(header)}
+                shape_col = columns.get("shape_id")
+                sequence_col = columns.get("shape_pt_sequence")
+                lat_col = columns.get("shape_pt_lat")
+                lon_col = columns.get("shape_pt_lon")
+
+                def _field(row: list[str], column: int | None) -> str:
+                    if column is None or column >= len(row):
+                        return ""
+                    return row[column]
+
                 rows_by_shape_id: dict[str, list[tuple[int, float, float]]] = defaultdict(list)
                 for row in reader:
-                    shape_id = str(row.get("shape_id") or "").strip()
+                    if not row:
+                        continue
+                    shape_id = _field(row, shape_col).strip()
                     if not shape_id:
                         continue
                     try:
-                        sequence = int(str(row.get("shape_pt_sequence") or "").strip())
-                        lat = float(str(row.get("shape_pt_lat") or "").strip())
-                        lon = float(str(row.get("shape_pt_lon") or "").strip())
+                        sequence = int(_field(row, sequence_col).strip())
+                        lat = float(_field(row, lat_col).strip())
+                        lon = float(_field(row, lon_col).strip())
                     except ValueError as exc:
                         raise RuntimeError(
                             f"GTFS shapes.txt in '{zip_path}' contains invalid shape point data."
@@ -171,6 +190,63 @@ def _is_school_only_service(service_id: str, school_only_state: Any) -> bool:
     return False
 
 
+class RailwayPenaltyField:
+    """Railway proximity penalty at arbitrary EPSG:2157 points (index built once)."""
+
+    def __init__(self, corridor_rows: list[dict[str, Any]]) -> None:
+        corridor_parts: list[Any] = []
+        for row in corridor_rows or ():
+            if row.get("geom") is None or getattr(row["geom"], "is_empty", False):
+                continue
+            corridor_parts.extend(_line_components(transform(TO_TARGET, row["geom"])))
+        self._parts = np.asarray(corridor_parts, dtype=object)
+        self._tree = STRtree(corridor_parts) if corridor_parts else None
+
+    def distances(self, metric_x: np.ndarray, metric_y: np.ndarray) -> np.ndarray:
+        """Distance to the nearest corridor part within the zero-penalty distance (else inf)."""
+        metric_x = np.asarray(metric_x, dtype=np.float64)
+        metric_y = np.asarray(metric_y, dtype=np.float64)
+        distances_m = np.full(len(metric_x), np.inf, dtype=np.float64)
+        if self._tree is None:
+            return distances_m
+        # Distance to the corridor union equals the minimum distance to its parts.
+        # Only points within the zero-penalty distance matter, so an STRtree
+        # "dwithin" query avoids measuring ~10M points against every rail line,
+        # and chunking bounds the number of live shapely points. Shapely releases
+        # the GIL in query/distance, so chunks run on a thread pool.
+        bounds = range(0, len(metric_x), _RAILWAY_PENALTY_CHUNK_NODES)
+        workers = max(1, min(len(bounds), os.cpu_count() or 1))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                start: executor.submit(
+                    self._chunk_distances,
+                    metric_x[start : start + _RAILWAY_PENALTY_CHUNK_NODES],
+                    metric_y[start : start + _RAILWAY_PENALTY_CHUNK_NODES],
+                )
+                for start in bounds
+            }
+            for start, future in futures.items():
+                chunk = future.result()
+                distances_m[start : start + len(chunk)] = chunk
+        return distances_m
+
+    def _chunk_distances(self, metric_x: np.ndarray, metric_y: np.ndarray) -> np.ndarray:
+        distances_m = np.full(len(metric_x), np.inf, dtype=np.float64)
+        chunk_points = shapely_points(metric_x, metric_y)
+        point_idx, part_idx = self._tree.query(
+            chunk_points,
+            predicate="dwithin",
+            distance=RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
+        )
+        if point_idx.size:
+            pair_distances = shapely_distance(chunk_points[point_idx], self._parts[part_idx])
+            np.minimum.at(distances_m, point_idx, pair_distances)
+        return distances_m
+
+    def at(self, metric_x: np.ndarray, metric_y: np.ndarray) -> np.ndarray:
+        return _railway_penalties_from_distances(self.distances(metric_x, metric_y).astype(np.float32))
+
+
 def compute_railway_proximity_penalties(
     walk_graph,
     corridor_rows: list[dict[str, Any]],
@@ -179,48 +255,18 @@ def compute_railway_proximity_penalties(
     penalties = np.zeros(node_count, dtype=np.float32)
     if node_count <= 0 or not corridor_rows:
         return penalties
-
-    corridor_metric_geometries = [
-        transform(TO_TARGET, row["geom"])
-        for row in corridor_rows
-        if row.get("geom") is not None and not getattr(row["geom"], "is_empty", False)
-    ]
-    if not corridor_metric_geometries:
+    field = RailwayPenaltyField(corridor_rows)
+    if field._tree is None:
         return penalties
-
-    corridor_parts: list[Any] = []
-    for geometry in corridor_metric_geometries:
-        corridor_parts.extend(_line_components(geometry))
-    if not corridor_parts:
-        return penalties
-
     latitudes, longitudes = _node_coordinate_arrays(walk_graph)
     if latitudes.size == 0 or longitudes.size == 0:
         return penalties
     metric_x, metric_y = TO_TARGET(longitudes, latitudes)
-    metric_x = np.asarray(metric_x, dtype=np.float64)
-    metric_y = np.asarray(metric_y, dtype=np.float64)
+    return field.at(metric_x, metric_y)
 
-    # Distance to the corridor union equals the minimum distance to its parts.
-    # Only nodes within the zero-penalty distance matter, so an STRtree
-    # "dwithin" query avoids measuring ~10M walk nodes against every rail line,
-    # and chunking bounds the number of live shapely points.
-    tree = STRtree(corridor_parts)
-    part_array = np.asarray(corridor_parts, dtype=object)
-    distances_m = np.full(node_count, np.inf, dtype=np.float64)
-    for start in range(0, node_count, _RAILWAY_PENALTY_CHUNK_NODES):
-        stop = min(start + _RAILWAY_PENALTY_CHUNK_NODES, node_count)
-        chunk_points = shapely_points(metric_x[start:stop], metric_y[start:stop])
-        point_idx, part_idx = tree.query(
-            chunk_points,
-            predicate="dwithin",
-            distance=RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
-        )
-        if point_idx.size == 0:
-            continue
-        pair_distances = shapely_distance(chunk_points[point_idx], part_array[part_idx])
-        np.minimum.at(distances_m, point_idx + start, pair_distances)
-    distances_m = distances_m.astype(np.float32)
+
+def _railway_penalties_from_distances(distances_m: np.ndarray) -> np.ndarray:
+    penalties = np.zeros(len(distances_m), dtype=np.float32)
     span = RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M - RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M
     if span <= 0.0:
         penalties.fill(float(RAILWAY_PROXIMITY_MAX_PENALTY))

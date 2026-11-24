@@ -44,6 +44,7 @@ fn write_graph_meta(graph_dir: &Path, node_count: u64, edge_count: u64) {
         bbox_padding_m: 0.0,
         node_count,
         edge_count,
+        component_count: None,
         created_utc: "2026-01-01T00:00:00Z".to_string(),
     };
     write_meta_json(&meta, &graph_dir.join("walk_graph.meta.json")).expect("write graph metadata");

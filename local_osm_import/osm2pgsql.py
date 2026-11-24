@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -9,6 +10,9 @@ from collections import deque
 from datetime import datetime, timezone
 
 from sqlalchemy.engine.url import make_url
+
+
+_LOG_TIMESTAMP_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\s+")
 
 
 def detect_importer_version_impl(importer_bin: str, *, subprocess_module=subprocess) -> str:
@@ -34,7 +38,9 @@ def detect_importer_version_impl(importer_bin: str, *, subprocess_module=subproc
     version_line = (completed.stdout or completed.stderr or "").strip().splitlines()
     if not version_line:
         return "osm2pgsql-unknown"
-    return version_line[0].strip()
+    # osm2pgsql >= 1.9 prefixes log lines with a wall-clock timestamp; keeping it
+    # would change the import fingerprint on every run and force a re-import.
+    return _LOG_TIMESTAMP_PREFIX.sub("", version_line[0].strip())
 
 
 def resolve_source_state_impl(

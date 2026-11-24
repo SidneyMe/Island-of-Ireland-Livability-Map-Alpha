@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import PROTOMAPS_LIGHT_STYLE from "./basemap_style.generated.json" with { type: "json" };
 
 import {
+  inspectAvailable,
+  isDailyAccessModel,
+  legacyFieldsUnavailable,
+  scoringModel,
+  surfaceChannelForScoreLayer,
   BASEMAP_GLYPHS_PATH,
   BASEMAP_SOURCE_ID,
   BASEMAP_SPRITE_PATH,
@@ -502,3 +507,21 @@ const devRuntime = {
 }
 
 console.log("frontend runtime contract checks passed");
+
+{
+  const v4 = {
+    scoring_model: "daily-access-v4",
+    inspect_url: "/api/inspect",
+    legacy_fields_unavailable: ["counts", "cluster_counts", "effective_units", "bogus"]
+  };
+  assert.equal(scoringModel(v4), "daily-access-v4");
+  assert.equal(isDailyAccessModel(v4), true);
+  assert.deepEqual(legacyFieldsUnavailable(v4), ["counts", "cluster_counts", "effective_units"]);
+  assert.equal(inspectAvailable(v4), true);
+  assert.equal(scoringModel({}), "v3");
+  assert.equal(isDailyAccessModel({ scoring_model: "v3" }), false);
+  assert.deepEqual(legacyFieldsUnavailable({}), []);
+  assert.equal(surfaceChannelForScoreLayer("combined"), "total");
+  assert.equal(surfaceChannelForScoreLayer("Parks"), "parks");
+  assert.equal(surfaceChannelForScoreLayer("nonsense"), "total");
+}

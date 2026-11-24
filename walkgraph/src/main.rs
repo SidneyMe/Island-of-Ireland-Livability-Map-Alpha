@@ -2,7 +2,14 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::Instant;
-use walkgraph::graph::{build_compact_node_index, emit_adjacency_sidecars, emit_edge_sidecar};
+use walkgraph::graph::{
+    build_compact_node_index, emit_adjacency_sidecars, emit_component_sidecar, emit_edge_flag_sidecar,
+    emit_edge_sidecar, emit_edge_sidecar_with_flags,
+};
+use walkgraph::daily_access::{
+    run_attach as run_daily_access_attach, run_objects as run_daily_access_objects,
+    run_reach as run_daily_access_reach, run_score as run_daily_access_score, AttachArgs,
+};
 use walkgraph::gtfs::run_gtfs_refresh;
 use walkgraph::pbf::{collect_retained_nodes, parse_bbox, scan_reachable_ways, GraphProfile};
 use walkgraph::reachability::run_reachability;
@@ -11,7 +18,7 @@ use walkgraph::serialize::{
 };
 use walkgraph::surface::{run_surface, SurfaceArgs};
 
-const FORMAT_VERSION: u32 = 3;
+const FORMAT_VERSION: u32 = 4;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
 enum ReachabilityOutputMode {
@@ -126,6 +133,48 @@ enum Commands {
         #[arg(long)]
         threads: Option<usize>,
     },
+    /// Daily access v4: which cells enter the walk network, and the edge
+    /// endpoint nodes each group of cells needs reach rows for.
+    DailyAccessAttach {
+        #[arg(long)]
+        graph_dir: PathBuf,
+        /// Land mask GeoJSON in ITM (EPSG:2157) metres, not clipped to the profile bbox.
+        #[arg(long)]
+        mask_geojson: PathBuf,
+        /// Records of (f64 x, f64 y, u8 flags): bit 0 origin on land, bit 1 interior.
+        #[arg(long)]
+        cells_bin: PathBuf,
+        /// Optional u32 group (shard) per cell.
+        #[arg(long)]
+        groups_bin: Option<PathBuf>,
+        #[arg(long)]
+        out_dir: PathBuf,
+        #[arg(long, default_value_t = 250.0)]
+        radius_m: f64,
+        #[arg(long, default_value_t = 1e-7)]
+        merge_m: f64,
+    },
+    /// Daily access v4: node seeds of shops, medical objects, stops and green points.
+    DailyAccessObjects {
+        #[arg(long)]
+        graph_dir: PathBuf,
+        #[arg(long)]
+        config_json: PathBuf,
+    },
+    /// Daily access v4: k-nearest distinct labels per service kind.
+    DailyAccessReach {
+        #[arg(long)]
+        graph_dir: PathBuf,
+        #[arg(long)]
+        config_json: PathBuf,
+    },
+    /// Daily access v4: score cells from attachments and reach.
+    DailyAccessScore {
+        #[arg(long)]
+        graph_dir: PathBuf,
+        #[arg(long)]
+        config_json: PathBuf,
+    },
     /// Parse GTFS feeds, derive transit reality artifacts, and emit CSV sidecars.
     GtfsRefresh {
         #[arg(long)]
@@ -167,9 +216,19 @@ fn build_graph(
     if write_output {
         let paths = prepare_output_dir(output_dir)?;
         write_node_sidecars(&compact_nodes.coords, &compact_nodes.osm_ids, &paths)?;
-        let edge_stats =
-            emit_edge_sidecar(pass1.edge_spool.as_file(), &compact_nodes, &paths.edges_bin)?;
-        emit_adjacency_sidecars(&paths.edges_bin, compact_nodes.osm_ids.len(), &paths)?;
+        let edge_flags_by_edge = output_dir.join("walk_graph.edge_flags_by_edge.tmp");
+        let edge_stats = emit_edge_sidecar_with_flags(
+            pass1.edge_spool.as_file(),
+            Some(pass1.edge_flag_spool.as_file()),
+            &compact_nodes,
+            &paths.edges_bin,
+            Some(&edge_flags_by_edge),
+        )?;
+        let node_count = compact_nodes.osm_ids.len();
+        emit_adjacency_sidecars(&paths.edges_bin, node_count, &paths)?;
+        emit_edge_flag_sidecar(&paths.edges_bin, &edge_flags_by_edge, node_count, &paths.edge_flags_bin)?;
+        std::fs::remove_file(&edge_flags_by_edge)?;
+        let component_count = emit_component_sidecar(&paths.edges_bin, node_count, &paths.components_bin)?;
 
         let metadata = std::fs::metadata(pbf_path)?;
         let modified = metadata
@@ -188,6 +247,7 @@ fn build_graph(
             bbox_padding_m,
             node_count: compact_nodes.osm_ids.len() as u64,
             edge_count: edge_stats.emitted_edges,
+            component_count: Some(u64::from(component_count)),
             created_utc: now_utc_rfc3339()?,
         };
         write_meta_json(&meta, &paths.meta_json)?;
@@ -224,6 +284,7 @@ fn build_graph(
         bbox_padding_m,
         node_count: compact_nodes.osm_ids.len() as u64,
         edge_count: edge_stats.emitted_edges,
+        component_count: None,
         created_utc: now_utc_rfc3339()?,
     })
 }
@@ -318,6 +379,43 @@ fn main() -> Result<(), Box<dyn Error>> {
                 threads,
             })
             .map_err(|e| -> Box<dyn Error> { Box::from(e.to_string()) })?;
+        }
+        Commands::DailyAccessAttach {
+            graph_dir,
+            mask_geojson,
+            cells_bin,
+            groups_bin,
+            out_dir,
+            radius_m,
+            merge_m,
+        } => {
+            run_daily_access_attach(AttachArgs {
+                graph_dir,
+                mask_geojson,
+                cells_bin,
+                groups_bin,
+                out_dir,
+                radius_m,
+                merge_m,
+            })?;
+        }
+        Commands::DailyAccessObjects {
+            graph_dir,
+            config_json,
+        } => {
+            run_daily_access_objects(&graph_dir, &config_json)?;
+        }
+        Commands::DailyAccessReach {
+            graph_dir,
+            config_json,
+        } => {
+            run_daily_access_reach(&graph_dir, &config_json)?;
+        }
+        Commands::DailyAccessScore {
+            graph_dir,
+            config_json,
+        } => {
+            run_daily_access_score(&graph_dir, &config_json)?;
         }
         Commands::GtfsRefresh {
             config_json,

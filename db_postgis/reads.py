@@ -84,6 +84,23 @@ def _is_non_operational_amenity(tags_json: dict[str, Any]) -> bool:
     return False
 
 
+def legacy_v3_amenity_category(tags_json: dict[str, Any]) -> str | None:
+    """Category the v3 importer would have assigned (shop first, legacy values only).
+
+    The v4 importer gives medical tags priority and adds green types. v3 scoring
+    keeps its pre-v4 inputs until the model switch.
+    """
+    from config import TAGS
+
+    if tags_json.get("shop"):
+        return "shops"
+    if str(tags_json.get("amenity") or "") in TAGS["healthcare"]["amenity"]:
+        return "healthcare"
+    if str(tags_json.get("leisure") or "") in TAGS["parks"]["leisure"]:
+        return "parks"
+    return None
+
+
 def load_transport_reality_rows_for_scoring(
     engine: Engine,
     reality_fingerprint: str,
@@ -275,13 +292,6 @@ def load_source_amenity_rows(
 ) -> list[dict[str, Any]]:
     root = root_module()
     study_area = root.from_shape(study_area_wgs84, srid=4326)
-    park_area_m2 = case(
-        (
-            (features.c.category == "parks") & (func.ST_Dimension(features.c.geom) == 2),
-            func.COALESCE(func.ST_Area(func.ST_Transform(features.c.geom, 2157)), 0.0),
-        ),
-        else_=0.0,
-    ).label("park_area_m2")
     footprint_area_m2 = case(
         (
             func.ST_Dimension(features.c.geom) == 2,
@@ -297,7 +307,6 @@ def load_source_amenity_rows(
             features.c.osm_type,
             features.c.osm_id,
             func.ST_PointOnSurface(features.c.geom).label("point_geom"),
-            park_area_m2,
             footprint_area_m2,
         )
         .where(features.c.import_fingerprint == import_fingerprint)
@@ -307,6 +316,7 @@ def load_source_amenity_rows(
     )
     amenity_rows = []
     excluded_non_operational_rows = 0
+    excluded_v4_only_rows = 0
     with engine.connect() as connection:
         result = connection.execution_options(stream_results=True).execute(query)
         for row in result.yield_per(500).mappings():
@@ -314,20 +324,31 @@ def load_source_amenity_rows(
             if _is_non_operational_amenity(tags_json):
                 excluded_non_operational_rows += 1
                 continue
+            legacy_category = legacy_v3_amenity_category(tags_json)
+            if legacy_category is None:
+                excluded_v4_only_rows += 1
+                continue
             amenity_rows.append(
                 {
-                    "category": row["category"],
+                    "category": legacy_category,
                     "source": "osm_local_pbf",
                     "source_ref": f"{row['osm_type']}/{row['osm_id']}",
                     "name": row["name"],
                     "tags_json": tags_json,
                     "geom": root.to_shape(row["point_geom"]),
-                    "park_area_m2": float(row.get("park_area_m2") or 0.0),
+                    # v3 park area = polygon area of a legacy park row,
+                    # whatever category the v4 importer stored it under.
+                    "park_area_m2": (
+                        float(row.get("footprint_area_m2") or 0.0)
+                        if legacy_category == "parks"
+                        else 0.0
+                    ),
                     "footprint_area_m2": float(row.get("footprint_area_m2") or 0.0),
                 }
             )
     if stats_out is not None:
         stats_out["excluded_non_operational_osm_rows"] = int(excluded_non_operational_rows)
+        stats_out["excluded_v4_only_osm_rows"] = int(excluded_v4_only_rows)
     if transit_reality_fingerprint is not None:
         amenity_rows.extend(
             load_transport_reality_rows_for_scoring(
@@ -337,6 +358,80 @@ def load_source_amenity_rows(
             )
         )
     return amenity_rows
+
+
+def load_daily_access_source_rows(
+    engine: Engine,
+    import_fingerprint: str,
+    study_area_wgs84,
+    *,
+    stats_out: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """v4 shop, medical and green source rows, keeping tags and shop footprints.
+
+    Categories are the v4 importer's (medical before shop). ``geom`` is the
+    display/merge point; polygonal shops also carry ``footprint_wkb`` in
+    EPSG:2157 for the object connector. Green rows only feed the OSM/Overture
+    merge (to find Overture-only green points); green geometry and grouping
+    come from ``db_postgis.daily_access_green``.
+    """
+    root = root_module()
+    study_area = root.from_shape(study_area_wgs84, srid=4326)
+    is_area = func.ST_Dimension(features.c.geom) == 2
+    query = (
+        select(
+            features.c.category,
+            features.c.name,
+            features.c.tags_json,
+            features.c.osm_type,
+            features.c.osm_id,
+            func.ST_PointOnSurface(features.c.geom).label("point_geom"),
+            case(
+                (
+                    (features.c.category == "shops") & is_area,
+                    func.ST_AsBinary(func.ST_Transform(features.c.geom, 2157)),
+                ),
+                else_=None,
+            ).label("footprint_wkb"),
+            case(
+                (is_area, func.COALESCE(func.ST_Area(func.ST_Transform(features.c.geom, 2157)), 0.0)),
+                else_=0.0,
+            ).label("footprint_area_m2"),
+        )
+        .where(features.c.import_fingerprint == import_fingerprint)
+        .where(features.c.category.in_(("healthcare", "parks", "shops")))
+        .where(func.ST_Intersects(features.c.geom, study_area))
+        .order_by(features.c.category, features.c.osm_type, features.c.osm_id)
+    )
+    rows: list[dict[str, Any]] = []
+    input_rows = {"healthcare": 0, "parks": 0, "shops": 0}
+    excluded_non_operational = {"healthcare": 0, "parks": 0, "shops": 0}
+    with engine.connect() as connection:
+        result = connection.execution_options(stream_results=True).execute(query)
+        for row in result.yield_per(500).mappings():
+            category = str(row["category"])
+            input_rows[category] = input_rows.get(category, 0) + 1
+            tags_json = dict(row.get("tags_json") or {})
+            if _is_non_operational_amenity(tags_json):
+                excluded_non_operational[category] = excluded_non_operational.get(category, 0) + 1
+                continue
+            footprint_wkb = row.get("footprint_wkb")
+            rows.append(
+                {
+                    "category": category,
+                    "source": "osm_local_pbf",
+                    "source_ref": f"{str(row['osm_type']).strip()}/{row['osm_id']}",
+                    "name": row["name"],
+                    "tags_json": tags_json,
+                    "geom": root.to_shape(row["point_geom"]),
+                    "footprint_wkb": bytes(footprint_wkb) if footprint_wkb is not None else None,
+                    "footprint_area_m2": float(row.get("footprint_area_m2") or 0.0),
+                }
+            )
+    if stats_out is not None:
+        stats_out["input_osm_rows"] = input_rows
+        stats_out["excluded_non_operational_osm_rows"] = excluded_non_operational
+    return rows
 
 
 def load_landuse_context_rows(

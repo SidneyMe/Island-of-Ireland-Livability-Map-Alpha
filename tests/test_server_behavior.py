@@ -179,6 +179,8 @@ def _make_validating_runtime_service() -> tuple[serve_from_db.RuntimeService, mo
     runtime = mock.Mock()
     state = mock.Mock()
     state.fine_resolutions = [2500, 1000, 500, 250, 100, 50]
+    state.daily_access = None
+    state.scoring_model = "v3"
     service.state = mock.Mock(return_value=state)
     service.surface_runtime = mock.Mock(return_value=runtime)
     return service, runtime, state
@@ -867,7 +869,7 @@ class RuntimeValidationTests(TestCase):
         inspect_payload = service.inspect(lat=53.4, lon=-6.2, zoom=15)
 
         self.assertEqual(tile_payload, b"png")
-        self.assertEqual(inspect_payload, {"ok": True})
+        self.assertEqual(inspect_payload, {"ok": True, "scoring_model": "v3"})
         runtime.render_tile.assert_called_once_with(resolution_m=250, z=15, x=3, y=4)
         runtime.inspect.assert_called_once_with(lat=53.4, lon=-6.2, zoom=15.0)
 

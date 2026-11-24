@@ -66,6 +66,37 @@ function gridScoreLayerLabel(value) {
   return entry ? entry.label : "Combined";
 }
 
+const DAILY_ACCESS_MODEL = "daily-access-v4";
+const LEGACY_SCORE_FIELDS = ["counts", "cluster_counts", "effective_units"];
+
+function scoringModel(runtime) {
+  return runtime && runtime.scoring_model ? String(runtime.scoring_model) : "v3";
+}
+
+function isDailyAccessModel(runtime) {
+  return scoringModel(runtime) === DAILY_ACCESS_MODEL;
+}
+
+// Fields the active model does not produce: shown as unavailable, never as 0.
+function legacyFieldsUnavailable(runtime) {
+  const values = runtime && Array.isArray(runtime.legacy_fields_unavailable)
+    ? runtime.legacy_fields_unavailable
+    : [];
+  return values.map(String).filter(function (value) {
+    return LEGACY_SCORE_FIELDS.includes(value);
+  });
+}
+
+function inspectAvailable(runtime) {
+  return Boolean(runtime && runtime.inspect_url);
+}
+
+// Score layer -> v4 surface PNG channel (``/tiles/surface/...png?channel=``).
+function surfaceChannelForScoreLayer(value) {
+  const normalized = normalizeGridScoreLayer(value);
+  return normalized === "combined" ? "total" : normalized;
+}
+
 function gridScoreLayerField(value) {
   const normalized = normalizeGridScoreLayer(value);
   const entry = GRID_SCORE_LAYER_OPTIONS.find(function (option) {
@@ -744,6 +775,12 @@ function buildStyle(runtime, options = {}) {
 }
 
 export {
+  DAILY_ACCESS_MODEL,
+  inspectAvailable,
+  isDailyAccessModel,
+  legacyFieldsUnavailable,
+  scoringModel,
+  surfaceChannelForScoreLayer,
   BASEMAP_GLYPHS_PATH,
   BASEMAP_SOURCE_ID,
   BASEMAP_SPRITE_PATH,

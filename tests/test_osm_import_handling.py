@@ -489,6 +489,24 @@ class LocalOsmImportTests(TestCase):
 
         clear_mock.assert_called_once_with(mock.sentinel.engine, self.source_state.import_fingerprint)
 
+    def test_detect_importer_version_ignores_osm2pgsql_log_timestamp(self) -> None:
+        from local_osm_import.osm2pgsql import detect_importer_version_impl
+
+        def _version(stdout: str) -> str:
+            fake_subprocess = SimpleNamespace(
+                run=mock.Mock(return_value=SimpleNamespace(stdout=stdout, stderr="")),
+                CalledProcessError=RuntimeError,
+            )
+            return detect_importer_version_impl("osm2pgsql", subprocess_module=fake_subprocess)
+
+        first = _version("2026-10-23 22:01:31  osm2pgsql version 1.11.0\nBuild: None\n")
+        later = _version("2026-10-24 08:15:02  osm2pgsql version 1.11.0\nBuild: None\n")
+        legacy = _version("osm2pgsql version 1.6.0\n")
+
+        self.assertEqual(first, "osm2pgsql version 1.11.0")
+        self.assertEqual(later, first)
+        self.assertEqual(legacy, "osm2pgsql version 1.6.0")
+
 
 class DbPostgisImportStateTests(TestCase):
     def test_import_payload_ready_returns_false_without_osm2pgsql_metadata(self) -> None:
@@ -777,7 +795,7 @@ class DbReadTests(TestCase):
             {
                 "category": "parks",
                 "name": "Town Park",
-                "tags_json": {"name": "Town Park", "operator": "Council"},
+                "tags_json": {"name": "Town Park", "operator": "Council", "leisure": "park"},
                 "osm_type": "way",
                 "osm_id": 123,
                 "point_geom": "park-point",
@@ -787,7 +805,7 @@ class DbReadTests(TestCase):
             {
                 "category": "parks",
                 "name": "Playground",
-                "tags_json": {"name": "Playground"},
+                "tags_json": {"name": "Playground", "leisure": "playground"},
                 "osm_type": "node",
                 "osm_id": 456,
                 "point_geom": "playground-point",
@@ -810,14 +828,16 @@ class DbReadTests(TestCase):
         self.assertEqual(rows[0]["source_ref"], "way/123")
         self.assertEqual(rows[0]["source"], "osm_local_pbf")
         self.assertEqual(rows[0]["name"], "Town Park")
-        self.assertEqual(rows[0]["tags_json"], {"name": "Town Park", "operator": "Council"})
+        self.assertEqual(
+            rows[0]["tags_json"], {"name": "Town Park", "operator": "Council", "leisure": "park"}
+        )
         self.assertEqual(rows[0]["geom"], "park-point")
         self.assertEqual(rows[0]["park_area_m2"], 125_000.0)
         self.assertEqual(rows[0]["footprint_area_m2"], 125_000.0)
         self.assertEqual(rows[1]["source_ref"], "node/456")
         self.assertEqual(rows[1]["source"], "osm_local_pbf")
         self.assertEqual(rows[1]["name"], "Playground")
-        self.assertEqual(rows[1]["tags_json"], {"name": "Playground"})
+        self.assertEqual(rows[1]["tags_json"], {"name": "Playground", "leisure": "playground"})
         self.assertEqual(rows[1]["park_area_m2"], 0.0)
         self.assertEqual(rows[1]["footprint_area_m2"], 0.0)
 
@@ -887,6 +907,46 @@ class DbReadTests(TestCase):
             ],
         )
         self.assertEqual(stats_out["excluded_non_operational_osm_rows"], 2)
+
+    def test_load_source_amenity_rows_keeps_v3_categories_after_v4_import(self) -> None:
+        engine = mock.MagicMock()
+        connection = engine.connect.return_value.__enter__.return_value
+        connection.execution_options.return_value = connection
+
+        def _row(category, osm_id, tags, area=0.0):
+            return {
+                "category": category,
+                "name": None,
+                "tags_json": tags,
+                "osm_type": "W",
+                "osm_id": osm_id,
+                "point_geom": f"p{osm_id}",
+                "footprint_area_m2": area,
+            }
+
+        connection.execute.return_value.yield_per.return_value.mappings.return_value = [
+            # v4 stores this as healthcare; v3 always saw a shop.
+            _row("healthcare", 1, {"shop": "chemist", "amenity": "pharmacy"}),
+            # New v4-only rows stay out of v3.
+            _row("healthcare", 2, {"healthcare": "centre"}),
+            _row("parks", 3, {"leisure": "garden", "access": "yes"}, 900.0),
+            _row("parks", 4, {"boundary": "national_park"}, 9e7),
+            # Unchanged legacy park keeps its polygon area.
+            _row("parks", 5, {"leisure": "park"}, 1200.0),
+        ]
+        root = SimpleNamespace(from_shape=mock.Mock(return_value="study-area"), to_shape=lambda geom: geom)
+        stats_out: dict[str, object] = {}
+
+        with mock.patch.object(db_reads, "root_module", return_value=root):
+            rows = db_postgis.load_source_amenity_rows(
+                engine, "import-fingerprint", mock.sentinel.study_area_wgs84, stats_out=stats_out
+            )
+
+        self.assertEqual(
+            [(row["source_ref"], row["category"], row["park_area_m2"]) for row in rows],
+            [("W/1", "shops", 0.0), ("W/5", "parks", 1200.0)],
+        )
+        self.assertEqual(stats_out["excluded_v4_only_osm_rows"], 3)
 
     def test_load_landuse_context_rows_keeps_polygon_classes(self) -> None:
         engine = mock.MagicMock()
@@ -1122,10 +1182,16 @@ class TextCleanupTests(TestCase):
         self.assertNotIn("network_ways", text)
         self.assertNotIn("object.tags.highway then", text)
 
-    def test_lua_does_not_treat_garden_as_park(self) -> None:
+    def test_lua_v4_category_priority_and_green_types(self) -> None:
         text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")
         self.assertIn("local park_values = {", text)
-        self.assertNotIn("garden = true", text)
+        for value in ("garden", "common", "village_green", "recreation_ground"):
+            self.assertIn(f"    {value} = true,", text)
+        self.assertIn("tags.boundary == 'national_park'", text)
+        # Medical before shop; green before the landuse context classes.
+        body = text[text.index("local function feature_category"):]
+        self.assertLess(body.index("tags.healthcare"), body.index("tags.shop"))
+        self.assertLess(body.index("'national_park'"), body.index("and landuse_values[tags.landuse]"))
 
     def test_lua_does_not_import_osm_transport_features(self) -> None:
         text = Path("osm2pgsql_livability.lua").read_text(encoding="utf-8")

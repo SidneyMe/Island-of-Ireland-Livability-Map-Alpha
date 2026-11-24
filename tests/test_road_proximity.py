@@ -98,3 +98,50 @@ class RoadProximityTests(TestCase):
             [{"highway": "motorway", "geom": None}],
         )
         np.testing.assert_array_equal(penalties, np.zeros(1, dtype=np.float32))
+
+    def test_vectorized_field_matches_per_pair_reference(self) -> None:
+        from shapely import distance as shapely_distance
+        from shapely import points as shapely_points
+
+        from config import ROAD_PROXIMITY_CLASS_SETTINGS
+        from precompute import road_proximity
+
+        rng = np.random.default_rng(7)
+        highways = sorted(ROAD_PROXIMITY_CLASS_SETTINGS)
+        speeds = [None, "30", "50 mph", "120 km/h", "signals", "80;100", "200 km/h"]
+        rows = []
+        for index in range(60):
+            lon = -6.30 + rng.uniform(0.0, 0.08)
+            lat = 53.33 + rng.uniform(0.0, 0.05)
+            rows.append(
+                {
+                    "highway": highways[index % len(highways)],
+                    "maxspeed": speeds[index % len(speeds)],
+                    "geom": LineString([(lon, lat), (lon + rng.uniform(-0.01, 0.01), lat + 0.004)]),
+                }
+            )
+        field = road_proximity.RoadPenaltyField(rows)
+        bounds = np.array([geom.bounds for geom in field.geometries])
+        metric_x = rng.uniform(bounds[:, 0].min() - 400, bounds[:, 2].max() + 400, 3000)
+        metric_y = rng.uniform(bounds[:, 1].min() - 400, bounds[:, 3].max() + 400, 3000)
+
+        reference = np.zeros(len(metric_x), dtype=np.float32)
+        points = shapely_points(metric_x, metric_y)
+        point_idx, geom_idx = field._tree.query(points, predicate="dwithin", distance=field.max_distance)
+        for p, g, d in zip(point_idx, geom_idx, shapely_distance(points[point_idx], field.geometries[geom_idx])):
+            penalty = road_penalty_for_distance(
+                float(d), highway=field.highway_values[int(g)], maxspeed=field.maxspeeds[int(g)]
+            )
+            if penalty > float(reference[int(p)]):
+                reference[int(p)] = np.float32(penalty)
+
+        original_chunk = road_proximity._ROAD_PENALTY_CHUNK_POINTS
+        try:
+            road_proximity._ROAD_PENALTY_CHUNK_POINTS = 256
+            chunked = field.at(metric_x, metric_y)
+        finally:
+            road_proximity._ROAD_PENALTY_CHUNK_POINTS = original_chunk
+
+        self.assertGreater(int(np.count_nonzero(reference)), 100)
+        np.testing.assert_array_equal(chunked, reference)
+        np.testing.assert_array_equal(field.at(metric_x, metric_y), reference)

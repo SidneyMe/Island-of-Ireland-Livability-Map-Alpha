@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import shapely
 from shapely.geometry import Point
 
 
@@ -187,7 +188,7 @@ def load_overture_amenity_rows(study_area_wgs84: Any) -> list[dict[str, Any]]:
 
     available_columns = _parquet_column_names(OVERTURE_PLACES_PATH)
     columns = ["id", "geometry", "categories"]
-    for optional_column in ("names", "brand", "brands", "confidence", "confidence_score"):
+    for optional_column in ("names", "brand", "brands", "confidence", "confidence_score", "addresses", "sources"):
         if optional_column in available_columns:
             columns.append(optional_column)
 
@@ -201,7 +202,10 @@ def load_overture_amenity_rows(study_area_wgs84: Any) -> list[dict[str, Any]]:
     if gdf.crs is not None and gdf.crs.to_epsg() != 4326:
         gdf = gdf.to_crs(epsg=4326)
 
-    gdf = gdf.loc[gdf.geometry.within(study_area_wgs84)]
+    # contains(area, p) == within(p, area); preparing the detailed island
+    # outline once turns a ~4 min scan into well under a second.
+    shapely.prepare(study_area_wgs84)
+    gdf = gdf.loc[shapely.contains(study_area_wgs84, gdf.geometry.to_numpy())]
 
     ids = gdf["id"].to_numpy()
     cats = gdf["categories"].to_numpy()
@@ -220,14 +224,19 @@ def load_overture_amenity_rows(study_area_wgs84: Any) -> list[dict[str, Any]]:
         else [None] * len(gdf)
     )
 
+    addresses = gdf["addresses"].to_numpy() if "addresses" in gdf.columns else [None] * len(gdf)
+    sources = gdf["sources"].to_numpy() if "sources" in gdf.columns else [None] * len(gdf)
+
     rows: list[dict[str, Any]] = []
-    for fid, cat, geom, name_value, brand_value, confidence_value in zip(
+    for fid, cat, geom, name_value, brand_value, confidence_value, address_value, source_value in zip(
         ids,
         cats,
         geoms,
         names,
         brands,
         confidence_values,
+        addresses,
+        sources,
     ):
         if geom is None or geom.is_empty:
             continue
@@ -250,7 +259,42 @@ def load_overture_amenity_rows(study_area_wgs84: Any) -> list[dict[str, Any]]:
                 "geom": Point(float(point.x), float(point.y)),
                 "park_area_m2": 0.0,
                 "footprint_area_m2": 0.0,
+                # Daily access v4 dedupe evidence (unused by v3 scoring).
+                **_first_address(address_value),
+                "identity_refs": _osm_source_refs(source_value),
             }
         )
 
     return rows
+
+
+def _entries(value: Any) -> list[Any]:
+    if value is None or isinstance(value, (str, dict)):
+        return [value]
+    try:
+        return list(value)
+    except TypeError:
+        return [value]
+
+
+def _first_address(value: Any) -> dict[str, str | None]:
+    """``address_freeform`` / ``address_postcode`` of the first Overture address."""
+    for entry in _entries(value):
+        if isinstance(entry, dict) and entry.get("freeform"):
+            return {
+                "address_freeform": str(entry.get("freeform")),
+                "address_postcode": str(entry.get("postcode") or "") or None,
+            }
+    return {"address_freeform": None, "address_postcode": None}
+
+
+def _osm_source_refs(value: Any) -> tuple[str, ...]:
+    """Confirmed OSM ids (``osm:N/123``) an Overture record names as its source."""
+    refs: list[str] = []
+    for entry in _entries(value):
+        if not isinstance(entry, dict) or str(entry.get("dataset") or "").lower() != "openstreetmap":
+            continue
+        record = str(entry.get("record_id") or "").split("@", 1)[0]
+        if len(record) > 1 and record[0].lower() in "nwr" and record[1:].isdigit():
+            refs.append(f"osm:{record[0].upper()}/{record[1:]}")
+    return tuple(sorted(set(refs)))

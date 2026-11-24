@@ -40,3 +40,31 @@ class OvertureLoaderTests(TestCase):
         self.assertIn("park-1", refs)
         self.assertIn("playground-1", refs)
         self.assertTrue(all(row["category"] == "parks" for row in rows))
+
+    def test_load_overture_amenity_rows_keeps_only_points_strictly_inside_study_area(self) -> None:
+        study_area = box(-6.3, 53.34, -6.2, 53.36)
+        gdf = gpd.GeoDataFrame(
+            {
+                "id": ["inside", "outside", "on-boundary"],
+                "geometry": [
+                    Point(-6.2500, 53.3500),
+                    Point(-6.1000, 53.3500),
+                    Point(-6.3000, 53.3500),
+                ],
+                "categories": [{"primary": "park"}] * 3,
+            },
+            geometry="geometry",
+            crs="EPSG:4326",
+        )
+
+        with (
+            mock.patch.object(overture_loader, "is_available", return_value=True),
+            mock.patch("geopandas.read_parquet", return_value=gdf),
+        ):
+            rows = overture_loader.load_overture_amenity_rows(study_area)
+
+        self.assertEqual(
+            [row["source_ref"] for row in rows],
+            list(gdf.loc[gdf.geometry.within(study_area), "id"]),
+        )
+        self.assertEqual([row["source_ref"] for row in rows], ["inside"])

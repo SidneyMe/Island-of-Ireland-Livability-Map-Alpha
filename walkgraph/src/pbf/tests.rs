@@ -142,3 +142,13 @@ fn spool_reader_rewinds_before_reading() {
 
     assert_eq!(edge, (10, 20));
 }
+
+#[test]
+fn recreation_flags_exclude_sidewalks_and_roads() {
+    use super::{way_edge_flags, EDGE_FLAG_RECREATION};
+    assert_eq!(way_edge_flags([("highway", "bridleway")]), EDGE_FLAG_RECREATION);
+    assert_eq!(way_edge_flags([("highway", "steps")]), EDGE_FLAG_RECREATION);
+    assert_eq!(way_edge_flags([("highway", "footway"), ("footway", "sidewalk")]), 0);
+    assert_eq!(way_edge_flags([("highway", "footway"), ("footway", "crossing")]), 0);
+    assert_eq!(way_edge_flags([("highway", "residential")]), 0);
+}

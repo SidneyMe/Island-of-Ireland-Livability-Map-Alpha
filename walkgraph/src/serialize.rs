@@ -15,6 +15,8 @@ pub struct GraphPaths {
     pub adjacency_offsets_bin: PathBuf,
     pub adjacency_targets_bin: PathBuf,
     pub adjacency_lengths_bin: PathBuf,
+    pub edge_flags_bin: PathBuf,
+    pub components_bin: PathBuf,
     pub meta_json: PathBuf,
 }
 
@@ -31,6 +33,8 @@ pub struct GraphMeta {
     pub bbox_padding_m: f64,
     pub node_count: u64,
     pub edge_count: u64,
+    #[serde(default)]
+    pub component_count: Option<u64>,
     pub created_utc: String,
 }
 
@@ -47,6 +51,8 @@ pub fn graph_paths_for_dir(output_dir: &Path) -> GraphPaths {
         adjacency_offsets_bin: dir.join("walk_graph.adjacency_offsets.bin"),
         adjacency_targets_bin: dir.join("walk_graph.adjacency_targets.bin"),
         adjacency_lengths_bin: dir.join("walk_graph.adjacency_lengths.bin"),
+        edge_flags_bin: dir.join("walk_graph.edge_flags.bin"),
+        components_bin: dir.join("walk_graph.components.bin"),
         meta_json: dir.join("walk_graph.meta.json"),
     }
 }

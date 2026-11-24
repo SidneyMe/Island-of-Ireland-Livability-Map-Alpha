@@ -24,6 +24,15 @@ local park_values = {
     park = true,
     playground = true,
     nature_reserve = true,
+    garden = true,
+    common = true,
+    village_green = true,
+    recreation_ground = true,
+}
+
+local green_landuse_values = {
+    village_green = true,
+    recreation_ground = true,
 }
 
 local landuse_values = {
@@ -41,14 +50,25 @@ local road_values = {
     primary = true,
 }
 
+-- Order matters: medical tags win over shop tags, and green tags win over the
+-- landuse context classes, so one OSM object lands in exactly one category.
 local function feature_category(tags)
-    if tags.shop then
-        return 'shops'
-    end
     if tags.amenity and healthcare_values[tags.amenity] then
         return 'healthcare'
     end
+    if tags.healthcare and tags.healthcare ~= 'no' then
+        return 'healthcare'
+    end
+    if tags.shop then
+        return 'shops'
+    end
     if tags.leisure and park_values[tags.leisure] then
+        return 'parks'
+    end
+    if tags.landuse and green_landuse_values[tags.landuse] then
+        return 'parks'
+    end
+    if tags.boundary == 'national_park' then
         return 'parks'
     end
     if tags.landuse and landuse_values[tags.landuse] then

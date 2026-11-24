@@ -79,7 +79,7 @@ fn geojson_geom_to_geo(
     }
 }
 
-fn load_study_area(path: &Path) -> Result<MultiPolygon<f64>, Box<dyn Error + Send + Sync>> {
+pub fn load_study_area(path: &Path) -> Result<MultiPolygon<f64>, Box<dyn Error + Send + Sync>> {
     let text = fs::read_to_string(path)?;
     let geojson: GeoJson = text.parse()?;
 

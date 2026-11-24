@@ -79,6 +79,7 @@ fn write_tiny_graph(graph_dir: &Path) {
         bbox_padding_m: 0.0,
         node_count: 2,
         edge_count: 1,
+        component_count: None,
         created_utc: "2026-01-01T00:00:00Z".to_string(),
     };
     write_meta_json(&meta, &paths.meta_json).expect("write metadata");

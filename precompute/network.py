@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+import hashlib
 import heapq
 import shutil
 import uuid
@@ -75,6 +76,22 @@ def _vertex_coordinate_arrays(graph) -> tuple[np.ndarray, np.ndarray]:
     return cache
 
 
+# Indexes keyed by a digest of the node coordinates, so a graph reloaded from
+# the same sidecars (e.g. service deserts after grids) reuses the ~12 s
+# BallTree build for a 10M-node graph instead of repeating it. Each index also
+# keeps a (lat, lon) -> node memo: cluster representatives and transit points
+# repeat amenity coordinates, and a BallTree answer depends only on the point.
+_NEAREST_NODE_INDEX_BY_COORDS: dict[str, tuple[BallTree, dict[tuple[float, float], int]]] = {}
+_NEAREST_NODE_INDEX_CACHE_LIMIT = 4
+
+
+def _coordinate_digest(latitudes: np.ndarray, longitudes: np.ndarray) -> str:
+    digest = hashlib.blake2b(digest_size=16)
+    digest.update(np.ascontiguousarray(latitudes, dtype=np.float64).tobytes())
+    digest.update(np.ascontiguousarray(longitudes, dtype=np.float64).tobytes())
+    return digest.hexdigest()
+
+
 def _nearest_node_index(graph) -> BallTree:
     if "_nearest_node_index" in _graph_attr_names(graph):
         return graph["_nearest_node_index"]
@@ -82,17 +99,39 @@ def _nearest_node_index(graph) -> BallTree:
     latitudes, longitudes = _vertex_coordinate_arrays(graph)
     if latitudes.size == 0:
         raise RuntimeError("Cannot snap to an empty walk graph.")
-    coords = np.radians(np.column_stack([latitudes, longitudes]))
-    tree = BallTree(coords, metric="haversine")
+    coords_key = _coordinate_digest(latitudes, longitudes)
+    cached = _NEAREST_NODE_INDEX_BY_COORDS.get(coords_key)
+    if cached is None:
+        coords = np.radians(np.column_stack([latitudes, longitudes]))
+        cached = (BallTree(coords, metric="haversine"), {})
+        if len(_NEAREST_NODE_INDEX_BY_COORDS) >= _NEAREST_NODE_INDEX_CACHE_LIMIT:
+            _NEAREST_NODE_INDEX_BY_COORDS.pop(next(iter(_NEAREST_NODE_INDEX_BY_COORDS)))
+        _NEAREST_NODE_INDEX_BY_COORDS[coords_key] = cached
+    tree, memo = cached
     graph["_nearest_node_index"] = tree
+    graph["_nearest_node_memo"] = memo
     return tree
+
+
+def _nearest_node_memo(graph) -> dict[tuple[float, float], int]:
+    if "_nearest_node_memo" not in _graph_attr_names(graph):
+        graph["_nearest_node_memo"] = {}
+    return graph["_nearest_node_memo"]
 
 
 def nearest_nodes(graph, lons: list[float], lats: list[float]) -> list[int]:
     tree = _nearest_node_index(graph)
-    query = np.radians(np.column_stack([lats, lons]))
-    _, indexes = tree.query(query, k=1)
-    return indexes.astype(int).ravel().tolist()
+    query = np.column_stack([lats, lons]).astype(np.float64, copy=False)
+    if not np.isfinite(query).all():
+        _, indexes = tree.query(np.radians(query), k=1)
+        return indexes.astype(int).ravel().tolist()
+    memo = _nearest_node_memo(graph)
+    keys = list(map(tuple, query.tolist()))
+    missing = list(dict.fromkeys(key for key in keys if key not in memo))
+    if missing:
+        _, indexes = tree.query(np.radians(np.asarray(missing, dtype=np.float64)), k=1)
+        memo.update(zip(missing, indexes.astype(int).ravel().tolist()))
+    return [memo[key] for key in keys]
 
 
 def snap_amenities(

@@ -46,6 +46,35 @@ def load_build_manifest(engine: Engine, build_key: str) -> dict[str, Any] | None
     return dict(row) if row is not None else None
 
 
+def load_latest_scoring_build_manifest(
+    engine: Engine,
+    *,
+    scoring_model: str,
+    profile: str,
+) -> dict[str, Any] | None:
+    """Latest complete published build matching a model/profile pair.
+
+    Filtering the small manifest result in Python keeps this helper independent
+    of PostgreSQL JSON operator details while still returning a concrete,
+    immutable build key for offline verification.
+    """
+    with engine.connect() as connection:
+        rows = connection.execute(
+            select(build_manifest)
+            .where(build_manifest.c.status == "complete")
+            .order_by(build_manifest.c.completed_at.desc(), build_manifest.c.created_at.desc())
+        ).mappings()
+        for row in rows:
+            manifest = dict(row)
+            summary = manifest.get("summary_json") or {}
+            if (
+                summary.get("scoring_model") == scoring_model
+                and summary.get("build_profile") == profile
+            ):
+                return manifest
+    return None
+
+
 def load_transit_feed_manifest(engine: Engine, feed_fingerprint: str) -> dict[str, Any] | None:
     with engine.connect() as connection:
         row = connection.execute(

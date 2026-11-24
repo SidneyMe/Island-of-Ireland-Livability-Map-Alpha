@@ -49,6 +49,9 @@ import {
   buildActiveGridLayers as runtimeBuildActiveGridLayers,
   debugGridVisibilityPlan as runtimeDebugGridVisibilityPlan,
   fineSurfaceEnabled as runtimeFineSurfaceEnabled,
+  inspectAvailable as runtimeInspectAvailable,
+  isDailyAccessModel as runtimeIsDailyAccessModel,
+  legacyFieldsUnavailable as runtimeLegacyFieldsUnavailable,
   gridScoreLayerLabel as runtimeGridScoreLayerLabel,
   gridScoreLayerOptions as runtimeGridScoreLayerOptions,
   normalizeGridScoreLayer as runtimeNormalizeGridScoreLayer,
@@ -169,6 +172,12 @@ function updateStatus(message) {
 
 function fineSurfaceEnabled() {
   return runtimeFineSurfaceEnabled(state.runtime);
+}
+
+// v4 inspect reads the score shards, so it works without fine tiles (dev).
+function inspectOnClick() {
+  return fineSurfaceEnabled()
+    || (runtimeIsDailyAccessModel(state.runtime) && runtimeInspectAvailable(state.runtime));
 }
 
 function resolutionForZoom(zoom) {
@@ -1715,7 +1724,7 @@ function initializeMap() {
     const clickAction = resolveMapClickAction({
       map: state.map,
       point: event.point,
-      fineSurfaceEnabled: fineSurfaceEnabled(),
+      fineSurfaceEnabled: inspectOnClick(),
       gridVisible: state.gridVisible,
       activeGridLayerId: activeGridLayerId()
     });
@@ -1782,7 +1791,11 @@ function initializeMap() {
     if (clickAction.type === CLICK_ACTIONS.COARSE_GRID) {
       state.popup
         .setLngLat(event.lngLat)
-        .setHTML(coarseGridPopupHtml(clickAction.features[0].properties || {}, resolutionForZoom(state.map.getZoom())))
+        .setHTML(coarseGridPopupHtml(
+          clickAction.features[0].properties || {},
+          resolutionForZoom(state.map.getZoom()),
+          { legacyUnavailable: runtimeLegacyFieldsUnavailable(state.runtime).length > 0 }
+        ))
         .addTo(state.map);
     }
   });

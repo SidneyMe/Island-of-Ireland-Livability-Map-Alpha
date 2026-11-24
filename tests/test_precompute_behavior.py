@@ -2889,12 +2889,12 @@ class TransitServiceDesertTests(TestCase):
                 mock.patch.object(precompute._STATE, "score_cache_dir", cache_dir),
                 mock.patch.object(precompute, "load_walk_graph_index", return_value=mock.sentinel.walk_graph),
                 mock.patch.object(precompute, "load_transport_reality_points", return_value=[{"geom": Point(-6.26, 53.35), "public_departures_7d": 3, "source_status": "gtfs_direct"}]),
-                mock.patch.object(precompute, "snap_amenities", return_value={"transport": [101]}),
-                mock.patch.object(precompute, "nearest_nodes", return_value=[101]),
+                mock.patch("precompute.service_deserts.network.snap_amenities", return_value={"transport": [101]}),
+                mock.patch("precompute.service_deserts.network.nearest_nodes", return_value=[101]),
                 mock.patch.object(precompute, "cache_load", return_value=[101]),
-                mock.patch.object(precompute, "normalize_origin_node_ids", return_value=[101]),
-                mock.patch.object(precompute, "precompute_walk_counts_by_origin_node", return_value={101: {"transport": 1}}),
-                mock.patch.object(precompute, "precompute_walk_weighted_totals_by_origin_node", return_value={101: {"public_departures_7d": 3}}),
+                mock.patch("precompute.service_deserts.network.normalize_origin_node_ids", return_value=[101]),
+                mock.patch("precompute.service_deserts.network.precompute_walk_counts_by_origin_node", return_value={101: {"transport": 1}}),
+                mock.patch("precompute.service_deserts.network.precompute_walk_weighted_totals_by_origin_node", return_value={101: {"public_departures_7d": 3}}),
                 mock.patch.object(precompute, "replace_service_desert_rows") as replace_mock,
             ):
                 precompute._compute_service_deserts(
@@ -2921,12 +2921,12 @@ class TransitServiceDesertTests(TestCase):
                 mock.patch.object(precompute._STATE, "score_cache_dir", cache_dir),
                 mock.patch.object(precompute, "load_walk_graph_index", return_value=mock.sentinel.walk_graph),
                 mock.patch.object(precompute, "load_transport_reality_points", return_value=[{"geom": Point(-6.26, 53.35), "public_departures_7d": 3, "source_status": "gtfs_direct"}]),
-                mock.patch.object(precompute, "snap_amenities", return_value={"transport": [101]}),
-                mock.patch.object(precompute, "nearest_nodes", return_value=[101]),
+                mock.patch("precompute.service_deserts.network.snap_amenities", return_value={"transport": [101]}),
+                mock.patch("precompute.service_deserts.network.nearest_nodes", return_value=[101]),
                 mock.patch.object(precompute, "cache_load", return_value=[101]),
-                mock.patch.object(precompute, "normalize_origin_node_ids", return_value=[101]),
-                mock.patch.object(precompute, "precompute_walk_counts_by_origin_node", return_value={101: {"transport": 1}}),
-                mock.patch.object(precompute, "precompute_walk_weighted_totals_by_origin_node", return_value={101: {"public_departures_7d": 3}}),
+                mock.patch("precompute.service_deserts.network.normalize_origin_node_ids", return_value=[101]),
+                mock.patch("precompute.service_deserts.network.precompute_walk_counts_by_origin_node", return_value={101: {"transport": 1}}),
+                mock.patch("precompute.service_deserts.network.precompute_walk_weighted_totals_by_origin_node", return_value={101: {"public_departures_7d": 3}}),
                 mock.patch.object(precompute, "replace_service_desert_rows") as replace_mock,
             ):
                 precompute._compute_service_deserts(
@@ -4561,3 +4561,47 @@ class CompactGraphArrayTests(TestCase):
         weights = precompute._network._edge_weights(graph, "length_m")
 
         self.assertEqual(list(weights), [5.0, 6.0])
+
+    def test_nearest_node_index_is_shared_across_reloads_of_the_same_graph(self) -> None:
+        def _graph(lats: list[float]) -> WalkGraphIndex:
+            return WalkGraphIndex(
+                graph_dir=Path("cache/walk_graph"),
+                meta={"node_count": len(lats), "edge_count": 0},
+                node_latitudes=np.array(lats, dtype=np.float64),
+                node_longitudes=np.array([-6.3, -6.2, -6.1], dtype=np.float64),
+            )
+
+        first = _graph([53.0, 53.1, 53.2])
+        reloaded = _graph([53.0, 53.1, 53.2])
+        moved = _graph([54.0, 54.1, 54.2])
+
+        with mock.patch.dict(precompute._network._NEAREST_NODE_INDEX_BY_COORDS, clear=True):
+            tree = precompute._network._nearest_node_index(first)
+            self.assertIs(precompute._network._nearest_node_index(reloaded), tree)
+            self.assertIsNot(precompute._network._nearest_node_index(moved), tree)
+            self.assertEqual(precompute.nearest_nodes(moved, [-6.1], [54.2]), [2])
+
+    def test_nearest_nodes_memo_matches_direct_ball_tree_queries(self) -> None:
+        rng = np.random.default_rng(3)
+        graph = WalkGraphIndex(
+            graph_dir=Path("cache/walk_graph"),
+            meta={"node_count": 500, "edge_count": 0},
+            node_latitudes=rng.uniform(53.0, 53.5, 500),
+            node_longitudes=rng.uniform(-6.6, -6.0, 500),
+        )
+        lats = list(rng.uniform(52.9, 53.6, 200))
+        lons = list(rng.uniform(-6.7, -5.9, 200))
+        # Repeat a slice so the second call is answered partly from the memo.
+        repeat_lats, repeat_lons = lats[50:120] + lats[:5], lons[50:120] + lons[:5]
+
+        with mock.patch.dict(precompute._network._NEAREST_NODE_INDEX_BY_COORDS, clear=True):
+            first = precompute.nearest_nodes(graph, lons, lats)
+            second = precompute.nearest_nodes(graph, repeat_lons, repeat_lats)
+            tree = precompute._network._nearest_node_index(graph)
+
+        def _direct(lon_values, lat_values):
+            _, indexes = tree.query(np.radians(np.column_stack([lat_values, lon_values])), k=1)
+            return indexes.astype(int).ravel().tolist()
+
+        self.assertEqual(first, _direct(lons, lats))
+        self.assertEqual(second, _direct(repeat_lons, repeat_lats))

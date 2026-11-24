@@ -204,57 +204,11 @@ def _amenity_rows(
 def _transport_reality_rows(engine, created_at, *, progress_cb=None):
     if _STATE.transit_reality_state is None:
         return []
-    rows = load_transport_reality_points(
-        engine,
-        _STATE.transit_reality_state.reality_fingerprint,
-    )
-    result = [
-        {
-            "build_key": _STATE.hashes.build_key,
-            "config_hash": _STATE.hashes.config_hash,
-            "import_fingerprint": _STATE.hashes.import_fingerprint,
-            "source_ref": row["source_ref"],
-            "stop_name": row["stop_name"],
-            "reality_status": row["reality_status"],
-            "source_status": row["source_status"],
-            "school_only_state": row["school_only_state"],
-            "feed_id": row["feed_id"],
-            "stop_id": row["stop_id"],
-            "public_departures_7d": row["public_departures_7d"],
-            "public_departures_30d": row["public_departures_30d"],
-            "school_only_departures_30d": row["school_only_departures_30d"],
-            "weekday_morning_peak_deps": row.get("weekday_morning_peak_deps", 0.0),
-            "weekday_evening_peak_deps": row.get("weekday_evening_peak_deps", 0.0),
-            "weekday_offpeak_deps": row.get("weekday_offpeak_deps", 0.0),
-            "saturday_deps": row.get("saturday_deps", 0.0),
-            "sunday_deps": row.get("sunday_deps", 0.0),
-            "friday_evening_deps": row.get("friday_evening_deps", 0.0),
-            "transport_score_units": row.get("transport_score_units", 0),
-            "transport_mode_tier": row.get("transport_mode_tier"),
-            "bus_daytime_deps": row.get("bus_daytime_deps", 0.0),
-            "bus_daytime_headway_min": row.get("bus_daytime_headway_min"),
-            "bus_frequency_tier": row.get("bus_frequency_tier"),
-            "bus_frequency_score_units": row.get("bus_frequency_score_units", 0),
-            "last_public_service_date": row["last_public_service_date"],
-            "last_any_service_date": row["last_any_service_date"],
-            "bus_active_days_mask_7d": row.get("bus_active_days_mask_7d"),
-            "bus_service_subtier": row.get("bus_service_subtier"),
-            "is_unscheduled_stop": bool(row.get("is_unscheduled_stop", False)),
-            "has_exception_only_service": bool(row.get("has_exception_only_service", False)),
-            "has_any_bus_service": bool(row.get("has_any_bus_service", False)),
-            "has_daily_bus_service": bool(row.get("has_daily_bus_service", False)),
-            "route_modes_json": row["route_modes_json"],
-            "source_reason_codes_json": row["source_reason_codes_json"],
-            "reality_reason_codes_json": row["reality_reason_codes_json"],
-            "geom": row["geom"],
-            "created_at": created_at,
-        }
-        for row in rows
-    ]
+    rows = load_transport_reality_points(engine, _STATE.transit_reality_state.reality_fingerprint)
+    result = _publish.transport_rows_impl(rows, created_at, hashes=_STATE.hashes)
     if progress_cb is not None and result:
         progress_cb("detail", detail=f"loaded {len(result):,} transport_reality rows", force_log=True)
     return result
-
 
 def _service_desert_rows(engine, created_at, *, progress_cb=None):
     rows = load_service_desert_rows(engine, _STATE.hashes.build_key)

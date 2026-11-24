@@ -287,6 +287,26 @@ class FineGridTileContext:
         self.score_dir = Path(score_dir)
         shell_manifest = _load_manifest(self.shell_dir)
         score_manifest = _load_manifest(self.score_dir)
+        # Daily access v4 shards: real components/penalties per cell, land-area weights.
+        self.daily_access = score_manifest.get("model") == "daily-access-v4"
+        if self.daily_access:
+            shard_size = int(score_manifest.get("shard_size_m", SURFACE_SHARD_SIZE_M))
+            self.shard_entries = {}
+            for shard_id in score_manifest.get("shards") or ():
+                x_text, y_text = str(shard_id).split("_", 1)
+                x_min, y_min = int(x_text), int(y_text)
+                self.shard_entries[str(shard_id)] = FineGridShardEntry(
+                    shard_id=str(shard_id), x_min_m=x_min, y_min_m=y_min,
+                    x_max_m=x_min + shard_size, y_max_m=y_min + shard_size,
+                    shell_path=f"shards/{shard_id}.npz", score_path=f"shards/{shard_id}.npz",
+                )
+            self.shard_size_m = shard_size
+            self.base_resolution_m = int(score_manifest.get("resolution_m", CANONICAL_BASE_RESOLUTION_M))
+            self._shell_cache = OrderedDict()
+            self._score_cache = OrderedDict()
+            self._aggregated_cache = OrderedDict()
+            self._wgs84_bbox_cache = {}
+            return
         shell_inventory = {
             str(entry["shard_id"]): entry
             for entry in shell_manifest.get("shard_inventory", [])
@@ -348,6 +368,43 @@ class FineGridTileContext:
             "aggregated": len(self._aggregated_cache),
             "wgs84_bbox": len(self._wgs84_bbox_cache),
         }
+
+    def _daily_access_channels(self, shard_id: str) -> dict[str, np.ndarray]:
+        """Decoded v4 channels (NaN outside land) and land-area weights of one shard."""
+        cached = self._cache_get(self._score_cache, shard_id)
+        if cached is None:
+            entry = self.shard_entries[shard_id]
+            with np.load(self.score_dir / entry.score_path, allow_pickle=False) as data:
+                raw = {name: np.asarray(data[name]) for name in ("total", "components", "penalties")}
+            with np.load(self.shell_dir / entry.shell_path, allow_pickle=False) as data:
+                land = np.asarray(data["land_area_m2"], dtype=np.float32)
+
+            def decode(values: np.ndarray) -> np.ndarray:
+                return np.where(values == 65535, np.nan, values.astype(np.float32) / 100.0)
+
+            channels = {"total_score": decode(raw["total"])}
+            for index, category in enumerate(("shops", "transport", "healthcare", "parks")):
+                channels[f"score_{category}"] = decode(raw["components"][index])
+            # v3 tile convention: penalties are negative score contributions.
+            channels["score_railway_proximity"] = -decode(raw["penalties"][0])
+            channels["score_road_proximity"] = -decode(raw["penalties"][1])
+            weights = np.where(np.isfinite(channels["total_score"]), land, 0.0).astype(np.float32)
+            cached = self._cache_put(self._score_cache, shard_id, {"channels": channels, "weights": weights},
+                                     limit=_RAW_SCORE_CACHE_LIMIT)
+        return cached
+
+    def daily_access_aggregates(self, shard_id: str, resolution_m: int) -> tuple[dict[str, np.ndarray], np.ndarray]:
+        cache_key = (shard_id, int(resolution_m))
+        cached = self._cache_get(self._aggregated_cache, cache_key)
+        if cached is not None:
+            return cached
+        loaded = self._daily_access_channels(shard_id)
+        factor = _aggregation_factor(int(resolution_m))
+        valid_mask = None
+        aggregates = {}
+        for name, values in loaded["channels"].items():
+            aggregates[name], valid_mask = _weighted_mean_block_reduce(values, loaded["weights"], factor)
+        return self._cache_put(self._aggregated_cache, cache_key, (aggregates, valid_mask), limit=_AGGREGATED_CACHE_LIMIT)
 
     def _load_shell_shard(self, shard_id: str) -> dict[str, Any]:
         cached = self._cache_get(self._shell_cache, shard_id)
@@ -459,7 +516,12 @@ class FineGridTileContext:
                 metric_bounds[3] + block_size,
             )
             for shard_entry in self.iter_intersecting_shards(expanded_metric_bounds):
-                aggregated_scores, valid_mask = self.aggregated_shard_surface(shard_entry.shard_id, block_size)
+                channels = None
+                if self.daily_access:
+                    channels, valid_mask = self.daily_access_aggregates(shard_entry.shard_id, block_size)
+                    aggregated_scores = channels["total_score"]
+                else:
+                    aggregated_scores, valid_mask = self.aggregated_shard_surface(shard_entry.shard_id, block_size)
                 rows, cols = aggregated_scores.shape
                 start_col = max(
                     0,
@@ -513,6 +575,10 @@ class FineGridTileContext:
                             "total_score": total_score,
                         }
                     )
+                    if channels is not None:
+                        for name, values in channels.items():
+                            value = float(values[row_index, col_index])
+                            properties[name] = value if math.isfinite(value) else 0.0
                     features.append(
                         {
                             "geometry": {

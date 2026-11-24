@@ -31,6 +31,7 @@ from sqlalchemy import text
 
 from config import (
     BAKE_PMTILES_WORKERS,
+    FINE_GRID_BAKE_WORKER_CAP,
     CACHE_DIR,
     LANDUSE_CONTEXT_MIN_ZOOM,
     LANDUSE_CONTEXT_MAX_ZOOM,
@@ -85,7 +86,8 @@ FINE_GRID_MIN_ZOOM = min(_FINE_GRID_RESOLUTIONS_BY_ZOOM)
 # amortize IPC overhead; smaller chunks improve load balancing across zooms.
 # 512 is a happy medium for the Ireland workload (~400 chunks total).
 _CHUNK_SIZE = 512
-_FINE_GRID_WORKER_CAP = 4
+_SINGLE_TILE_CHUNK_MAX_ZOOM = 10
+_FINE_GRID_WORKER_CAP = FINE_GRID_BAKE_WORKER_CAP
 _IN_FLIGHT_MULTIPLIER = 2
 _MAX_PARALLEL_ATTEMPTS = 2
 
@@ -513,6 +515,27 @@ def _chunked(iterable: Iterable, size: int) -> Iterator[list]:
         yield chunk
 
 
+def _zoom_chunk_size(zoom: int) -> int:
+    # Tile cost scales with ground area (~4x per zoom level down). With a flat
+    # 512-spec chunk the first chunk held every z5-z10 tile and one worker spent
+    # ~50 s on it while the rest idled; low zooms now go one tile per task.
+    return max(1, min(_CHUNK_SIZE, 4 ** max(0, int(zoom) - _SINGLE_TILE_CHUNK_MAX_ZOOM)))
+
+
+def _chunked_by_zoom(tile_specs: Iterable[tuple[int, int, int, int]]) -> Iterator[list]:
+    chunk: list = []
+    chunk_zoom: int | None = None
+    for spec in tile_specs:
+        zoom = int(spec[0])
+        if chunk and (zoom != chunk_zoom or len(chunk) >= _zoom_chunk_size(chunk_zoom)):
+            yield chunk
+            chunk = []
+        chunk_zoom = zoom
+        chunk.append(spec)
+    if chunk:
+        yield chunk
+
+
 def _temp_output_path(output_path: Path) -> Path:
     return output_path.with_name(output_path.name + ".tmp")
 
@@ -587,7 +610,7 @@ def _bake_parallel(
     report_every = max(1, total_tile_count // 10)
     next_report = report_every
 
-    chunk_iter = iter(_chunked(tile_specs, _CHUNK_SIZE))
+    chunk_iter = iter(_chunked_by_zoom(tile_specs))
 
     with ProcessPoolExecutor(max_workers=workers) as pool:
         pending: dict[object, int] = {}

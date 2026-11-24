@@ -20,6 +20,8 @@ GRAPH_REQUIRED_FILENAMES = (
     "walk_graph.adjacency_offsets.bin",
     "walk_graph.adjacency_targets.bin",
     "walk_graph.adjacency_lengths.bin",
+    "walk_graph.edge_flags.bin",
+    "walk_graph.components.bin",
 )
 
 

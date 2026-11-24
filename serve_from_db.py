@@ -241,6 +241,44 @@ class RuntimeState:
     noise_proxy_metadata: dict[str, Any] | None
     railway_proximity: dict[str, Any] | None
     road_proximity: dict[str, Any] | None
+    # "v3" (node scores) or DAILY_ACCESS_SCORE_MODEL (score shards).
+    scoring_model: str = "v3"
+    daily_access: dict[str, Any] | None = None
+
+
+def _daily_access_state(summary_json: dict[str, Any], profile: str) -> tuple[str, dict[str, Any] | None, str | None]:
+    """Scoring model of a published build and, for v4, its shard tiers.
+
+    v4 inspect readiness is the score/shell tiers being complete; it does not
+    depend on the profile publishing fine tiles (dev only publishes 20/10/5 km).
+    """
+    from config import DAILY_ACCESS_SCORE_MODEL
+
+    model = str(summary_json.get("scoring_model") or "v3")
+    if model != DAILY_ACCESS_SCORE_MODEL:
+        return model, None, None
+    info = dict(summary_json.get("daily_access") or {})
+    shell_dir = Path(str(info.get("shell_dir") or ""))
+    score_dir = Path(str(info.get("score_dir") or ""))
+    warning = None
+    try:
+        from precompute.daily_access_build import surface_tier_problems
+
+        keys = info.get("keys") or {}
+        problems, _shard_ids = surface_tier_problems(
+            shell_dir,
+            score_dir,
+            shell_key=keys.get("shell"),
+            reach_key=keys.get("reach"),
+            score_key=keys.get("score"),
+        )
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal for the map
+        problems = [str(exc)]
+    info["inspect_ready"] = not problems
+    info["fine_png_enabled"] = bool(info["inspect_ready"] and profile_fine_surface_enabled(profile))
+    if problems:
+        warning = f"daily access v4 shards unavailable for inspect: {problems[:3]}"
+    return model, info, warning
 
 
 class RuntimeService:
@@ -255,6 +293,7 @@ class RuntimeService:
         self._allow_stale_runtime_fallback = _env_truthy(RUNTIME_STALE_FALLBACK_ENV)
         self._state: RuntimeState | None = None
         self._surface_runtime: _surface.FineSurfaceRuntime | None = None
+        self._daily_access_runtime = None
         self._state_lock = threading.RLock()
 
     def _load_latest_completed_manifest_for_extract(self) -> dict[str, Any] | None:
@@ -693,7 +732,20 @@ class RuntimeService:
         surface_shell_dir: Path | None = None
         surface_score_dir: Path | None = None
         surface_tile_dir: Path | None = None
-        if profile_fine_surface_enabled(self._profile):
+        scoring_model, daily_access, daily_access_warning = _daily_access_state(summary_json, self._profile)
+        if daily_access_warning:
+            runtime_warning = "; ".join(item for item in (runtime_warning, daily_access_warning) if item)
+        if daily_access is not None:
+            # v4 builds never read v3 node-score surfaces.
+            fine_resolutions = (
+                [int(value) for value in daily_access.get("fine_png_resolutions_m") or []]
+                if daily_access["fine_png_enabled"]
+                else []
+            )
+            surface_tile_dir = CACHE_DIR / "daily_access" / "tiles" / str(manifest["build_key"])
+            # Fine vector cells are in the build's PMTiles (baked from the v4 shards).
+            fine_surface_enabled = bool(daily_access["fine_png_enabled"])
+        elif profile_fine_surface_enabled(self._profile):
             surface_shell_hash = _surface.build_surface_shell_hash(str(manifest["geo_hash"]))
             surface_shell_dir = _surface.surface_shell_dir(
                 CACHE_DIR,
@@ -783,6 +835,8 @@ class RuntimeService:
             noise_proxy_metadata=noise_proxy_metadata,
             railway_proximity=railway_proximity,
             road_proximity=road_proximity,
+            scoring_model=scoring_model,
+            daily_access=daily_access,
         )
 
     def state(self) -> RuntimeState:
@@ -806,7 +860,7 @@ class RuntimeService:
         self.refresh_if_latest_build_changed()
         payload = self._get_runtime_base()
         state = self.state()
-        if state.fine_surface_enabled:
+        if state.fine_surface_enabled or (state.daily_access or {}).get("inspect_ready"):
             payload["inspect_url"] = "/api/inspect"
         return payload
 
@@ -865,7 +919,42 @@ class RuntimeService:
             "noise_proxy_metadata": state.noise_proxy_metadata,
             "railway_proximity": state.railway_proximity,
             "road_proximity": state.road_proximity,
+            "scoring_model": state.scoring_model,
+            # v4 has no counts/clusters/effective units: say so instead of sending zeros.
+            "legacy_fields_unavailable": (
+                ["counts", "cluster_counts", "effective_units"] if state.daily_access is not None else []
+            ),
+            "daily_access": (
+                None
+                if state.daily_access is None
+                else {
+                    key: state.daily_access.get(key)
+                    for key in (
+                        "model", "score_model_version", "geometry_version", "classification_version",
+                        "channels", "inspect_ready", "fine_png_enabled", "warnings",
+                    )
+                }
+            ),
         }
+
+    def daily_access_runtime(self):
+        from precompute.daily_access_runtime import DailyAccessSurfaceRuntime
+
+        state = self.state()
+        info = state.daily_access or {}
+        if not info.get("inspect_ready"):
+            raise RuntimeError("Daily access v4 shards are unavailable for this build.")
+        with self._state_lock:
+            runtime = self._daily_access_runtime
+            if runtime is None or runtime.score_dir != Path(str(info["score_dir"])):
+                runtime = DailyAccessSurfaceRuntime(
+                    Path(str(info["shell_dir"])),
+                    Path(str(info["score_dir"])),
+                    state.surface_tile_dir,
+                    profile=state.build_profile,
+                )
+                self._daily_access_runtime = runtime
+            return runtime
 
     def surface_runtime(self) -> _surface.FineSurfaceRuntime:
         state = self.state()
@@ -885,11 +974,17 @@ class RuntimeService:
                 )
             return self._surface_runtime
 
-    def get_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> bytes:
+    def get_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int, channel: str = "total") -> bytes:
         normalized_resolution = _require_exact_int(resolution_m, field_name="resolution_m")
         if normalized_resolution not in self.state().fine_resolutions:
             raise ValueError(f"Unsupported fine surface resolution: {resolution_m}")
         tile_z, tile_x, tile_y = _require_tile_coordinates(z, x, y)
+        if self.state().daily_access is not None:
+            return self.daily_access_runtime().render_tile(
+                resolution_m=normalized_resolution, z=tile_z, x=tile_x, y=tile_y, channel=str(channel or "total")
+            )
+        if channel not in ("", "total"):
+            raise ValueError("surface channels other than the total need a daily access v4 build")
         return self.surface_runtime().render_tile(
             resolution_m=normalized_resolution,
             z=tile_z,
@@ -918,11 +1013,15 @@ class RuntimeService:
                 minimum=0.0,
                 maximum=float(SURFACE_MAX_ZOOM),
             )
-        return self.surface_runtime().inspect(
+        if self.state().daily_access is not None:
+            return self.daily_access_runtime().inspect(lat=normalized_lat, lon=normalized_lon, zoom=normalized_zoom)
+        payload = self.surface_runtime().inspect(
             lat=normalized_lat,
             lon=normalized_lon,
             zoom=normalized_zoom,
         )
+        payload.setdefault("scoring_model", self.state().scoring_model)
+        return payload
 
 
 class LivabilityHTTPServer(ThreadingHTTPServer):
@@ -1049,11 +1148,13 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             return
         if route.kind == "surface_tile":
             resolution_m, z, x, y = (int(value) for value in route.groups)
+            channel = (parse_qs(parsed.query).get("channel") or ["total"])[0]
             self._serve_surface_tile(
                 resolution_m=resolution_m,
                 z=z,
                 x=x,
                 y=y,
+                channel=channel,
             )
             return
         if route.kind == "static":
@@ -1206,12 +1307,14 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             },
         )
 
-    def _serve_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int) -> None:
+    def _serve_surface_tile(self, *, resolution_m: int, z: int, x: int, y: int, channel: str = "total") -> None:
+        kwargs = {"channel": channel} if channel != "total" else {}
         payload = self.livability_server.service.get_surface_tile(
             resolution_m=resolution_m,
             z=z,
             x=x,
             y=y,
+            **kwargs,
         )
         self._record_response(HTTPStatus.OK, len(payload))
         self._write_bytes(

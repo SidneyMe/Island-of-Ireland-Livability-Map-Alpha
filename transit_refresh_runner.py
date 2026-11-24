@@ -51,7 +51,7 @@ def _load_study_area_wgs84(profile: str, tracker: PrecomputeProgressTracker):
     tracker.start_phase("geometry", detail="loading study area geometry")
     from study_area import load_study_area_geometries, study_area_wgs84_envelope_from_metric
 
-    study_area_metric = load_study_area_geometries(
+    study_area_metric, _study_area_wgs84 = load_study_area_geometries(
         profile=profile,
         progress_cb=tracker.phase_callback("geometry"),
     )

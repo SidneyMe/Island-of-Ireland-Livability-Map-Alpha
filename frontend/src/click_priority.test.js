@@ -144,4 +144,21 @@ function fakeMap(featuresByLayer) {
   ]);
 }
 
+{
+  // A style without the noise overlay: the layer is skipped, not queried.
+  const map = fakeMap({});
+  map.getLayer = function (layerId) {
+    return layerId === "noise-proxy-fill" ? undefined : { id: layerId };
+  };
+  const action = resolveMapClickAction({
+    map,
+    point: { x: 10, y: 20 },
+    fineSurfaceEnabled: true,
+    gridVisible: true,
+    activeGridLayerId: "grid-fill-active"
+  });
+  assert.equal(action.type, CLICK_ACTIONS.FINE_INSPECT);
+  assert.ok(!map.calls.includes("noise-proxy-fill"));
+}
+
 console.log("frontend click priority checks passed");

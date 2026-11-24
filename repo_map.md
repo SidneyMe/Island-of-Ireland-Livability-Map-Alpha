@@ -18,12 +18,12 @@
 ### 0.2 Repo shape (one screen)
 
 ```text
-main.py                    CLI dispatcher: import | basemap | gtfs (status|refresh) | transit | precompute | serve
+main.py                    CLI dispatcher: import | basemap | gtfs (status|refresh) | transit | precompute | daily-access | serve
 config.py                  every constant + the hash/invalidation spine; imported almost everywhere
 local_osm_import/          osm2pgsql raw OSM import (orchestrator.py, osm2pgsql.py, rules.py)
-osm2pgsql_livability.lua   OSM tag filter (parks / landuse / roads). Contains no transport tags at all.
+osm2pgsql_livability.lua   OSM tag filter (healthcare > shops > green > landuse; roads). No transport tags at all.
 transit/                   GTFS download+cache, matching/classification, walkgraph gtfs-refresh, rail corridors
-walkgraph/                 Rust binary: build, reachability, stats, surface, gtfs-refresh
+walkgraph/                 Rust binary: build, reachability, stats, surface, gtfs-refresh, daily-access-{attach,objects,reach,score}
 precompute/                planner + phases + scoring + caches + PMTiles bake orchestration
 network/                   Python walkgraph graph-index loader. NOT precompute/network.py (reachability math).
 db_postgis/                Alembic schema, SQLAlchemy tables, reads, writes, manifests, engine
@@ -57,16 +57,21 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | Cache tiers, hashes, invalidation | `config.py` (`build_config_hashes`, `*_hash`, `build_key`) → `precompute/tiers.py` → `precompute/cache.py` → `precompute/_cache_wrappers.py` → `tests/test_precompute_cache.py`, `tests/test_config.py` | scoring internals |
 | Reachability math (Python side) | `precompute/network.py` → `precompute/reachability_arrays.py` → `precompute/phases.py` (`phase_reachability_impl`) | Rust internals unless perf |
 | Reachability / graph perf (Rust) | `walkgraph/src/reachability.rs` → `walkgraph/src/graph.rs` → `walkgraph/src/pbf.rs` → `walkgraph/src/surface/mod.rs` | Python pipeline |
-| Walk/bike graph build and filters | `walkgraph/src/pbf.rs` (`WALK_EXCLUDED`, `BIKE_EXCLUDED`) → `walkgraph/src/graph.rs` → `precompute/phases.py` (`_build_or_load_bike_graph`) | transit GTFS |
+| Walk/bike graph build and filters | `walkgraph/src/pbf.rs` (`WALK_EXCLUDED`, `BIKE_EXCLUDED`, `way_edge_flags`) → `walkgraph/src/graph.rs` (`emit_edge_flag_sidecar`, `node_components`) → `precompute/phases.py` (`_build_or_load_bike_graph`) | transit GTFS |
+| Daily access v4 build (test/dev): tiers, shards, gates, verifier | `precompute/daily_access_build.py` (`run_daily_access_build`, `surface_tier_problems`, `reach_tier_problems`) → `precompute/daily_access_verify.py` (pinned published snapshot + bounded shard sampling) → `scripts/daily_access_verify_shards.py` → `tests/test_daily_access_{build,verify}.py` | v3 phases, PMTiles bake |
+| Daily access v4 publish, display layers, runtime, inspect, PNG channels | `precompute/daily_access_publish.py` → `precompute/display_layers.py` (`prepare_display_layers`, current-input POI/GTFS/summary/noise selection) → `precompute/service_deserts.py` (shared display-only rule) → `precompute/daily_access_runtime.py` → `serve_from_db.py` → `tests/test_daily_access_{runtime,display,publish_db}.py` | v3 fine surface / published v3 builds |
+| Daily access v4 native path (Rust) and Python/Rust parity | `walkgraph/src/daily_access/{geometry,snap,reach,score,mod}.rs` → `precompute/daily_access_native.py` (`compute_native`, `compare_with_reference`, `ALL_KINDS`) → `scripts/daily_access_reference_run.py --native` → `tests/test_daily_access_native.py` | v3 reachability, noise |
 | Fine surface, `/api/inspect`, PNG tiles | `precompute/surface.py` (`FineSurfaceRuntime`) → `fine_vector_pmtiles_worker.py` → `serve_from_db.py` (`/api/inspect`) → `tests/test_surface_runtime.py`, `tests/test_fine_vector_pmtiles_worker.py` | noise |
 | PMTiles bake: new field / layer / zoom | `precompute/bake_pmtiles.py` (`_pmtiles_metadata`) → `pmtiles_bake_worker.py` → `tests/test_pmtiles_bake.py` (+ `fine_vector_pmtiles_worker.py` if fine grid) | runtime server |
 | Frontend layer, control, popup | `frontend/src/` (small modules; start `runtime_contract.js` or the matching `*.js`) → matching `*.test.js` → rebuild `static/dist/` | Python pipeline |
 | Runtime HTTP API / routes / caching | `serve_from_db.py` (`RuntimeState`) → `serve_routes.py` → `frontend/src/runtime_contract.js` → `tests/test_server_behavior.py`, `tests/test_serve_routes.py` | precompute |
 | Schema change | §7 "Schema change" list → `db_postgis/migrations/versions/` (head `000023`) → `tests/test_db_constraint_migration.py`, `scripts/db_integrity_check.py` | frontend unless surfaced |
-| OSM raw import / importer rules | `local_osm_import/*` → `osm2pgsql_livability.lua` → `config.py` (`IMPORTER_CONFIG_VERSION`) → `db_postgis/{reads,writes}.py` → `tests/test_osm_import_handling.py`, `tests/test_local_osm_rules.py` | transit, frontend |
+| OSM raw import / importer rules | `local_osm_import/*` → `osm2pgsql_livability.lua` → `config.py` (`IMPORTER_CONFIG_VERSION`) → `db_postgis/{reads,writes}.py` (`legacy_v3_amenity_category`) → `tests/test_osm_import_handling.py`, `tests/test_local_osm_rules.py` | transit, frontend |
+| Daily access score (v4) inputs: classification, logical places, green sites | `config.py` (`DAILY_ACCESS_*`, `daily_access_classification_params`) → `precompute/daily_access_classify.py` → `db_postgis/daily_access_green.py` → `db_postgis/reads.py` (`load_daily_access_source_rows`) → `scripts/daily_access_inventory.py` → `tests/test_daily_access_classify.py` | v3 tiers/clusters, frontend, Rust |
+| Daily access score (v4) Python reference: edge entries, reach, curves | `config.py` (`DAILY_ACCESS_*`, `daily_access_geometry_params`, `daily_access_score_params`) → `precompute/daily_access_geometry.py` → `precompute/daily_access_snap.py` → `precompute/daily_access_reach.py` → `precompute/daily_access_score.py` → `precompute/daily_access_reference.py` → `db_postgis/daily_access_green.py` (`stage_park_approaches`) → `tests/test_daily_access_geometry.py`, `tests/test_daily_access_reference.py` | v3 scoring, frontend |
 | Self-hosted basemap | `basemap.py` → `basemap/docker-compose.yml` → `docs/BASEMAP.md` → `config.py` (`PROTOMAPS_*`) → `tests/test_basemap.py` | pipeline internals |
 | Windows GDAL / noise execution | `AGENTS.md` → `scripts/win/*.cmd`, `scripts/win/run_noise_precompute_watchdog.ps1` → §8 | raw `python main.py` |
-| Server / deploy / Linux runbook | `README.md` → §0.5 commands → `serve_from_db.py` → `static/index.html` | migrations history |
+| Server / deploy / Linux runbook | `docs/V4_RELEASE_PLAN.md` (2026-10-26 audit + planned work, not an implemented runbook) → `README.md` → §0.5 commands → `serve_from_db.py` → `static/index.html` | migrations history |
 | "How do I verify X?" | §10 test map, then §0.5 command cheatsheet | — |
 
 ### 0.4 Symbol index — grep these instead of browsing
@@ -75,9 +80,9 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 |---|---|
 | `build_config_hashes`, `geo_hash`, `reach_hash`, `score_hash`, `render_hash`, `config_hash`, `build_key` | `config.py` |
 | `importer_config_hash`, `transit_config_hash`, `current_normalization_scope_hash`, `package_snapshot` | `config.py` |
-| `IMPORTER_CONFIG_VERSION` = `"2026-08-31-gtfs-only-transport-1"` (l.56), `SCORING_MODEL_VERSION` = `"v3-gtfs-only-transport-rail-proximity-2026-09-25"` (l.453) | `config.py` |
+| `IMPORTER_CONFIG_VERSION` = `"2026-10-10-daily-access-v4-import-1"` (l.56), `SCORING_MODEL_VERSION` = `"v3-gtfs-only-transport-rail-proximity-2026-09-25"` (l.453) | `config.py` |
 | `TAGS`, `CAPS`, `WALK_RADIUS_M`, `TRANSIT_ACCESS_WALK_RADIUS_M`, `TRANSIT_EGRESS_WALK_RADIUS_M` | `config.py` |
-| `TRANSIT_REALITY_ALGO_VERSION` (10), `AMENITY_MERGE_ALGO_VERSION` (4), `WALKGRAPH_FORMAT_VERSION` (3) | `config.py` |
+| `TRANSIT_REALITY_ALGO_VERSION` (10), `AMENITY_MERGE_ALGO_VERSION` (4), `WALKGRAPH_FORMAT_VERSION` (4) | `config.py` |
 | `FINE_SURFACE_SCHEMA_VERSION` (2), `PMTILES_SCHEMA_VERSION` (13), `GRID_GEOMETRY_SCHEMA_VERSION` (4), `CACHE_SCHEMA_VERSION` (14) | `config.py` |
 | `PROTOMAPS_BASEMAPS_COMMIT`, `PROTOMAPS_ASSETS_COMMIT`, `PROTOMAPS_TILE_SCHEMA_MAJOR`, `BASEMAP_FONT_STACKS`, `BASEMAP_CACHE_DIR` | `config.py` |
 | `OSM_EXTRACT_PATH`, `GTFS_DIR`, `BOUNDARIES_DIR`, `ROI_BOUNDARY_PATH`, `NI_BOUNDARY_PATH`, `MAIN_ISLAND_BOUNDARY_PATH`, `CACHE_DIR` | `config.py` |
@@ -91,6 +96,17 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | `grid_cells_cache_key`, `walk_cell_nodes_cache_key`, `walk_origin_nodes_cache_key`, `_build_or_load_bike_graph` | `precompute/phases.py` |
 | `score_cell`, `score_cells` | `precompute/grid.py` |
 | `classify_amenity_row`, `annotate_amenity_row`, `uses_weighted_units` | `precompute/amenity_tiers.py` |
+| `classify_daily_access_row`, `classify_service_rows`, `build_logical_places`, `duplicate_evidence`, `evidence_rank`, `object_connector_distance_m`, `green_area_class` (v4) | `precompute/daily_access_classify.py` |
+| `stage_green_sites`, `load_green_sites`, `resolve_green_sites`, `GreenSite`, `stage_park_approaches`, `candidate_edge_slots` (v4) | `db_postgis/daily_access_green.py` |
+| `decay`, `need_access`, `top3_access`, `category_components`, `total_score`, `quantize_*`, `access_status` (v4) | `precompute/daily_access_score.py` |
+| `edge_frame`, `point_pieces`, `footprint_pieces`, `point_shadow`, `endpoint_costs`, `same_edge_distance` (v4) | `precompute/daily_access_geometry.py` |
+| `graph_components`, `LandMask`, `EdgeIndex`, `point_entries`, `footprint_entries`, `cell_origin` (v4) | `precompute/daily_access_snap.py` |
+| `k_nearest_labels`, `reach_for_kind`, `Seed`, `KindReach` (v4) | `precompute/daily_access_reach.py` |
+| `compute_reference`, `ReferenceGraph`, `load_reference_graph`, `build_sources`, `build_seeds`, `kind_distances`, `LabelTable`, `loss_report` (v4) | `precompute/daily_access_reference.py` |
+| `DailyAccessSurfaceRuntime`, `ByteLRU`, `CHANNELS` (v4) / `publish_daily_access`, `switch_active_build` (v4) | `precompute/daily_access_runtime.py` / `precompute/daily_access_publish.py` |
+| `surface_tier_problems`, `reach_tier_problems`, `load_verification_snapshot`, `sample_valid_cells`, `verify_snapshot_tiers` (v4) | `precompute/daily_access_build.py`, `precompute/daily_access_verify.py` |
+| `prepare_display_layers`, `prepare_amenity_sources`, `select_noise_artifact`, `DISPLAY_LAYERS_VERSION` / `compute_service_desert_rows` | `precompute/display_layers.py` / `precompute/service_deserts.py` |
+| `RoadPenaltyField`, `RailwayPenaltyField` (penalties at arbitrary points) | `precompute/road_proximity.py`, `transit/railway_corridors.py` |
 | `build_amenity_clusters` | `precompute/amenity_clusters.py` |
 | `SCORE_MODES`, `mode_available`, mode-aware weight helpers | `precompute/mode_aware.py` |
 | `FineSurfaceRuntime`, `inspect` | `precompute/surface.py` |
@@ -109,7 +125,7 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | `RuntimeState`, `LivabilityRequestHandler`, `serve_livability_app` | `serve_from_db.py` |
 | route kind table (`ROUTE_*`/kind names: root, export, pmtiles, surface_tile, static, api_runtime, api_inspect) | `serve_routes.py` |
 | `ensure_database_ready`, `import_payload_ready`, `raw_import_ready` | `db_postgis/schema.py` |
-| `load_source_amenity_rows`, `load_transport_reality_rows_for_scoring`, `load_transport_reality_points`, `load_road_rows`, `load_landuse_context_rows` | `db_postgis/reads.py` |
+| `load_source_amenity_rows`, `load_transport_reality_rows_for_scoring`, `load_transport_reality_points`, `load_road_rows`, `load_landuse_context_rows`, `load_daily_access_source_rows`, `legacy_v3_amenity_category` | `db_postgis/reads.py` |
 | `_AMENITY_CATEGORY_VALUES` (excludes transport) | `db_postgis/reads.py` |
 | `publish_precomputed_artifacts`, `refresh_noise_overlay_for_build` | `db_postgis/writes.py` |
 | `replace_service_desert_rows` | `db_postgis/write_transit.py` |
@@ -144,6 +160,9 @@ python scripts/fetch_datasets.py [--refresh] [--only KEY ...]
 
 # --- pipeline ---
 python main.py precompute --profile dev --explain   # planner decision only, fast, no side effects
+python main.py daily-access --profile test          # v4 shell/reach/score shards (Windows: via geo_env); add --publish to make them the active build
+python scripts/daily_access_verify_shards.py --profile test [--build-key KEY]   # pinned published v4 build vs Python reference
+python scripts/daily_access_coast_check.py          # band cells that lose entry nodes to the land check
 python main.py precompute --profile dev             # cheap iteration profile (coarse only)
 python main.py precompute --profile full --auto-refresh-import
 python main.py precompute --profile full --force-precompute
@@ -252,9 +271,11 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 8. `pmtiles_bake_worker._resolution_for_zoom()` is **not** `config.resolution_for_zoom()`.
 9. `pmtiles_bake_worker.py` must stay import-light (Windows spawn); fine-grid work belongs in `fine_vector_pmtiles_worker.py`.
 10. Transport scoring is strictly GTFS-only: `TAGS["transport"] = {"source": "gtfs_direct"}`, `_AMENITY_CATEGORY_VALUES` excludes transport, and OSM stop helpers were deleted (`load_osm_transport_features`, `clear_normalized_network_rows`, `transit/chained_reach.py` no longer exist — do not import them).
-11. Noise accuracy follows the profile: `full` defaults to **accurate** (needs all six raw noise archives + ≥30 GB free), `dev`/`test` to `dev_fast`. Set `NOISE_ACCURACY_MODE=dev_fast` to publish `full` from the cheap artifact.
+11. v3 `precompute` noise accuracy follows the profile and env override. v4 `daily-access --publish` never builds raw noise artifacts: `full` strictly requires a prepared **accurate** artifact (env cannot downgrade it); `dev`/`test` resolve the configured mode and explicitly disable noise if its artifact is missing.
 12. PMTiles archives are "current" only when their metadata `build_key` matches the build (`pmtiles_archive_build_key` / `_pmtiles_archive_is_current` in `precompute/workflow.py`). File existence alone is not enough: a failed bake keeps the old archive while the manifest is already `complete`, and a rerun then rebakes.
 13. `precompute --explain` prints `Transit reality fingerprint: transit-unavailable` and a provisional build key: transit is resolved only during a real run, so do not treat that line as a transit failure.
+14. osm2pgsql ≥1.9 (Ubuntu's 1.11) prints `--version` with a wall-clock timestamp prefix; `detect_importer_version_impl` strips it. If the import fingerprint changes on every run, every run re-imports OSM (~3 min) and invalidates every downstream cache.
+15. Single-core hot spots found by sampling a 96-core build, now fixed — keep them fixed: unprepared `within` against the island outline (`overture/loader.py`, 247 s → 0.1 s), one `ProcessPool` task per ROI noise geometry (`dev_fast.py`), per-pair Python penalty loop (`road_proximity.py`), BallTree rebuilt per graph reload and repeated snaps of identical points (`precompute/network.py` keys the index by coordinate digest and memoizes lat/lon → node), bike graph built after the walk graph (`_start_bike_graph_prebuild` now overlaps them), and a 512-spec first bake chunk holding all z5–z10 tiles (`_chunked_by_zoom`).
 
 ---
 
@@ -341,6 +362,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
     - `--auto-refresh-import` allows raw OSM import refresh when missing
     - `--allow-missing-transport` bypasses the zero-transport publish gate (transport scores become zero)
     - `--refresh-noise-artifact` / `--force-noise-artifact` / `--reimport-noise-source` / `--force-noise-all` control noise artifact work
+  - `daily-access --profile {full,dev,test} [--force] [--allow-missing-transport] [--publish]` → `precompute.daily_access_build.run_daily_access_build()`: v4 tiers; `--publish` runs `precompute.daily_access_publish.publish_daily_access()` (staged rows + PMTiles, switched only after both succeed); refuses `WALK_ROUTING_BACKEND=valhalla` before any work and zero usable GTFS stops without the flag
   - `serve --profile {full,dev,test} [--host] [--port] [--deployment]` → `render_from_db.run_render_from_db(...)`; defaults are `127.0.0.1:8000`; `--deployment` requires the local basemap artifact and assets
 - If no subcommand is supplied, serving is the default path. (Confirmed)
 - `transit` goes through a lightweight transit-only runner instead of importing the full `precompute` package first, emits tracker lines before DB/schema and source-state preflight, reuses a cached OSM extract fingerprint when the local `.osm.pbf` path/size/mtime are unchanged, and can auto-refresh GTFS cache first. (Confirmed)
@@ -536,9 +558,9 @@ Notes:
   - `PARK_TIER_UNITS = {"pocket": 1, "neighbourhood": 2, "district": 3, "regional": 4}`
   - `VARIETY_CLUSTER_RADIUS_M = 25.0`
   - `DISTANCE_DECAY_HALF_DISTANCE_M = {"shops": 150.0, "transport": 250.0, "healthcare": 300.0, "parks": 350.0}`
-  - `TRANSIT_REALITY_ALGO_VERSION = 10`, `AMENITY_MERGE_ALGO_VERSION = 4`, `WALKGRAPH_FORMAT_VERSION = 3`
+  - `TRANSIT_REALITY_ALGO_VERSION = 10`, `AMENITY_MERGE_ALGO_VERSION = 4`, `WALKGRAPH_FORMAT_VERSION = 4` (format 4 adds `walk_graph.edge_flags.bin` u8 per CSR slot, bit 1 = recreation edge, and `walk_graph.components.bin` u32 per node numbered by lowest node index)
   - `FINE_SURFACE_SCHEMA_VERSION = 2`, `PMTILES_SCHEMA_VERSION = 13`, `GRID_GEOMETRY_SCHEMA_VERSION = 4`, `CACHE_SCHEMA_VERSION = 14`
-  - `IMPORTER_CONFIG_VERSION = "2026-08-31-gtfs-only-transport-1"`, `SCORING_MODEL_VERSION = "v3-gtfs-only-transport-rail-proximity-2026-09-25"`
+  - `IMPORTER_CONFIG_VERSION = "2026-10-10-daily-access-v4-import-1"`, `SCORING_MODEL_VERSION = "v3-gtfs-only-transport-rail-proximity-2026-09-25"`
   - `WALK_RADIUS_M = 500`, `TRANSIT_ACCESS_WALK_RADIUS_M = 800`, `TRANSIT_EGRESS_WALK_RADIUS_M = 800`
   - `RAILWAY_PROXIMITY_ACTIVE_MODES = ("rail", "tram")`, full-penalty at 50 m, zero at 200 m, `RAILWAY_PROXIMITY_MAX_PENALTY = 4.0`
   - `ROAD_PROXIMITY_CLASS_SETTINGS`: motorway/trunk/primary with max penalties 4.0 / 3.0 / 2.0
@@ -660,6 +682,52 @@ Notes:
 - Main functions: `classify_amenity_row()`, `annotate_amenity_row()`, `uses_weighted_units()`
 - This file decides tier names stored on amenities and the units consumed by scoring.
 
+#### `precompute/daily_access_classify.py` + `db_postgis/daily_access_green.py` (v4 inputs)
+
+- Purpose: classification to one `service_kind` per row with a quality that is **constant inside the kind** (`DAILY_ACCESS_SERVICE_KINDS`); exclusions carry a reason. v3 scoring never calls it. (Confirmed)
+- Shops: explicit `shop=supermarket` beats the Spar/Centra brand heuristic; brand heuristics apply only to `DAILY_ACCESS_BRAND_AMBIGUOUS_SHOP_VALUES`; kiosk without a food brand is other retail. Medical: GP 1.0, general clinic 0.6, pharmacy 1.0; `healthcare=centre` without speciality qualifies only by a primary/health centre name; explicit speciality beats the name; hospital/dentist/narrow speciality excluded. (Confirmed)
+- Dedupe (`DAILY_ACCESS_CLASSIFICATION_VERSION` 2): raw OSM and Overture rows are classified **one by one before any merge** (the v3 OSM/Overture merge is used only to pick Overture-only green points). `build_logical_places` then groups rows of one *need* only on evidence: a confirmed id (`identity_refs`, e.g. an Overture `sources` OSM record), same normalised name + full address (OSM `addr:housenumber`+`addr:street`, Overture `addresses[0].freeform`; postcodes must agree when both exist), or same name + shared footprint. 25 m only finds candidates; groups are cliques (no A~B~C chaining); unaddressed neighbours stay separate. Canonical kind = strongest evidence (explicit OSM tag > specific Overture category > brand/name heuristic). `place_id` = `<kind>|<sorted namespaced refs>` (`osm:N/1`, `overture:<id>`). (Confirmed)
+- Green: `stage_green_sites` classifies all national `parks` rows in Python (residential garden, `foot` over `access`, garden/recreation_ground need explicit public access), unions touching/overlapping polygons of one semantic type in PostGIS before profile clipping, keeps sites within 2 km of the study area, and resolves nesting roots (container quality ≥ own; ties by site key). `_tmp_daily_green_sites` (EPSG:2157, GiST) stays in the session for the park-approach step. (Confirmed)
+- Classification params are in the v4 reach key (`daily_access_classification_params`). (Confirmed)
+
+#### `precompute/daily_access_{geometry,snap,reach,score,reference}.py` (v4 Python reference)
+
+- Purpose: the reference the Rust port is compared against; not the national production path. (Confirmed)
+- `daily_access_geometry` (`DAILY_ACCESS_GEOMETRY_VERSION` 2): an edge is the straight segment between its two nodes (ITM); position `x` costs `c·x` to `a` and `c·(G-x)` to `b`, `c = L/G` (haversine graph length / metric length). Admissible connector positions = radius-250 m interval minus the exact connector "shadow" of every nearby mask boundary segment (convex → one interval each; no sampling; gaps ≤ `DAILY_ACCESS_INTERVAL_MERGE_M` dropped). Costs are minimised exactly (stationary point `p ∓ c·h/sqrt(1-c²)` clamped to each interval; monotone when `c ≥ 1`). Pieces: `POINT(q,k)` (points, footprint vertices, cells), `LINE(α,β)` (perpendicular connector from a footprint side), `ZERO` (inside a footprint or park). Same edge: `min_x f(x) + min_y(c|x-y| + g(y))`, convex → golden section (`DAILY_ACCESS_SAME_EDGE_ITERATIONS`). Fixed test: G 500, L 498.7, p 249, h 2 → 248.496728 m at x 221.319103 (projection+bounds gives 249.008032). (Confirmed)
+- `daily_access_snap`: `EdgeIndex` (edges = CSR slots with `a < b`, edge id = position), `LandMask` (+ `BoundarySegments`), `point_entries` / `footprint_entries` → per-edge pieces + exact endpoint costs; **every** admissible edge within 250 m is an entry (no nearest-node-per-component). Components (`graph_components`) are diagnostics only. Cell origin = centre on land else `point_on_surface(cell ∩ mask)`. (Confirmed)
+- `daily_access_reach`: exact k-nearest-distinct-label multi-source Dijkstra; seeds = object exits at edge endpoints (connector + along-edge cost), cutoffs 800/1600/2000 m include them; heap `(distance, node, label)`; uint16 0.1 m + uint32 labels. (Confirmed)
+- `daily_access_reference.compute_reference`: per cell and logical id, `min` over node approach + node distance and same-edge direct walks, then quality and curve (green roots merge by max). Labels are real logical ids for every kind (`LabelTable`: uint32 → key → source records; stops `gtfs:<feed>:<stop_id>`). Penalties come from `penalty_fn` at the cell origin. No entry → `no_walking_network`: zero access/components, own penalties. Loss ledger per need, kind, transport and GTFS feed warns at ≥5 %. (Confirmed)
+- `stage_park_approaches` returns `(approaches, intervals, stats)`: seeds as before plus zero-cost same-edge intervals `(edge_id, lo_m, hi_m)` for in-park parts of entering edges and whole in-park edges. Needs the DB; its test runs only with `DAILY_ACCESS_DB_TESTS=1`. (Confirmed)
+
+#### `walkgraph/src/daily_access/` + `precompute/daily_access_native.py` (v4 native path)
+
+- Purpose: production path; mirrors the Python reference (`geometry.rs` = `daily_access_geometry.py`, `snap.rs` = entries + `EdgeGrid`/`BoundaryIndex`). (Confirmed)
+- `daily-access-attach`: cells `(f64 x, f64 y, u8 flags)` + optional `u32` group → `entry_flags.bin` u8, `group_offsets.bin` u64, `group_nodes.bin` u32 (endpoint nodes each group/shard needs), `origins.bin`. Entries are never stored. (Confirmed)
+- `daily-access-objects`: 32-byte object records (`kind u16, flags u8, label u32, x, y, first_ring, ring_count`; rings in `ring_offsets.bin`/`ring_vertices.bin`) → `seeds_<kind index>.bin` (min offset per `(node,label)`) + `reasons.bin` (0 attached, 1 outside mask, 2 no edge within 250 m, 3 no land connector). Kind index = position in `daily_access_native.ALL_KINDS`. (Confirmed)
+- `daily-access-reach`: unchanged (JSON list of kinds, sequential). (Confirmed)
+- `daily-access-score`: one block of cells + reach rows of the block's nodes only + objects near the block (recomputed same-edge pieces) + `park_intervals.bin` + per-cell `f32` penalties → `network_status` u8, `total` u16, `components` u16×4, `penalties` u16×2, `service_access` u16×6 (65535 outside the mask). No `origin_node`. Same-edge pieces are skipped only when they cannot enter a kind's top-k (exact). (Confirmed)
+- Parity (`tests/test_daily_access_native.py`, 2 304 synthetic cells with long edges, footprints, an in-park edge, a bay and penalties): zero differences in status, reach codes, ids, access, components, penalties and totals. Tolerances in `PARITY_LIMITS` (0.1 m step, 0.0005 access, 0.02 component, 0.03 total). Real data (`scripts/daily_access_verify_shards.py --profile test`, 2026-10-23): 207 Cork cells incl. 7 control points, zero mismatches, label table equal to the reference (~5 min; the reference uses the same exact same-edge top-k pruning as Rust, without it the run did not finish in 49 min). Since 2026-10-27 the script verifies one published build key and its pinned source identities without refreshing GTFS; sampling is deterministic per shard and O(shards + sample) memory instead of one tuple per national land cell. (Confirmed; the new verifier has not yet been rerun on national real data.)
+
+#### `precompute/daily_access_build.py` (v4 build driver)
+
+- `python main.py daily-access --profile X [--force] [--allow-missing-transport] [--publish]`. `resolve_build_context` is used by build/publish. Verification deliberately does **not** call it: `precompute.daily_access_verify.load_verification_snapshot` resolves an explicit/latest published v4 build and its pinned identities without rebuilding transit reality. (Confirmed)
+- Keys: shell ← geo hash + graph + mask identity (sha of the mask WKB) + `daily_access_geometry_params` + shell version; reach ← shell + inputs (import, transit reality, Overture signature) + geometry + classification + reach version; score ← reach + `daily_access_score_params` (model name/version, weights, curves) + `penalty_params` + score version. `tier_problems` validates only the versions relevant to that tier, so a reach/score format bump does not invalidate geometry-only shell. Weights/curves change only the score key. (Confirmed)
+- Tiers (`manifest.json` `building` → `complete`, model/versions/profile/resolution/quantization/mask identity/bounds/losses): shell/score store per-shard sha256 `shard_files`; reach v3 stores recursive `artifact_files`. `shell_<key>/shards/<id>.npz` contains `land_area_m2`, `valid_land_mask`, `origin_x/y`, flags and `used_nodes`; `reach_<key>/` contains `origins.npy`, active-kind distance u16/label u32 arrays, `kinds.json`, `labels.json`, and `objects/*.bin`; `score_<key>/shards/<id>.npz` contains total/components/penalties/access/status. `surface_tier_problems` checks complete shell/score inventories, links/common identity, checksums, fields, dtypes, dimensions and origins. `reach_tier_problems` checks its exact recursive inventory/checksums, required files, active kinds, array dtype/shape/count contracts and binary record sizes. Build reuse, verifier and publish reject either kind of corruption. (Confirmed, 2026-10-27)
+- Scoring runs in blocks of `DAILY_ACCESS_SCORE_BLOCK_CELLS` (1 M) cells; reach arrays are memory-mapped and only the block's node rows are copied out. Penalties: `CellPenalties` (`RoadPenaltyField` / `RailwayPenaltyField`, unchanged formulas) at the cell origins, batched. Zero usable GTFS stops aborts unless `--allow-missing-transport` (`transport_gate`). (Confirmed)
+- Geometry v2 runs (2026-10-23, 16 GB host): `test` (Cork, 1 shard, 25 968 land cells, 499 without network) ~70 s of compute after a 167 s transit rebuild, Python peak 2.2 GiB. National `dev`: 269 shards, 33.50 M land cells (24.58 M ok, 8.92 M no walking network), 10.09 M reach origins; shell 1 259 s, objects+green 278 s, reach 433 s, score 1 135 s (52 min total); peak Python 2.4 GiB, `daily-access-score` 2.55, `-attach` 2.06, `-reach` 1.74, `-objects` 1.38 GiB; caches reach 2.25 GB, score 63 MB, shell 24 MB; losses <1 % for shops, medical and GTFS (nta 0.42 %, translink 0.27 %), green 48 % (`unknown_access`: parks no walk edge enters). Cork control cells are identical in `test` and `dev` (bbox-independent). Islands (Achill, Cobh/Great Island) are outside the main-island mask. (Confirmed)
+- Park approaches subdivide polygons/outlines (`ST_Subdivide` 256) before joining edges: the un-subdivided national query ran >12 h, the subdivided one ~5 min. (Confirmed)
+- Switching profiles rebuilds transit reality (v3 behaviour: only the latest reality is kept), which changes the reach/score keys of the other profile. (Confirmed)
+
+#### `precompute/daily_access_runtime.py` + `precompute/daily_access_publish.py` (v4 runtime and publish)
+
+- `DailyAccessSurfaceRuntime`: inspect reads the 50 m cell from the score shard; with `zoom` it also returns the visible cell of the profile's ladder (`resolution_for_zoom(..., profile=)`) as land-weighted means of the stored values (total, components, penalties and access averaged independently; no curve/top-3 reapplied; no-network land counts as zero; water excluded; status = `ok`/`partial`/`no_walking_network` + `network_coverage_share`). Without zoom `visible` is null. PNG tiles aggregate only the requested `channel` (`?channel=` on `/tiles/surface/...png`). Byte-bounded caches: shell 64 MiB, score 128 MiB, aggregates 64 MiB. (Confirmed)
+- `publish_daily_access`: complete tiers only (`check_publishable`), transport re-checked from the reach ledger; coarse grid values and fine vector/PNG values come from v4 score shards. `display_layers.prepare_display_layers` prepares POI, transport, service deserts and summary from current inputs without any published v3 build or `_STATE`. Build identity includes `DISPLAY_LAYERS_VERSION` (2: pinned verifier identity) and the selected noise artifact hash; `point_layers_prepared` replaces the old copied-layer report, and summary records `display_layers` provenance/counts plus graph/tier paths and OSM/GTFS/Overture fingerprints. Rows (including noise) are staged under `<config_hash>~daily-access-v4-staging`; archives are baked and stamped before the existing DB/file switch. Active identical build rows are reused on rerun, and reselected after a successful rebake; failed candidates only clean up staging rows. (Confirmed, 2026-10-27)
+- `display_layers`: preserves current display categories/tiers via source loading, OSM/Overture merge and `annotate_amenity_row`, without v3 scoring/clustering. `BuildContext` retains transit state/date/windows. `service_deserts.compute_service_desert_rows` is shared with the v3 wrapper: nearest-node walk access at `WALK_RADIUS_M`, baseline GTFS-direct stops >0 and public departures over 7 days ==0. v4 uses its own graph/coarse cells and excludes national stops outside the regional reach area before snapping. Landuse, road/rail metadata and Overture metadata are read from current inputs; errors propagate. Empty POI/landuse/deserts are valid. (Confirmed)
+- Noise at v4 publish is reuse-only: select a completed mode-matching resolved artifact via SQL; `full` always requires accurate, dev/test may disable a missing artifact with a warning. Common DB copy/summary helpers materialize `noise_polygons`, then `bake_noise_pmtiles` creates the separate stamped archive. No raw noise reads or ingest; no score changes. (Confirmed)
+- Runtime (`serve_from_db.RuntimeService`): `summary_json.scoring_model == "daily-access-v4"` → `/api/runtime` reports `scoring_model`, `legacy_fields_unavailable`, `daily_access`; `/api/inspect` comes from the shards and works in `dev`. `_daily_access_state` validates every shell/score shard, checksum and paired dimensions before setting `inspect_ready`; this occurs on state load/build change, not per tile. Profiles with fine resolutions get fine vector cells and fine PNGs from the v4 shards. Noise remains a separate display-only archive. (Confirmed)
+- Remaining deployment caveats (2026-10-27): runtime selection still uses local extract path/config hashes, and published graph/shell/reach/score paths are machine-local. Reach checksums run during build reuse/publish/verifier, not per HTTP request; runtime inspect needs only validated shell/score. DB and archive replacement are separate, and concurrent publishers are not coordinated across the whole bake/switch. See `docs/V4_RELEASE_PLAN.md`; portable/atomic deployment is not implemented. (Confirmed by code inspection)
+- `test` run (Cork, 2026-10-10): 25 968 valid cells (25 466 ok, 502 no walking network), ~2.5 min cold incl. transit rebuild, 16 s cached; 3 000 sampled cells identical to the reference; 14 Lough Mahon band cells lost their only component to the land check (e.g. inside the Dunkettle interchange). Green: 204/340 sites unattached (203 `unknown_access`). The Lee inside Cork city is land in the mask, so connectors may cross it (spec-accepted limitation). (Confirmed)
+
 #### `precompute/publish.py` + `precompute/_rows.py`
 
 - Purpose: published row builders (walk, amenity, noise), summary JSON assembly, and row-shaping helpers. (Confirmed)
@@ -725,7 +793,8 @@ Notes:
 
 - Purpose: raw OSM import via `osm2pgsql` using the Lua tag filter; publishes `osm_raw.features` + `osm_raw.import_manifest`. (Confirmed)
 - Main functions: `ensure_local_osm_import`, `resolve_source_state` (adds GTFS refresh, flat-node pruning, `docker` compose source download) | `local_osm_import/orchestrator.py`, `osm2pgsql.py`, `rules.py`. (Confirmed)
-- The Lua file filters parks, landuse, and roads. It contains **no transport/`bus_stop`/`railway` handling** and no GTFS strings — adding transport tags there would be dead code. (Confirmed)
+- The Lua file assigns one category per object in priority order **healthcare** (`amenity` medical values or any `healthcare=*`) → **shops** → **parks/green** (`leisure` park/playground/nature_reserve/garden/common/village_green/recreation_ground, `landuse` village_green/recreation_ground, `boundary=national_park`) → **landuse** context; plus a separate `roads` table. It contains **no transport/`bus_stop`/`railway` handling** and no GTFS strings — adding transport tags there would be dead code. (Confirmed)
+- v3 scoring does not see the v4 import changes: `load_source_amenity_rows` re-derives the pre-v4 category per row (`legacy_v3_amenity_category`: shop first, legacy park/medical values only) and drops v4-only rows (`excluded_v4_only_osm_rows`). (Confirmed)
 - `IMPORTER_CONFIG_VERSION` is part of `importer_config_hash()` (which hashes the Lua path + content), so Lua edits invalidate import-derived caches. (Confirmed)
 
 ### 6.6 Database layer
@@ -748,7 +817,7 @@ Notes:
 #### `db_postgis/reads.py`
 
 - Purpose: runtime + scoring read paths. (Confirmed)
-- Key symbols: `load_source_amenity_rows` (category filter + GTFS append), `load_transport_reality_rows_for_scoring`, `load_transport_reality_points`, `load_road_rows` (highway filter), `load_landuse_context_rows`, `_AMENITY_CATEGORY_VALUES = {"shops","healthcare","parks"}` (transport is deliberately excluded).
+- Key symbols: `load_source_amenity_rows` (category filter + legacy v3 category + GTFS append), `load_daily_access_source_rows` (v4: v4 categories, tags, `footprint_wkb` for polygon shops), `load_transport_reality_rows_for_scoring`, `load_transport_reality_points`, `load_road_rows` (highway filter), `load_landuse_context_rows`, `_AMENITY_CATEGORY_VALUES = {"shops","healthcare","parks"}` (transport is deliberately excluded).
 
 #### `db_postgis/writes.py`, `write_transit.py`, `write_noise.py`, `write_common.py`, `common.py`
 
@@ -1057,8 +1126,9 @@ tests/test_basemap.py
 | `VALHALLA_WORKERS` | Bounded Valhalla matrix-request concurrency | `8` |
 | `VALHALLA_TIMEOUT_S` | Per-request Valhalla timeout | `30.0` |
 | `VALHALLA_MAX_TARGETS_PER_REQUEST` | Matrix target batch size | `100` |
-| `LIVABILITY_SURFACE_THREADS` | Fine-surface worker thread count | unset → all CPUs |
-| `LIVABILITY_BAKE_WORKERS` | PMTiles bake worker count | `min(12, cpu_count())` |
+| `LIVABILITY_SURFACE_THREADS` | Fine-surface worker thread count | unset → physical CPUs clamped to 2–6; explicit value overrides the clamp |
+| `LIVABILITY_BAKE_WORKERS` | PMTiles bake worker count (tasks are one tile up to z10, then 4x larger per zoom up to 512) | `min(32, cpu_count())` |
+| `LIVABILITY_FINE_BAKE_WORKERS` | Cap on bake workers when the fine grid is baked (each holds shard caches) | `4` |
 | `LIVABILITY_FINE_RASTER_SURFACE` | Enable inspect-backed fine surface caches + legacy PNG endpoint | `"1"` |
 | `LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME` | Allow stale-manifest dev fallback in the runtime server | `0` |
 | `LIVABILITY_MIGRATE_LEGACY_REACH_CACHE` | Convert legacy pickle/gzip reachability caches | `0` |
@@ -1093,7 +1163,7 @@ tests/test_basemap.py
 |---|---|
 | `config.py` | Canonical project config |
 | `alembic.ini` | Alembic runner config |
-| `osm2pgsql_livability.lua` | OSM tag filter / import rules (no transport tags) |
+| `osm2pgsql_livability.lua` | OSM tag filter / import rules (no transport tags; healthcare > shops > green > landuse) |
 | `environment.yml` | Conda-forge Windows GDAL/PostGIS runtime spec (`livability-gdal`) |
 | `requirements.txt` | Python dependencies |
 | `.env.example` | Local env template (GTFS block documents feeds + the publish gate) |
@@ -1117,6 +1187,8 @@ tests/test_basemap.py
 | `gtfs status` / `gtfs refresh` | network access to configured GTFS ZIP URLs (unless local-only paths are configured) |
 | `transit` | cached GTFS ZIP(s) by default; add `--auto-refresh-gtfs` / `--force-gtfs-refresh` to download/update feeds, and a compiled `walkgraph` with `gtfs-refresh` |
 | `precompute` | managed schema, raw import ready or `--auto-refresh-import`, preferred `ireland_main_island_shp` coastline or fallback boundaries, compiled `walkgraph`, and GTFS transport rows (or `--allow-missing-transport`) |
+| `daily-access --publish` | completed OSM import, current GTFS snapshot, walkgraph + v4 tiers; no v3 build required. Full needs a prepared accurate noise artifact; dev/test can disable missing noise. |
+| `scripts/daily_access_verify_shards.py` | a **published** current-format v4 build for the profile (or `--build-key`), its local graph/tier paths, pinned OSM import + transit rows in PostGIS, and the matching Overture file; it never refreshes GTFS. |
 | `serve` | completed precompute build + main PMTiles archive for the chosen profile; noise PMTiles optional; `--deployment` additionally requires the basemap archive and vendored assets |
 | Overture merge | `overture/ireland_places.geoparquet` present; otherwise degrades gracefully |
 | Noise overlay | `noise_datasets/*.zip` present; ROI Round 4 road requires `pyogrio`/GDAL FileGDB support |
@@ -1142,7 +1214,10 @@ tests/test_basemap.py
 - `config.resolution_for_zoom()` is not `pmtiles_bake_worker._resolution_for_zoom()`.
 - `HASHES = build_config_hashes()` runs at import time and silently tolerates missing files by hashing zero-like metadata (renaming an input can therefore reuse caches instead of failing).
 - `_STATE = _BuildState.bootstrap()` also runs at import time and is invalid until activation.
-- `transit_derived.service_desert_cells` has a foreign key to `build_manifest`; desert rows are written after `publish_precomputed_artifacts()` inserts the manifest row for the same `build_key`.
+- `transit_derived.service_desert_cells` has a foreign key to `build_manifest`; desert rows are written after `publish_precomputed_artifacts()` inserts the manifest row for the same `build_key`. v4 computes deserts directly into its staged public `service_deserts` rows through the shared helper; it does not read a v3 desert build.
+- v4 publish requires explicit transit state matching the score fingerprint and derives display rows even on cached runs. Full requires a prepared accurate noise artifact; `daily-access` never invokes raw noise ingest or v3 precompute.
+- The v4 shard verifier now targets a published build, not whatever inputs are current today. Publications from before `DISPLAY_LAYERS_VERSION=2` lack pinned verification identity and must be republished before `daily_access_verify_shards.py` will accept them.
+- `DAILY_ACCESS_REACH_CACHE_VERSION=3` adds a mandatory reach file inventory. Existing v2 reach and dependent score directories are intentionally rebuilt once, while the geometry-only shell remains reusable; copying a manifest forward without rebuilding is invalid.
 - `extract_fingerprint()` caches the `.osm.pbf` content hash in `.livability_cache/osm_extract_fingerprint_cache.json`, keyed by resolved path + size + `mtime_ns`. Deleting/corrupting it only costs startup time.
 - `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` has a non-zero live default even though the nearby comment still says "default 0 = disabled". Trust the constant.
 - `overture/ireland_places.geoparquet`, `ireland_main_island_shp/*`, `boundaries/*.geojson`, `gtfs/*.zip`, `noise_datasets/*` are external inputs, not committed assets.
@@ -1179,6 +1254,9 @@ tests/test_basemap.py
 | `tests/test_precompute_cache.py` | tier cache read/write/invalidation helpers |
 | `tests/test_mode_aware_scoring.py` | mode-aware weighted payloads and score-hash invalidation for mode weights |
 | `tests/test_amenity_tiers.py` | shop / healthcare / park tier classification |
+| `tests/test_daily_access_geometry.py` | v4 edge kernel: fixed counterexample (248.496728 m vs 249.008032 m), `c ≥ 1` and degenerate edges, interval closure/merge, coastal shadows vs dense shapely sampling, two admissible intervals around a bay, same-edge vs 2-D brute force, footprint distance vs shapely, point ≠ polygon |
+| `tests/test_daily_access_reference.py` | v4 curves/top-3/maxima/quantisation, k-distinct-label Dijkstra brute force, entries on every admissible edge, sea connector, the three component-variant counterexamples (connecting edge, mid-edge cell, added stop keeps the shop), split edges keep distances/scores, penalties at the cell origin are node-count invariant, same-edge direct walk, one object through many entries, logical ids for every kind, no-network/partial/coastal cells, far bbox changes, in-park edge interval, green roots by max, subdivided-graph Dijkstra harness; PostGIS park approaches with `DAILY_ACCESS_DB_TESTS=1` |
+| `tests/test_daily_access_classify.py` | v4 shop/medical/green classification, access rules, area classes, nesting roots, evidence dedupe (two shops stay two, GP ≠ pharmacy, OSM/Overture name+address, name+footprint, confirmed id, no chaining, reproducible ids), shop connector; PostGIS union/nesting test runs only with `DAILY_ACCESS_DB_TESTS=1` (rolled back) |
 | `tests/test_overture_loader.py` | Overture category filtering and park handling |
 | `tests/test_osm_import_handling.py` | osm2pgsql wrapper, import manifest behavior, Lua/SQL expectations |
 | `tests/test_local_osm_rules.py` | Lua/importer rule mapping |
@@ -1187,6 +1265,12 @@ tests/test_basemap.py
 | `tests/test_transit_refresh_runner.py` | lightweight transit CLI path behavior |
 | `tests/test_gtfs_download.py` | conditional requests, atomic replacement, manifest/freshness validation |
 | `tests/test_network_loader.py` | walkgraph graph index loading |
+| `tests/test_daily_access_build.py` | v4 build: Valhalla refused before work, key chain (weights only change score), exact GEOS land areas, reach cache keeps real ids, CLI incl. `--publish`, zero-GTFS gate, incomplete/corrupt shards rejected, reach missing/checksum/shape failures, synthetic shell→reach→score blocks equal the reference cold and from the disk cache (same ids) |
+| `tests/test_daily_access_verify.py` | bounded deterministic per-shard sampling, population cap, pinned published build identity, legacy identity rejection, and proof that snapshot resolution does not invoke transit refresh |
+| `tests/test_daily_access_runtime.py` | v4 runtime: inspect from shards, visible cell land-weighted means, PNG per channel, byte-bounded caches, coarse rows with real components, dev inspect without fine tiles, publish checks, failed bake keeps the active build, switch only after a verified archive |
+| `tests/test_daily_access_display.py` | stateless source preparation, selected GTFS snapshot/date, repeatable cached preparation, valid empty layers, missing GTFS/source failures, strict full accurate noise gate, regional stop filtering, shared service-desert cases |
+| `tests/test_daily_access_publish_db.py` | opt-in `DAILY_ACCESS_PUBLISH_DB_TESTS=1`: creates and drops a uniquely named disposable DB (requires CREATEDB), applies Alembic, uses fixture inputs with profile test; real CLI/cache publication, SQL/MVT/PMTiles, no v3 build, stale v3 isolation/reselection, noise artifact copy+bake, API/inspect, unchanged scores, repeat/failure safety. Never modifies the configured source DB. |
+| `tests/test_daily_access_native.py` | Python reference vs `walkgraph daily-access-*` on a synthetic format-4 graph (long edges, footprints, in-park edge, bay, cell penalties, green roots): statuses, reach codes/ids, losses, access, components, penalties and totals within `PARITY_LIMITS` (observed: exact); skipped when the binary lacks the subcommands |
 | `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier`, road/rail score fields, bounded parallel scheduling, retry, temp-output cleanup, archive preservation, streamed noise tile specs |
 | `tests/test_fine_vector_pmtiles_worker.py` | fine-grid shard aggregation, degenerate-ring rejection, per-zoom resolutions, mixed z15, invalid-land skipping, buffered continuity, bounded LRU caches |
 | `tests/test_surface_runtime.py` | fine-surface runtime behavior and atomic PNG cache writes |

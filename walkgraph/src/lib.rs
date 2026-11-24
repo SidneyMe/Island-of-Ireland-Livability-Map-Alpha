@@ -1,3 +1,4 @@
+pub mod daily_access;
 pub mod graph;
 pub mod gtfs;
 pub mod haversine;

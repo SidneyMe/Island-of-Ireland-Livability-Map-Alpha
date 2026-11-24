@@ -53,7 +53,7 @@ TRANSIT_RAW_SCHEMA = "transit_raw"
 TRANSIT_DERIVED_SCHEMA = "transit_derived"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
 OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
-IMPORTER_CONFIG_VERSION = "2026-08-31-gtfs-only-transport-1"
+IMPORTER_CONFIG_VERSION = "2026-10-10-daily-access-v4-import-1"
 
 
 def _osm2pgsql_flat_nodes_path() -> str:
@@ -185,7 +185,7 @@ def _default_walkgraph_bin() -> str:
 
 
 WALKGRAPH_BIN = os.getenv("WALKGRAPH_BIN", _default_walkgraph_bin())
-WALKGRAPH_FORMAT_VERSION = 3
+WALKGRAPH_FORMAT_VERSION = 4
 
 
 def _walk_routing_backend_env() -> str:
@@ -439,15 +439,20 @@ COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2 = _non_negative_float_env(
 )
 
 # Worker count for the parallel PMTiles bake in precompute.bake_pmtiles.
-# 1 = sequential (original behaviour). Default = min(12, cpu_count()).
+# 1 = sequential (original behaviour). Default = min(32, cpu_count()); each
+# worker holds one PostGIS connection, so the cap stays well below the
+# default max_connections=100.
 def _default_bake_pmtiles_workers() -> int:
     cpu = os.cpu_count() or 1
-    return max(1, min(12, cpu))
+    return max(1, min(32, cpu))
 
 
 BAKE_PMTILES_WORKERS = _positive_int_env(
     "LIVABILITY_BAKE_WORKERS", _default_bake_pmtiles_workers()
 )
+# Fine-grid bake workers each hold shard LRU caches, so they stay capped at 4
+# by default (laptop RAM); raise on large-memory build hosts.
+FINE_GRID_BAKE_WORKER_CAP = _positive_int_env("LIVABILITY_FINE_BAKE_WORKERS", 4)
 
 
 SCORING_MODEL_VERSION = "v3-gtfs-only-transport-rail-proximity-2026-09-25"
@@ -557,6 +562,228 @@ OVERTURE_PARK_NEIGHBOURHOOD_VALUES = frozenset(
     {"park", "recreation_ground"}
 )
 OVERTURE_PARK_REGIONAL_VALUES = frozenset({"nature_reserve", "national_park"})
+
+# --- Daily access score (v4) classification -------------------------------
+# Quality is constant inside a service_kind: nearest-candidate search per kind
+# is only correct under that invariant. Classified by
+# precompute/daily_access_classify.py; green sites by
+# db_postgis/daily_access_green.py.
+# 2: per-row classification of raw OSM/Overture rows, then evidence-based
+# (non-chaining) duplicate grouping instead of 25 m connected components.
+DAILY_ACCESS_CLASSIFICATION_VERSION = 2
+DAILY_ACCESS_SERVICE_KINDS = {
+    # service_kind: (need, quality)
+    "food_full": ("food", 1.00),
+    "food_convenience": ("food", 0.65),
+    "food_specialty": ("food", 0.35),
+    "other_retail": ("other_retail", 1.00),
+    "primary_care_gp": ("primary_care", 1.00),
+    "primary_care_clinic": ("primary_care", 0.60),
+    "pharmacy": ("pharmacy", 1.00),
+    "green_playground": ("green", 0.40),
+    "green_pocket": ("green", 0.60),
+    "green_neighbourhood": ("green", 0.85),
+    "green_large": ("green", 1.00),
+}
+# Existing GTFS score tiers 1..5 -> stop quality.
+DAILY_ACCESS_TRANSPORT_TIER_QUALITY = {1: 0.15, 2: 0.30, 3: 0.50, 4: 0.75, 5: 1.00}
+DAILY_ACCESS_DEDUPE_RADIUS_M = 25.0
+DAILY_ACCESS_EXCLUDED_SHOP_VALUES = frozenset(
+    {
+        "vacant", "disused", "abandoned", "construction", "proposed",
+        "car", "car_repair", "car_parts", "motorcycle", "motorcycle_repair",
+        "boat", "funeral_directors",
+    }
+)
+DAILY_ACCESS_SPECIALTY_FOOD_SHOP_VALUES = frozenset(
+    {
+        "bakery", "butcher", "greengrocer", "seafood", "fishmonger", "dairy",
+        "cheese", "delicatessen", "farm", "organic", "health_food", "food",
+    }
+)
+# Shop values whose food role is decided by the existing brand heuristics
+# (SHOP_SUPERMARKET_CHAINS -> full, SHOP_CORNER_CHAINS -> convenience).
+DAILY_ACCESS_BRAND_AMBIGUOUS_SHOP_VALUES = frozenset(
+    {"yes", "general", "kiosk", "variety_store", "department_store", "grocery"}
+)
+DAILY_ACCESS_OVERTURE_FOOD_FULL_VALUES = frozenset({"supermarket"})
+DAILY_ACCESS_OVERTURE_FOOD_CONVENIENCE_VALUES = frozenset({"convenience_store", "grocery"})
+DAILY_ACCESS_OVERTURE_FOOD_SPECIALTY_VALUES = frozenset({"bakery", "food_and_beverage"})
+DAILY_ACCESS_OVERTURE_BRAND_AMBIGUOUS_VALUES = frozenset(
+    {"retail", "shopping", "grocery", "food_and_beverage"}
+)
+DAILY_ACCESS_GENERAL_SPECIALITIES = frozenset(
+    {"general", "general_practice", "family_medicine", "family_practice", "gp"}
+)
+# Broad values that are not a narrow speciality either.
+DAILY_ACCESS_NON_NARROW_SPECIALITIES = frozenset(
+    {"medical", "community", "community_health", "public_health"}
+)
+DAILY_ACCESS_PRIMARY_CENTRE_NAME_PATTERN = (
+    r"\b(?:primary (?:health )?care|health) cent(?:re|er)\b"
+)
+DAILY_ACCESS_SPECIALISED_NAME_TERMS = (
+    "mental", "dental", "sexual", "addiction", "psychiatric",
+    "physiotherapy", "rehabilitation",
+)
+DAILY_ACCESS_GREEN_FIXED_QUALITY = {
+    "playground": 0.40,
+    "nature_reserve": 1.00,
+    "national_park": 1.00,
+}
+DAILY_ACCESS_GREEN_UNKNOWN_AREA_QUALITY = 0.60
+# (exclusive upper area bound m2, quality); larger areas are district/regional.
+DAILY_ACCESS_GREEN_AREA_CLASSES = (
+    (5_000.0, "pocket", 0.60),
+    (50_000.0, "neighbourhood", 0.85),
+    (250_000.0, "district", 1.00),
+)
+DAILY_ACCESS_GREEN_LARGEST_AREA_CLASS = ("regional", 1.00)
+DAILY_ACCESS_GREEN_DENIED_ACCESS_VALUES = frozenset({"private", "no", "customers"})
+DAILY_ACCESS_GREEN_PUBLIC_ACCESS_VALUES = frozenset({"yes", "public", "permissive"})
+DAILY_ACCESS_GREEN_EXPLICIT_ACCESS_TYPES = frozenset({"garden", "recreation_ground"})
+DAILY_ACCESS_OVERTURE_GREEN_TYPES = {
+    "park": "park",
+    "playground": "playground",
+    "nature_reserve": "nature_reserve",
+    "national_park": "national_park",
+    "recreation_ground": "recreation_ground",
+}
+DAILY_ACCESS_REACH_BUFFER_M = 2_000.0
+
+# --- Daily access score (v4) reach + scoring --------------------------------
+# Reference implementation: precompute/daily_access_{snap,reach,score,reference}.py
+DAILY_ACCESS_WALK_SPEED_M_PER_MIN = 80.0
+DAILY_ACCESS_SNAP_RADIUS_M = 250.0
+DAILY_ACCESS_LAND_BAND_M = 250.0
+DAILY_ACCESS_TOP_K = 3
+# need -> (full contribution up to, zero contribution after) in minutes.
+DAILY_ACCESS_NEED_THRESHOLDS_MIN = {
+    "food": (5.0, 20.0),
+    "other_retail": (5.0, 20.0),
+    "primary_care": (5.0, 20.0),
+    "pharmacy": (5.0, 20.0),
+    "green": (5.0, 25.0),
+    "transport": (3.0, 10.0),
+}
+DAILY_ACCESS_NEEDS = ("food", "other_retail", "primary_care", "pharmacy", "green", "transport")
+DAILY_ACCESS_TOP3_WEIGHTS = (0.80, 0.15, 0.05)
+DAILY_ACCESS_CATEGORY_MAX = {"shops": 35.0, "transport": 30.0, "healthcare": 20.0, "parks": 15.0}
+DAILY_ACCESS_SHOP_MIX = {"food": 0.90, "other_retail": 0.10}
+DAILY_ACCESS_HEALTHCARE_MIX = {"primary_care": 0.60, "pharmacy": 0.40}
+# Search cutoffs (object connector included): the zero-contribution distance.
+DAILY_ACCESS_SEARCH_CUTOFF_M = {
+    need: zero_min * DAILY_ACCESS_WALK_SPEED_M_PER_MIN
+    for need, (_full_min, zero_min) in DAILY_ACCESS_NEED_THRESHOLDS_MIN.items()
+}
+DAILY_ACCESS_DISTANCE_STEP_M = 0.1
+DAILY_ACCESS_DISTANCE_MISSING = 65535
+DAILY_ACCESS_SCORE_STEP = 0.01
+DAILY_ACCESS_ACCESS_STEP = 0.0001
+DAILY_ACCESS_UINT16_MISSING = 65535
+DAILY_ACCESS_LIMITED_ACCESS_THRESHOLD = 0.5
+# National-park approaches only use these highway classes (sidewalk/crossing excluded).
+DAILY_ACCESS_RECREATION_HIGHWAYS = ("path", "footway", "track", "bridleway", "steps")
+DAILY_ACCESS_EDGE_FLAG_RECREATION = 1
+# Geometric attachment + reach algorithm (precompute/daily_access_geometry.py,
+# walkgraph/src/daily_access/geometry.rs). 2: entries anywhere on an edge
+# (exact minimum over land-admissible intervals), per-object shortest path
+# over every admissible entry/exit, no per-component variants.
+DAILY_ACCESS_GEOMETRY_VERSION = 2
+# Score model: weights, curves and per-cell penalties (cell origin, not node).
+DAILY_ACCESS_SCORE_MODEL = "daily-access-v4"
+DAILY_ACCESS_SCORE_MODEL_VERSION = 2
+# v4 build artifacts under .livability_cache/daily_access (precompute/daily_access_build.py).
+# shell 2: origins, entry flag and used nodes per shard (no attachments);
+# reach 2: real logical ids for every kind + label table; score 2: no
+# origin_node, penalties at the cell origin.
+DAILY_ACCESS_SHELL_SHARD_VERSION = 2
+DAILY_ACCESS_REACH_CACHE_VERSION = 3
+DAILY_ACCESS_SCORE_SHARD_VERSION = 2
+# Golden-section iterations for the same-edge (cell and object on one edge) minimum.
+DAILY_ACCESS_SAME_EDGE_ITERATIONS = 64
+# Blocked connector intervals closer than this are one interval (float noise
+# at shared coastline vertices must not open a sliver across the water).
+DAILY_ACCESS_INTERVAL_MERGE_M = 1e-7
+# Cells per native score call: temporary arrays scale with this, not the country.
+DAILY_ACCESS_SCORE_BLOCK_CELLS = 1_000_000
+# Runtime caches (bytes) for the v4 surface runtime.
+DAILY_ACCESS_RUNTIME_SHELL_CACHE_BYTES = 64 * 2**20
+DAILY_ACCESS_RUNTIME_SCORE_CACHE_BYTES = 128 * 2**20
+DAILY_ACCESS_RUNTIME_AGGREGATE_CACHE_BYTES = 64 * 2**20
+# Graph nodes are float32 lat/lon; closer than this to a park outline is not inside.
+DAILY_ACCESS_PARK_BOUNDARY_TOLERANCE_M = 1.0
+
+
+def daily_access_classification_params() -> dict[str, Any]:
+    """Everything that changes v4 classification or site grouping (reach hash)."""
+    return {
+        "version": DAILY_ACCESS_CLASSIFICATION_VERSION,
+        "service_kinds": {kind: list(value) for kind, value in DAILY_ACCESS_SERVICE_KINDS.items()},
+        "transport_tier_quality": DAILY_ACCESS_TRANSPORT_TIER_QUALITY,
+        "dedupe_radius_m": DAILY_ACCESS_DEDUPE_RADIUS_M,
+        "excluded_shop_values": sorted(DAILY_ACCESS_EXCLUDED_SHOP_VALUES),
+        "specialty_food_shop_values": sorted(DAILY_ACCESS_SPECIALTY_FOOD_SHOP_VALUES),
+        "brand_ambiguous_shop_values": sorted(DAILY_ACCESS_BRAND_AMBIGUOUS_SHOP_VALUES),
+        "shop_supermarket_chains": sorted(SHOP_SUPERMARKET_CHAINS),
+        "shop_corner_chains": sorted(SHOP_CORNER_CHAINS),
+        "overture_food_full_values": sorted(DAILY_ACCESS_OVERTURE_FOOD_FULL_VALUES),
+        "overture_food_convenience_values": sorted(DAILY_ACCESS_OVERTURE_FOOD_CONVENIENCE_VALUES),
+        "overture_food_specialty_values": sorted(DAILY_ACCESS_OVERTURE_FOOD_SPECIALTY_VALUES),
+        "overture_brand_ambiguous_values": sorted(DAILY_ACCESS_OVERTURE_BRAND_AMBIGUOUS_VALUES),
+        "general_specialities": sorted(DAILY_ACCESS_GENERAL_SPECIALITIES),
+        "non_narrow_specialities": sorted(DAILY_ACCESS_NON_NARROW_SPECIALITIES),
+        "primary_centre_name_pattern": DAILY_ACCESS_PRIMARY_CENTRE_NAME_PATTERN,
+        "specialised_name_terms": list(DAILY_ACCESS_SPECIALISED_NAME_TERMS),
+        "green_fixed_quality": DAILY_ACCESS_GREEN_FIXED_QUALITY,
+        "green_unknown_area_quality": DAILY_ACCESS_GREEN_UNKNOWN_AREA_QUALITY,
+        "green_area_classes": [list(item) for item in DAILY_ACCESS_GREEN_AREA_CLASSES],
+        "green_largest_area_class": list(DAILY_ACCESS_GREEN_LARGEST_AREA_CLASS),
+        "green_denied_access_values": sorted(DAILY_ACCESS_GREEN_DENIED_ACCESS_VALUES),
+        "green_public_access_values": sorted(DAILY_ACCESS_GREEN_PUBLIC_ACCESS_VALUES),
+        "green_explicit_access_types": sorted(DAILY_ACCESS_GREEN_EXPLICIT_ACCESS_TYPES),
+        "overture_green_types": DAILY_ACCESS_OVERTURE_GREEN_TYPES,
+        "reach_buffer_m": DAILY_ACCESS_REACH_BUFFER_M,
+        "snap_radius_m": DAILY_ACCESS_SNAP_RADIUS_M,
+        "land_band_m": DAILY_ACCESS_LAND_BAND_M,
+        "top_k": DAILY_ACCESS_TOP_K,
+        "search_cutoff_m": DAILY_ACCESS_SEARCH_CUTOFF_M,
+        "distance_step_m": DAILY_ACCESS_DISTANCE_STEP_M,
+        "recreation_highways": list(DAILY_ACCESS_RECREATION_HIGHWAYS),
+        "park_boundary_tolerance_m": DAILY_ACCESS_PARK_BOUNDARY_TOLERANCE_M,
+    }
+
+
+def daily_access_geometry_params() -> dict[str, Any]:
+    """Everything that changes v4 entries, exits or reach (not weights)."""
+    return {
+        "version": DAILY_ACCESS_GEOMETRY_VERSION,
+        "snap_radius_m": DAILY_ACCESS_SNAP_RADIUS_M,
+        "land_band_m": DAILY_ACCESS_LAND_BAND_M,
+        "top_k": DAILY_ACCESS_TOP_K,
+        "search_cutoff_m": DAILY_ACCESS_SEARCH_CUTOFF_M,
+        "distance_step_m": DAILY_ACCESS_DISTANCE_STEP_M,
+        "same_edge_iterations": DAILY_ACCESS_SAME_EDGE_ITERATIONS,
+        "interval_merge_m": DAILY_ACCESS_INTERVAL_MERGE_M,
+    }
+
+
+def daily_access_score_params() -> dict[str, Any]:
+    """Weights and curves of the daily access score (score hash)."""
+    return {
+        "model": DAILY_ACCESS_SCORE_MODEL,
+        "model_version": DAILY_ACCESS_SCORE_MODEL_VERSION,
+        "walk_speed_m_per_min": DAILY_ACCESS_WALK_SPEED_M_PER_MIN,
+        "need_thresholds_min": {need: list(value) for need, value in DAILY_ACCESS_NEED_THRESHOLDS_MIN.items()},
+        "top3_weights": list(DAILY_ACCESS_TOP3_WEIGHTS),
+        "category_max": DAILY_ACCESS_CATEGORY_MAX,
+        "shop_mix": DAILY_ACCESS_SHOP_MIX,
+        "healthcare_mix": DAILY_ACCESS_HEALTHCARE_MIX,
+        "score_step": DAILY_ACCESS_SCORE_STEP,
+        "access_step": DAILY_ACCESS_ACCESS_STEP,
+    }
+
+
 OUTPUT_HTML = "ireland_livability.html"
 ENABLE_STREET_SEARCH = False
 DEFAULT_SERVER_HOST = "127.0.0.1"
@@ -1194,6 +1421,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "variety_cluster_radius_m": VARIETY_CLUSTER_RADIUS_M,
         "distance_decay_half_distance_m": DISTANCE_DECAY_HALF_DISTANCE_M,
         "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
+        "daily_access_classification": daily_access_classification_params(),
         "overture_category_map_signature": overture_category_signature,
         "overture_dataset_signature": overture_signature,
         "overture_release": overture_info.get("last_release"),
@@ -1213,6 +1441,7 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
     score_params = {
         "reach_hash": reach_hash,
         "scoring_model_version": SCORING_MODEL_VERSION,
+        "daily_access_score": daily_access_score_params(),
         "mode_aware_scoring_enabled": MODE_AWARE_SCORING_ENABLED,
         "mode_aware_score_weights": MODE_AWARE_SCORE_WEIGHTS,
         "bike_radius_m": BIKE_RADIUS_M,
@@ -1399,6 +1628,7 @@ def build_hashes_for_import(
         "variety_cluster_radius_m": VARIETY_CLUSTER_RADIUS_M,
         "distance_decay_half_distance_m": DISTANCE_DECAY_HALF_DISTANCE_M,
         "amenity_merge_algo_version": AMENITY_MERGE_ALGO_VERSION,
+        "daily_access_classification": daily_access_classification_params(),
         "overture_category_map_signature": overture_category_signature,
         "overture_dataset_signature": overture_signature,
         "overture_release": overture_info.get("last_release"),
@@ -1417,6 +1647,7 @@ def build_hashes_for_import(
         {
             "reach_hash": reach_hash,
             "scoring_model_version": SCORING_MODEL_VERSION,
+            "daily_access_score": daily_access_score_params(),
             "mode_aware_scoring_enabled": MODE_AWARE_SCORING_ENABLED,
             "mode_aware_score_weights": MODE_AWARE_SCORE_WEIGHTS,
             "bike_radius_m": BIKE_RADIUS_M,

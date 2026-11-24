@@ -528,6 +528,20 @@ class PmtilesTileSpecIteratorTests(TestCase):
         chunks = list(bake_pmtiles._chunked(range(10), 4))
         self.assertEqual(chunks, [[0, 1, 2, 3], [4, 5, 6, 7], [8, 9]])
 
+    def test_chunked_by_zoom_isolates_low_zoom_tiles_and_never_mixes_zooms(self) -> None:
+        specs = (
+            [(9, x, 0, 1) for x in range(3)]
+            + [(11, x, 0, 1) for x in range(6)]
+            + [(15, x, 0, 1) for x in range(600)]
+        )
+        chunks = list(bake_pmtiles._chunked_by_zoom(iter(specs)))
+
+        self.assertEqual([len(chunk) for chunk in chunks[:3]], [1, 1, 1])
+        self.assertEqual([len(chunk) for chunk in chunks[3:5]], [4, 2])
+        self.assertEqual([len(chunk) for chunk in chunks[5:]], [512, 88])
+        self.assertTrue(all(len({spec[0] for spec in chunk}) == 1 for chunk in chunks))
+        self.assertEqual([spec for chunk in chunks for spec in chunk], specs)
+
 
 class PmtilesBakeReliabilityTests(TestCase):
     def test_bake_parallel_keeps_bounded_in_flight_futures(self) -> None:

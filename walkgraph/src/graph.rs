@@ -48,11 +48,31 @@ pub fn emit_edge_sidecar(
     node_index: &CompactNodeIndex,
     output_path: &Path,
 ) -> Result<EdgeBuildStats, Box<dyn Error>> {
+    emit_edge_sidecar_with_flags(spool_file, None, node_index, output_path, None)
+}
+
+/// Like `emit_edge_sidecar`, also writing one flag byte per *emitted* edge
+/// (edge order) to `flags_output_path` from the parallel flag spool.
+pub fn emit_edge_sidecar_with_flags(
+    spool_file: &File,
+    flag_spool_file: Option<&File>,
+    node_index: &CompactNodeIndex,
+    output_path: &Path,
+    flags_output_path: Option<&Path>,
+) -> Result<EdgeBuildStats, Box<dyn Error>> {
     let mut reader = open_spool_reader(spool_file)?;
     let mut writer = BufWriter::new(File::create(output_path)?);
+    let mut flag_reader = flag_spool_file.map(open_spool_reader).transpose()?;
+    let mut flag_writer = flags_output_path
+        .map(|path| File::create(path).map(BufWriter::new))
+        .transpose()?;
     let mut stats = EdgeBuildStats::default();
 
     while let Some((from_osm, to_osm)) = read_spooled_edge_pair(&mut reader)? {
+        let mut flag = [0_u8; 1];
+        if let Some(flag_reader) = flag_reader.as_mut() {
+            flag_reader.read_exact(&mut flag)?;
+        }
         let Some(&from_index) = node_index.by_osm_id.get(&from_osm) else {
             stats.skipped_missing_nodes += 1;
             continue;
@@ -73,10 +93,16 @@ pub fn emit_edge_sidecar(
         writer.write_all(&from_index.to_le_bytes())?;
         writer.write_all(&to_index.to_le_bytes())?;
         writer.write_all(&length_m.to_le_bytes())?;
+        if let Some(flag_writer) = flag_writer.as_mut() {
+            flag_writer.write_all(&flag)?;
+        }
         stats.emitted_edges += 1;
     }
 
     writer.flush()?;
+    if let Some(flag_writer) = flag_writer.as_mut() {
+        flag_writer.flush()?;
+    }
     Ok(stats)
 }
 
@@ -159,6 +185,88 @@ pub fn emit_adjacency_sidecars(
     write_u32_sidecar(&paths.adjacency_targets_bin, &targets)?;
     write_f32_sidecar(&paths.adjacency_lengths_bin, &lengths)?;
     Ok(())
+}
+
+/// Reorder per-edge flags (edge order, see `emit_edge_sidecar_with_flags`)
+/// into CSR slot order and write `walk_graph.edge_flags.bin`.
+pub fn emit_edge_flag_sidecar(
+    edge_sidecar_path: &Path,
+    edge_flags_by_edge_path: &Path,
+    node_count: usize,
+    output_path: &Path,
+) -> Result<(), Box<dyn Error>> {
+    let mut offsets = vec![0_u64; node_count + 1];
+    let mut reader = BufReader::new(File::open(edge_sidecar_path)?);
+    while let Some((src, _dst, _length_m)) = read_edge_record(&mut reader)? {
+        offsets[(src as usize) + 1] += 1;
+    }
+    for index in 0..node_count {
+        offsets[index + 1] += offsets[index];
+    }
+    let mut positions = offsets[..node_count].to_vec();
+    let mut flags = vec![0_u8; offsets[node_count] as usize];
+
+    let mut reader = BufReader::new(File::open(edge_sidecar_path)?);
+    let mut flag_reader = BufReader::new(File::open(edge_flags_by_edge_path)?);
+    while let Some((src, _dst, _length_m)) = read_edge_record(&mut reader)? {
+        let mut flag = [0_u8; 1];
+        flag_reader.read_exact(&mut flag)?;
+        let slot = positions[src as usize] as usize;
+        flags[slot] = flag[0];
+        positions[src as usize] += 1;
+    }
+    std::fs::write(output_path, &flags)?;
+    Ok(())
+}
+
+/// Undirected component id per node, numbered by each component's lowest
+/// node index (node 0 is always in component 0).
+pub fn node_components(node_count: usize, edges: impl Iterator<Item = (u32, u32)>) -> Vec<u32> {
+    let mut parent: Vec<u32> = (0..node_count as u32).collect();
+    fn find(parent: &mut [u32], mut node: u32) -> u32 {
+        while parent[node as usize] != node {
+            let grand = parent[parent[node as usize] as usize];
+            parent[node as usize] = grand;
+            node = grand;
+        }
+        node
+    }
+    for (a, b) in edges {
+        let root_a = find(&mut parent, a);
+        let root_b = find(&mut parent, b);
+        if root_a != root_b {
+            let (low, high) = if root_a < root_b { (root_a, root_b) } else { (root_b, root_a) };
+            parent[high as usize] = low;
+        }
+    }
+    let mut label_of_root = vec![u32::MAX; node_count];
+    let mut components = vec![0_u32; node_count];
+    let mut next = 0_u32;
+    for node in 0..node_count as u32 {
+        let root = find(&mut parent, node) as usize;
+        if label_of_root[root] == u32::MAX {
+            label_of_root[root] = next;
+            next += 1;
+        }
+        components[node as usize] = label_of_root[root];
+    }
+    components
+}
+
+/// Write `walk_graph.components.bin` (u32 per node) from `walk_graph.edges.bin`.
+pub fn emit_component_sidecar(
+    edge_sidecar_path: &Path,
+    node_count: usize,
+    output_path: &Path,
+) -> Result<u32, Box<dyn Error>> {
+    let mut edges = Vec::new();
+    let mut reader = BufReader::new(File::open(edge_sidecar_path)?);
+    while let Some((src, dst, _length_m)) = read_edge_record(&mut reader)? {
+        edges.push((src, dst));
+    }
+    let components = node_components(node_count, edges.into_iter());
+    write_u32_sidecar(output_path, &components)?;
+    Ok(components.iter().copied().max().map_or(0, |max| max + 1))
 }
 
 #[cfg(test)]

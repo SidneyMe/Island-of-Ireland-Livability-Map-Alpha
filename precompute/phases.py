@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -238,6 +239,44 @@ def _units_by_cell_nodes(
     ]
 
 
+def _start_bike_graph_prebuild(
+    *,
+    source_state,
+    study_area_wgs84,
+    geometry_cache_dir: Path,
+    walkgraph_bin: str,
+) -> tuple[Future, float] | None:
+    """Start the single-threaded bike graph build alongside the walk graph build.
+
+    Returns None on a cache hit. Progress is not streamed from the background
+    thread because the tracker is not thread-safe.
+    """
+    graph_dir = geometry_cache_dir / "bike_graph"
+    bbox = _graph_bbox(study_area_wgs84)
+    if _graph_meta_matches(
+        graph_dir,
+        extract_fingerprint=source_state.extract_fingerprint,
+        bbox=bbox,
+        bbox_padding_m=BIKE_RADIUS_M,
+        graph_profile="bike",
+    ):
+        return None
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bike-graph")
+    started_at = time.perf_counter()
+    future = executor.submit(
+        _run_walkgraph_build,
+        source_state.extract_path,
+        graph_dir,
+        walkgraph_bin=walkgraph_bin,
+        bbox=bbox,
+        bbox_padding_m=BIKE_RADIUS_M,
+        extract_fingerprint=source_state.extract_fingerprint,
+        graph_profile="bike",
+    )
+    executor.shutdown(wait=False)
+    return future, started_at
+
+
 def _build_or_load_bike_graph(
     *,
     source_state,
@@ -245,9 +284,15 @@ def _build_or_load_bike_graph(
     geometry_cache_dir: Path,
     walkgraph_bin: str,
     tracker,
+    prebuild: tuple[Future, float] | None = None,
 ):
     graph_dir = geometry_cache_dir / "bike_graph"
     bbox = _graph_bbox(study_area_wgs84)
+    if prebuild is not None:
+        future, started_at = prebuild
+        tracker.set_live_work("networks", detail="waiting for bike graph")
+        future.result()
+        _record_substep(tracker, "networks", "bike_graph_build", started_at, force_log=True)
     cache_hit = _graph_meta_matches(
         graph_dir,
         extract_fingerprint=source_state.extract_fingerprint,
@@ -1263,6 +1308,18 @@ def phase_grids_impl(
         force_log=True,
     )
 
+    bike_prebuild = None
+    if MODE_AWARE_SCORING_ENABLED and sizes_to_rebuild and _STATE.source_state is not None:
+        try:
+            bike_prebuild = _start_bike_graph_prebuild(
+                source_state=_STATE.source_state,
+                study_area_wgs84=_STATE.study_area_wgs84,
+                geometry_cache_dir=geometry_cache_dir,
+                walkgraph_bin=walkgraph_bin,
+            )
+        except Exception:
+            # The in-line build below reports the failure as it always has.
+            bike_prebuild = None
     walk_graph = phase_networks(engine, tracker)
     railway_proximity_penalties = np.zeros(int(walk_graph.vcount()), dtype=np.float32)
     road_proximity_penalties = np.zeros(int(walk_graph.vcount()), dtype=np.float32)
@@ -1351,6 +1408,7 @@ def phase_grids_impl(
                 geometry_cache_dir=geometry_cache_dir,
                 walkgraph_bin=walkgraph_bin,
                 tracker=tracker,
+                prebuild=bike_prebuild,
             )
             amenity_cluster_rows = cache_load("amenity_clusters", cache_dir)
             if amenity_cluster_rows is None:

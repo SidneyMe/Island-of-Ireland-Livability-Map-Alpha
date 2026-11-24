@@ -215,114 +215,24 @@ def phase_grids(
 def _compute_service_deserts(engine, walk_grids: dict[int, list[dict[str, Any]]]) -> None:
     if _STATE.transit_reality_state is None or _STATE.study_area_metric is None:
         return
+    from .service_deserts import compute_service_desert_rows
+
     walk_graph = load_walk_graph_index(_STATE.geo_cache_dir / "walk_graph")
-    reality_rows = load_transport_reality_points(
-        engine,
-        _STATE.transit_reality_state.reality_fingerprint,
+    reality_rows = load_transport_reality_points(engine, _STATE.transit_reality_state.reality_fingerprint)
+    cell_nodes = {}
+    if any(str(row.get("source_status") or "gtfs_direct") == "gtfs_direct" for row in reality_rows):
+        for resolution, cells in walk_grids.items():
+            snap_key = _phases.walk_cell_nodes_cache_key(int(resolution))
+            nodes = cache_load(snap_key, _STATE.geo_cache_dir)
+            if nodes is None:
+                nodes = snap_cells_to_nodes(walk_graph, cells, snap_key, _STATE.geo_cache_dir)
+            cell_nodes[resolution] = [int(node) for node in nodes]
+    rows = compute_service_desert_rows(
+        walk_graph, walk_grids, reality_rows, hashes=_STATE.hashes,
+        reality_state=_STATE.transit_reality_state, study_area_metric=_STATE.study_area_metric,
+        created_at=datetime.now(timezone.utc), cell_nodes_by_resolution=cell_nodes,
     )
-    if not reality_rows:
-        replace_service_desert_rows(engine, build_key=_STATE.hashes.build_key, desert_rows=[])
-        return
-
-    baseline_rows = [
-        row
-        for row in reality_rows
-        if str(row.get("source_status") or "gtfs_direct") == "gtfs_direct"
-    ]
-    if not baseline_rows:
-        replace_service_desert_rows(engine, build_key=_STATE.hashes.build_key, desert_rows=[])
-        return
-
-    baseline_points = {
-        "transport": [
-            (float(row["geom"].y), float(row["geom"].x))
-            for row in baseline_rows
-        ]
-    }
-    baseline_nodes_by_category = snap_amenities(walk_graph, baseline_points)
-    public_weight_rows: dict[str, list] = {"public_departures_7d": []}
-    if baseline_rows:
-        public_nodes = nearest_nodes(
-            walk_graph,
-            [float(row["geom"].x) for row in baseline_rows],
-            [float(row["geom"].y) for row in baseline_rows],
-        )
-        for row, node in zip(baseline_rows, public_nodes):
-            departures = int(row["public_departures_7d"] or 0)
-            if departures <= 0:
-                continue
-            public_weight_rows["public_departures_7d"].append((int(node), departures))
-
-    walk_cell_nodes_by_size: dict[int, list[int]] = {}
-    for resolution_m, cells in walk_grids.items():
-        snap_key = _phases.walk_cell_nodes_cache_key(int(resolution_m))
-        cached_nodes = cache_load(snap_key, _STATE.geo_cache_dir)
-        if cached_nodes is None:
-            cached_nodes = snap_cells_to_nodes(
-                walk_graph,
-                cells,
-                snap_key,
-                _STATE.geo_cache_dir,
-            )
-        walk_cell_nodes_by_size[int(resolution_m)] = [int(node) for node in cached_nodes]
-
-    origin_nodes = normalize_origin_node_ids(
-        node
-        for nodes in walk_cell_nodes_by_size.values()
-        for node in nodes
-    )
-    baseline_counts_by_node = precompute_walk_counts_by_origin_node(
-        walk_graph,
-        baseline_nodes_by_category,
-        origin_nodes,
-        cutoff=WALK_RADIUS_M,
-        weight="length_m",
-    )
-    public_totals_by_node = precompute_walk_weighted_totals_by_origin_node(
-        walk_graph,
-        public_weight_rows,
-        origin_nodes,
-        cutoff=WALK_RADIUS_M,
-        weight="length_m",
-    )
-
-    created_at = datetime.now(timezone.utc)
-    desert_rows: list[dict[str, Any]] = []
-    for resolution_m, cells in walk_grids.items():
-        cell_nodes = walk_cell_nodes_by_size[int(resolution_m)]
-        for cell, origin_node in zip(cells, cell_nodes):
-            baseline_stop_count = int(
-                baseline_counts_by_node.get(int(origin_node), {}).get("transport", 0)
-            )
-            reachable_public_departures = int(
-                public_totals_by_node.get(int(origin_node), {}).get("public_departures_7d", 0)
-            )
-            if baseline_stop_count <= 0 or reachable_public_departures > 0:
-                continue
-            cell_geom = cell.get("geometry")
-            if cell_geom is None:
-                cell_geom = materialize_cell_geometry(cell, _STATE.study_area_metric)
-            desert_rows.append(
-                {
-                    "build_key": _STATE.hashes.build_key,
-                    "reality_fingerprint": _STATE.transit_reality_state.reality_fingerprint,
-                    "import_fingerprint": _STATE.hashes.import_fingerprint,
-                    "resolution_m": int(resolution_m),
-                    "cell_id": cell["cell_id"],
-                    "analysis_date": _STATE.transit_reality_state.analysis_date,
-                    "baseline_reachable_stop_count": baseline_stop_count,
-                    "reachable_public_departures_7d": reachable_public_departures,
-                    "reason_codes_json": ["baseline_reachable_without_public_departures_7d"],
-                    "cell_geom": cell_geom,
-                    "created_at": created_at,
-                }
-            )
-    replace_service_desert_rows(
-        engine,
-        build_key=_STATE.hashes.build_key,
-        desert_rows=desert_rows,
-    )
-
+    replace_service_desert_rows(engine, build_key=_STATE.hashes.build_key, desert_rows=rows)
 
 def _preflight_transit_rebuild(
     engine,

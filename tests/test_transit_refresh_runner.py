@@ -13,6 +13,31 @@ def _tracker_mock() -> mock.Mock:
 
 
 class TransitRefreshRunnerTests(TestCase):
+    def test_load_study_area_uses_metric_geometry_from_loader_pair(self) -> None:
+        import study_area
+
+        tracker = _tracker_mock()
+        with (
+            mock.patch.object(
+                study_area,
+                "load_study_area_geometries",
+                return_value=(mock.sentinel.metric_geometry, mock.sentinel.wgs84_geometry),
+            ) as load_mock,
+            mock.patch.object(
+                study_area,
+                "study_area_wgs84_envelope_from_metric",
+                return_value=mock.sentinel.envelope,
+            ) as envelope_mock,
+        ):
+            result = transit_refresh_runner._load_study_area_wgs84("full", tracker)
+
+        self.assertIs(result, mock.sentinel.envelope)
+        load_mock.assert_called_once_with(
+            profile="full",
+            progress_cb=tracker.phase_callback.return_value,
+        )
+        envelope_mock.assert_called_once_with(mock.sentinel.metric_geometry)
+
     def test_refresh_transit_reuses_cached_manifest_without_geometry(self) -> None:
         source_state = SimpleNamespace(import_fingerprint="import-fingerprint-123")
         reality_state = SimpleNamespace(reality_fingerprint="reality-123")
