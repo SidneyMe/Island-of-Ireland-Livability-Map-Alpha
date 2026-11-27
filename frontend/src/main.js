@@ -32,6 +32,7 @@ import {
   CLICK_ACTIONS,
   resolveMapClickAction
 } from "./click_priority.js";
+import { cellGeometryCenter, completeCellGeometry } from "./cell_highlight.js";
 import {
   DEFAULT_NOISE_OPACITY as runtimeDefaultNoiseOpacity,
   GRID_INSERT_BEFORE_LAYER_ID as runtimeGridInsertBeforeLayerId,
@@ -89,6 +90,24 @@ import { amenityPopupHtml } from "./popups/amenity_popup.js";
 import { noisePopupHtml } from "./popups/noise_popup.js";
 import { inspectPopupHtml, coarseGridPopupHtml } from "./popups/grid_popup.js";
 import { serviceDesertPopupHtml } from "./popups/service_desert_popup.js";
+import { buildMetadataView } from "./build_metadata.js";
+import { linkedBuildUnavailable, mapPermalink, parseMapUrlState } from "./url_state.js";
+import {
+  SHORTLIST_MAX_ITEMS,
+  comparisonRows,
+  createShortlistItem,
+  loadShortlist,
+  moveShortlistItem,
+  refreshShortlistItems,
+  refreshedShortlistItem,
+  removeShortlistItem,
+  renameShortlistItem,
+  saveShortlist,
+  shortlistExport,
+  totalDeltaFromPrevious,
+  toggleComparisonSelection,
+  upsertShortlistItem
+} from "./shortlist.js";
 
 const protocol = new Protocol();
 maplibregl.addProtocol("pmtiles", protocol.tile);
@@ -126,6 +145,31 @@ const elements = {
   landuseNote: document.getElementById("landuse-note"),
   map: document.getElementById("map"),
   mapStage: document.getElementById("map-stage"),
+  dataProvenance: document.getElementById("data-provenance"),
+  dataFreshness: document.getElementById("data-freshness"),
+  dataOsm: document.getElementById("data-osm"),
+  dataGtfs: document.getElementById("data-gtfs"),
+  dataModel: document.getElementById("data-model"),
+  dataUpdated: document.getElementById("data-updated"),
+  dataBuild: document.getElementById("data-build"),
+  linkedBuildWarning: document.getElementById("linked-build-warning"),
+  useCurrentBuild: document.getElementById("use-current-build"),
+  shortlistSection: document.getElementById("shortlist-section"),
+  shortlistCount: document.getElementById("shortlist-count"),
+  shortlistEmpty: document.getElementById("shortlist-empty"),
+  shortlistItems: document.getElementById("shortlist-items"),
+  shortlistCompare: document.getElementById("shortlist-compare"),
+  shortlistExport: document.getElementById("shortlist-export"),
+  shortlistClear: document.getElementById("shortlist-clear"),
+  inspectDrawer: document.getElementById("inspect-drawer"),
+  inspectContent: document.getElementById("inspect-content"),
+  inspectClose: document.getElementById("inspect-close"),
+  compareDrawer: document.getElementById("compare-drawer"),
+  compareContent: document.getElementById("compare-content"),
+  compareStatus: document.getElementById("compare-status"),
+  compareClose: document.getElementById("compare-close"),
+  compareShare: document.getElementById("compare-share"),
+  compareSaveBoth: document.getElementById("compare-save-both"),
   gridDebug: {
     section: document.getElementById("grid-debug-section"),
     controls: document.getElementById("grid-debug-controls"),
@@ -190,11 +234,676 @@ const state = {
   selectedNoiseMetric: "Lden",
   selectedNoiseSources: new Set(),
   selectedNoiseBands: new Set(),
-  pendingInspect: null
+  pendingInspect: null,
+  initialUrlState: null,
+  linkedBuildUnavailable: false,
+  permalinkInspect: null,
+  shortlist: [],
+  compareSelectedIds: new Set(),
+  compareItems: [],
+  compareOpen: false,
+  compareEphemeral: false,
+  compareReturnFocus: null,
+  compareLoadToken: 0,
+  inspectOpen: false,
+  inspectPayload: null,
+  inspectReturnFocus: null,
+  linkedCellMarker: null,
+  linkedCellHighlightTimer: null,
+  linkedCellGeometry: null
 };
 
 function updateStatus(message) {
   elements.statusPill.textContent = message;
+}
+
+function renderBuildMetadata() {
+  if (!elements.dataProvenance) return;
+  const view = buildMetadataView(state.runtime);
+  elements.dataFreshness.textContent = view.statusLabel;
+  elements.dataFreshness.className = "data-freshness data-freshness-" + view.status;
+  elements.dataOsm.textContent = view.osmLabel;
+  elements.dataGtfs.textContent = view.gtfsLabel;
+  elements.dataModel.textContent = view.modelLabel;
+  elements.dataUpdated.textContent = view.updatedLabel;
+  elements.dataBuild.textContent = view.buildLabel;
+  elements.dataProvenance.title = view.warnings.join("\n");
+  if (elements.linkedBuildWarning) {
+    elements.linkedBuildWarning.hidden = !state.linkedBuildUnavailable;
+  }
+}
+
+function currentMapPermalink(inspect = state.permalinkInspect) {
+  if (!state.map) return window.location.href;
+  const center = state.map.getCenter();
+  const compare = state.compareOpen && state.compareItems.length === 2
+    ? state.compareItems.map(function (item) { return { lat: item.lat, lon: item.lon }; })
+    : null;
+  return mapPermalink(window.location.href, {
+    lat: center.lat,
+    lon: center.lng,
+    zoom: state.map.getZoom(),
+    mode: state.selectedGridTravelMode,
+    layer: state.selectedGridLayer,
+    buildKey: state.runtime && state.runtime.build_key,
+    inspect: compare ? null : inspect,
+    compare
+  });
+}
+
+function syncPermalink() {
+  if (!state.map || !window.history || typeof window.history.replaceState !== "function") return;
+  window.history.replaceState(null, "", currentMapPermalink());
+}
+
+function popupBuildMetadata() {
+  const view = buildMetadataView(state.runtime);
+  return { model: view.modelLabel, buildKey: state.runtime && state.runtime.build_key };
+}
+
+function wirePopupPermalink(root = null) {
+  const popupElement = root || (state.popup && state.popup.getElement && state.popup.getElement());
+  const button = popupElement && popupElement.querySelector(".popup-permalink");
+  if (!button) return;
+  button.addEventListener("click", async function () {
+    const link = currentMapPermalink();
+    try {
+      await window.navigator.clipboard.writeText(link);
+      button.textContent = "Link copied";
+    } catch (error) {
+      button.textContent = "Copy failed";
+      button.title = link;
+    }
+  });
+}
+
+function clearLinkedCellHighlight() {
+  if (state.linkedCellHighlightTimer) {
+    window.clearTimeout(state.linkedCellHighlightTimer);
+    state.linkedCellHighlightTimer = null;
+  }
+  if (state.linkedCellMarker) {
+    state.linkedCellMarker.remove();
+    state.linkedCellMarker = null;
+  }
+  state.linkedCellGeometry = null;
+  if (state.map) {
+    const source = state.map.getSource("linked-cell-highlight");
+    if (source && typeof source.setData === "function") {
+      source.setData({ type: "FeatureCollection", features: [] });
+    }
+  }
+}
+
+function installLinkedCellHighlightLayers() {
+  if (!state.map || state.map.getSource("linked-cell-highlight")) return;
+  state.map.addSource("linked-cell-highlight", {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] }
+  });
+  state.map.addLayer({
+    id: "linked-cell-highlight-fill",
+    type: "fill",
+    source: "linked-cell-highlight",
+    paint: { "fill-color": "#d6006f", "fill-opacity": 0.2 }
+  });
+  state.map.addLayer({
+    id: "linked-cell-highlight-halo",
+    type: "line",
+    source: "linked-cell-highlight",
+    paint: { "line-color": "#ffffff", "line-width": 8, "line-opacity": 0.95 }
+  });
+  state.map.addLayer({
+    id: "linked-cell-highlight-line",
+    type: "line",
+    source: "linked-cell-highlight",
+    paint: { "line-color": "#d6006f", "line-width": 4, "line-opacity": 1 }
+  });
+}
+
+function highlightRenderedLinkedCell(lngLat, renderedFeature = null) {
+  installLinkedCellHighlightLayers();
+  let feature = renderedFeature;
+  if (!feature) {
+    const layerId = activeGridLayerId();
+    if (!layerId || !state.map.getLayer(layerId)) return false;
+    const point = state.map.project([Number(lngLat.lng), Number(lngLat.lat)]);
+    feature = state.map.queryRenderedFeatures(point, { layers: [layerId] })[0];
+  }
+  if (!feature || !feature.geometry) return false;
+  let sourceFeatures = [];
+  const cellId = String(feature.properties && feature.properties.cell_id || "");
+  if (cellId && typeof state.map.querySourceFeatures === "function") {
+    try {
+      sourceFeatures = state.map.querySourceFeatures("livability", {
+        sourceLayer: "grid",
+        filter: ["==", ["get", "cell_id"], cellId]
+      });
+    } catch (error) {
+      sourceFeatures = [];
+    }
+  }
+  const geometry = completeCellGeometry(feature, sourceFeatures);
+  if (!geometry) return false;
+  state.linkedCellGeometry = {
+    type: "Feature",
+    properties: { linked_cell: 1 },
+    geometry
+  };
+  const source = state.map.getSource("linked-cell-highlight");
+  if (source && typeof source.setData === "function") source.setData(state.linkedCellGeometry);
+  const center = cellGeometryCenter(geometry);
+  if (center && state.linkedCellMarker) state.linkedCellMarker.setLngLat(center);
+  return true;
+}
+
+function highlightLinkedCell(lngLat) {
+  clearLinkedCellHighlight();
+  const element = document.createElement("div");
+  element.className = "permalink-cell-highlight";
+  const core = document.createElement("span");
+  core.className = "permalink-cell-highlight-core";
+  core.setAttribute("aria-hidden", "true");
+  element.appendChild(core);
+  element.setAttribute("role", "img");
+  element.setAttribute("aria-label", "Cell opened from shared link");
+  element.title = "Cell opened from shared link";
+  state.linkedCellMarker = new maplibregl.Marker({ element, anchor: "center" })
+    .setLngLat([Number(lngLat.lng), Number(lngLat.lat)])
+    .addTo(state.map);
+  state.linkedCellHighlightTimer = window.setTimeout(function () {
+    element.classList.add("permalink-cell-highlight-settled");
+    state.linkedCellHighlightTimer = null;
+  }, 3000);
+  state.map.once("idle", function () {
+    if (state.linkedCellMarker) highlightRenderedLinkedCell(lngLat);
+  });
+}
+
+function savedCell(cellId) {
+  return state.shortlist.some(function (item) { return item.cellId === String(cellId || ""); });
+}
+
+function newShortlistId() {
+  if (window.crypto && typeof window.crypto.randomUUID === "function") return window.crypto.randomUUID();
+  return "location-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+}
+
+function persistShortlist() {
+  try {
+    saveShortlist(window.localStorage, state.shortlist);
+  } catch (error) {
+    updateStatus("Shortlist could not be saved in this browser.");
+    elements.statusPill.style.display = "";
+  }
+}
+
+function modeTotal(item) {
+  const mode = item && item.snapshot && item.snapshot.modes[state.selectedGridTravelMode];
+  return mode && Number.isFinite(mode.total) ? mode.total : null;
+}
+
+function formatSigned(value) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "n/a";
+  const number = Number(value);
+  return (number > 0 ? "+" : "") + number.toFixed(1);
+}
+
+function updateShortlistMarkers() {
+  if (!state.map) return;
+  const source = state.map.getSource("shortlist-pins");
+  if (!source || typeof source.setData !== "function") return;
+  source.setData({
+    type: "FeatureCollection",
+    features: state.shortlist.map(function (item, index) {
+      return {
+        type: "Feature",
+        id: item.id,
+        properties: { id: item.id, position: String(index + 1), label: item.label },
+        geometry: { type: "Point", coordinates: [item.lon, item.lat] }
+      };
+    })
+  });
+}
+
+function installShortlistLayers() {
+  if (!state.map || state.map.getSource("shortlist-pins")) return;
+  state.map.addSource("shortlist-pins", { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  state.map.addLayer({
+    id: "shortlist-pins-circle",
+    type: "circle",
+    source: "shortlist-pins",
+    paint: {
+      "circle-radius": 13,
+      "circle-color": "#1f5f45",
+      "circle-stroke-width": 2,
+      "circle-stroke-color": "#ffffff"
+    }
+  });
+  state.map.addLayer({
+    id: "shortlist-pins-label",
+    type: "symbol",
+    source: "shortlist-pins",
+    layout: { "text-field": ["get", "position"], "text-size": 11, "text-allow-overlap": true },
+    paint: { "text-color": "#ffffff" }
+  });
+  state.map.on("mouseenter", "shortlist-pins-circle", function () { state.map.getCanvas().style.cursor = "pointer"; });
+  state.map.on("mouseleave", "shortlist-pins-circle", function () { state.map.getCanvas().style.cursor = ""; });
+  updateShortlistMarkers();
+}
+
+function shortlistStatusText(item) {
+  const total = modeTotal(item);
+  const delta = totalDeltaFromPrevious(item, state.selectedGridTravelMode);
+  const parts = [total === null ? "n/a" : total.toFixed(1) + " / 100", item.status];
+  if (delta !== null) parts.push("Δ " + formatSigned(delta));
+  return parts.join(" · ");
+}
+
+function renderShortlist() {
+  if (!elements.shortlistSection) return;
+  elements.shortlistSection.hidden = !runtimeIsDailyAccessModel(state.runtime);
+  if (elements.shortlistSection.hidden) return;
+  const selected = state.compareSelectedIds;
+  Array.from(selected).forEach(function (id) {
+    if (!state.shortlist.some(function (item) { return item.id === id; })) selected.delete(id);
+  });
+  elements.shortlistCount.textContent = state.shortlist.length + " / " + SHORTLIST_MAX_ITEMS;
+  elements.shortlistEmpty.hidden = state.shortlist.length > 0;
+  elements.shortlistItems.replaceChildren();
+  state.shortlist.forEach(function (item, index) {
+    const card = document.createElement("div");
+    card.className = "shortlist-card";
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = selected.has(item.id);
+    checkbox.disabled = !checkbox.checked && selected.size >= 2;
+    checkbox.setAttribute("aria-label", "Select " + item.label + " for comparison");
+    checkbox.addEventListener("change", function () {
+      const result = toggleComparisonSelection(selected, item.id, checkbox.checked);
+      state.compareSelectedIds = result.selected;
+      renderShortlist();
+    });
+
+    const body = document.createElement("div");
+    const title = document.createElement("button");
+    title.type = "button";
+    title.className = "shortlist-card-title";
+    title.textContent = item.label;
+    title.addEventListener("click", function () { openShortlistItem(item); });
+    const meta = document.createElement("span");
+    meta.className = "shortlist-card-meta shortlist-card-status-" + item.status;
+    meta.textContent = shortlistStatusText(item);
+    meta.title = item.lastError || "";
+    body.append(title, meta);
+
+    const buttons = document.createElement("div");
+    buttons.className = "shortlist-card-buttons";
+    [["↑", -1, index === 0], ["↓", 1, index === state.shortlist.length - 1]].forEach(function ([label, direction, disabled]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.disabled = disabled;
+      button.setAttribute("aria-label", (direction < 0 ? "Move up " : "Move down ") + item.label);
+      button.addEventListener("click", function () {
+        state.shortlist = moveShortlistItem(state.shortlist, item.id, direction);
+        persistShortlist(); renderShortlist(); updateShortlistMarkers();
+      });
+      buttons.appendChild(button);
+    });
+    const rename = document.createElement("button");
+    rename.type = "button"; rename.textContent = "✎"; rename.setAttribute("aria-label", "Rename " + item.label);
+    rename.addEventListener("click", function () {
+      const value = window.prompt("Location name", item.label);
+      if (value === null) return;
+      state.shortlist = renameShortlistItem(state.shortlist, item.id, value);
+      persistShortlist(); renderShortlist(); updateShortlistMarkers();
+    });
+    const remove = document.createElement("button");
+    remove.type = "button"; remove.textContent = "×"; remove.setAttribute("aria-label", "Remove " + item.label);
+    remove.addEventListener("click", function () {
+      state.shortlist = removeShortlistItem(state.shortlist, item.id);
+      selected.delete(item.id);
+      persistShortlist(); renderShortlist(); updateShortlistMarkers();
+      if (state.compareOpen && !state.compareEphemeral) closeCompareDrawer();
+    });
+    buttons.append(rename, remove);
+    if (item.status === "stale" || item.status === "error") {
+      const retry = document.createElement("button");
+      retry.type = "button"; retry.textContent = "↻"; retry.setAttribute("aria-label", "Retry " + item.label);
+      retry.addEventListener("click", function () { refreshOneShortlistItem(item.id); });
+      buttons.appendChild(retry);
+    }
+    card.append(checkbox, body, buttons);
+    elements.shortlistItems.appendChild(card);
+  });
+  elements.shortlistCompare.textContent = "Compare (" + selected.size + ")";
+  elements.shortlistCompare.disabled = selected.size !== 2;
+  elements.shortlistExport.disabled = state.shortlist.length === 0;
+  elements.shortlistClear.disabled = state.shortlist.length === 0;
+}
+
+function saveInspectToShortlist(payload, label = null) {
+  const item = createShortlistItem(payload, {
+    id: newShortlistId(),
+    buildKey: state.runtime.build_key,
+    label,
+    position: state.shortlist.length + 1
+  });
+  const result = upsertShortlistItem(state.shortlist, item);
+  if (result.full) {
+    updateStatus("Shortlist is full (20 locations).");
+    elements.statusPill.style.display = "";
+    return false;
+  }
+  state.shortlist = result.items;
+  persistShortlist(); renderShortlist(); updateShortlistMarkers();
+  return true;
+}
+
+function wirePopupShortlist(payload, root = null) {
+  const popupElement = root || (state.popup && state.popup.getElement && state.popup.getElement());
+  const button = popupElement && popupElement.querySelector(".popup-shortlist");
+  if (!button) return;
+  button.addEventListener("click", function () {
+    if (saveInspectToShortlist(payload)) {
+      button.textContent = "Saved";
+      button.disabled = true;
+    }
+  });
+}
+
+function ensureInspectDrawerElements() {
+  let drawer = document.getElementById("inspect-drawer");
+  let content = document.getElementById("inspect-content");
+  let close = document.getElementById("inspect-close");
+  if (!drawer || !content || !close) {
+    if (drawer) drawer.remove();
+    drawer = document.createElement("aside");
+    drawer.id = "inspect-drawer";
+    drawer.className = "inspect-drawer";
+    drawer.setAttribute("role", "dialog");
+    drawer.setAttribute("aria-modal", "false");
+    drawer.setAttribute("aria-labelledby", "inspect-title");
+    drawer.tabIndex = -1;
+    drawer.hidden = true;
+
+    const header = document.createElement("div");
+    header.className = "inspect-header";
+    const heading = document.createElement("div");
+    const eyebrow = document.createElement("p");
+    eyebrow.className = "eyebrow";
+    eyebrow.textContent = "Map cell";
+    const title = document.createElement("h2");
+    title.id = "inspect-title";
+    title.textContent = "Cell details";
+    heading.append(eyebrow, title);
+    close = document.createElement("button");
+    close.id = "inspect-close";
+    close.type = "button";
+    close.setAttribute("aria-label", "Close cell details");
+    close.textContent = "×";
+    header.append(heading, close);
+    content = document.createElement("div");
+    content.id = "inspect-content";
+    content.className = "inspect-content";
+    drawer.append(header, content);
+    (document.getElementById("app") || document.body).appendChild(drawer);
+  }
+  elements.inspectDrawer = drawer;
+  elements.inspectContent = content;
+  elements.inspectClose = close;
+  if (!close.dataset.inspectCloseWired) {
+    close.dataset.inspectCloseWired = "true";
+    close.addEventListener("click", function () { closeInspectDrawer(); });
+  }
+}
+
+function renderInspectDrawerHtml(html, payload = null) {
+  ensureInspectDrawerElements();
+  elements.inspectContent.innerHTML = html;
+  wirePopupPermalink(elements.inspectContent);
+  if (payload) wirePopupShortlist(payload, elements.inspectContent);
+}
+
+function closeInspectDrawer(options = {}) {
+  if (!state.inspectOpen) return;
+  state.inspectOpen = false;
+  state.inspectPayload = null;
+  clearLinkedCellHighlight();
+  elements.inspectDrawer.hidden = true;
+  document.body.classList.remove("inspect-open");
+  if (options.clearPermalink !== false) {
+    state.permalinkInspect = null;
+    syncPermalink();
+  }
+  if (options.restoreFocus !== false && state.inspectReturnFocus && typeof state.inspectReturnFocus.focus === "function") {
+    state.inspectReturnFocus.focus();
+  }
+  state.inspectReturnFocus = null;
+}
+
+function showGridPopup(lngLat, html, payload = null) {
+  ensureInspectDrawerElements();
+  if (state.compareOpen) closeCompareDrawer();
+  if (state.popup && state.popup.isOpen && state.popup.isOpen()) state.popup.remove();
+  if (!state.inspectOpen) state.inspectReturnFocus = document.activeElement;
+  state.inspectOpen = true;
+  state.inspectPayload = payload;
+  elements.inspectDrawer.hidden = false;
+  document.body.classList.add("inspect-open");
+  renderInspectDrawerHtml(html, payload);
+  if (!highlightRenderedLinkedCell(lngLat)) {
+    state.map.once("idle", function () {
+      if (state.inspectOpen) highlightRenderedLinkedCell(lngLat);
+    });
+  }
+  state.permalinkInspect = { lat: Number(lngLat.lat), lon: Number(lngLat.lng) };
+  syncPermalink();
+  elements.inspectDrawer.focus();
+}
+
+function comparisonLocationCard(item) {
+  const card = document.createElement("section");
+  card.className = "compare-location";
+  const title = document.createElement("h3");
+  title.textContent = item.label;
+  const total = document.createElement("div");
+  total.className = "compare-total";
+  const value = modeTotal(item);
+  total.textContent = value === null ? "n/a" : value.toFixed(1) + " / 100";
+  const meta = document.createElement("p");
+  meta.className = "popup-muted";
+  const mode = item.snapshot.modes[state.selectedGridTravelMode];
+  const buildDelta = totalDeltaFromPrevious(item, state.selectedGridTravelMode);
+  meta.textContent = (mode ? mode.networkStatus : "unavailable") + " · build " + String(item.buildKey || "unknown").slice(0, 10) +
+    (buildDelta === null ? "" : " · build Δ " + formatSigned(buildDelta));
+  card.append(title, total, meta);
+  return card;
+}
+
+function comparisonValue(value, max, quality) {
+  const wrap = document.createElement("div");
+  wrap.className = "compare-value";
+  const label = document.createElement("span");
+  label.textContent = value === null ? "n/a" : Number(value).toFixed(1);
+  const track = document.createElement("span");
+  track.className = "compare-bar-track";
+  const bar = document.createElement("span");
+  bar.className = "compare-bar" + (quality ? " compare-bar-" + quality : "");
+  const width = value === null ? 0 : Math.min(100, Math.abs(Number(value)) / Math.max(max, 0.0001) * 100);
+  bar.style.setProperty("--bar-width", width.toFixed(1) + "%");
+  track.appendChild(bar);
+  wrap.append(label, track);
+  return wrap;
+}
+
+function renderCompare() {
+  if (!elements.compareContent) return;
+  elements.compareContent.replaceChildren();
+  if (state.compareItems.length !== 2) return;
+  const [first, second] = state.compareItems;
+  elements.compareContent.append(comparisonLocationCard(first), comparisonLocationCard(second));
+  const rows = document.createElement("div");
+  rows.className = "compare-rows";
+  comparisonRows(first.snapshot, second.snapshot, state.selectedGridTravelMode).forEach(function (entry) {
+    const row = document.createElement("div");
+    row.className = "compare-row";
+    const label = document.createElement("strong");
+    label.textContent = entry.label;
+    const max = entry.kind === "total" ? 100 : Math.max(Math.abs(entry.a || 0), Math.abs(entry.b || 0), 1);
+    let qualityA = "";
+    let qualityB = "";
+    if (entry.a !== null && entry.b !== null && entry.a !== entry.b) {
+      qualityA = entry.a > entry.b ? "better" : "worse";
+      qualityB = entry.b > entry.a ? "better" : "worse";
+    }
+    const delta = document.createElement("span");
+    delta.className = "compare-delta";
+    delta.textContent = formatSigned(entry.delta);
+    row.append(label, comparisonValue(entry.a, max, qualityA), comparisonValue(entry.b, max, qualityB), delta);
+    rows.appendChild(row);
+  });
+  elements.compareContent.appendChild(rows);
+  elements.compareStatus.textContent = runtimeGridTravelModeLabel(state.selectedGridTravelMode) + " · Δ is B − A";
+  elements.compareSaveBoth.hidden = !state.compareEphemeral;
+}
+
+function openCompareDrawer(items, options = {}) {
+  if (!Array.isArray(items) || items.length !== 2) return;
+  if (state.inspectOpen) closeInspectDrawer({ restoreFocus: false });
+  const wasOpen = state.compareOpen;
+  if (!options.sharedLoad) state.compareLoadToken += 1;
+  state.compareItems = items;
+  state.compareOpen = true;
+  state.compareEphemeral = Boolean(options.ephemeral);
+  if (!wasOpen) state.compareReturnFocus = document.activeElement;
+  elements.compareDrawer.hidden = false;
+  document.body.classList.add("compare-open");
+  renderCompare();
+  syncPermalink();
+  elements.compareDrawer.focus();
+}
+
+function closeCompareDrawer() {
+  state.compareLoadToken += 1;
+  state.compareOpen = false;
+  state.compareItems = [];
+  state.compareEphemeral = false;
+  elements.compareDrawer.hidden = true;
+  document.body.classList.remove("compare-open");
+  syncPermalink();
+  if (state.compareReturnFocus && typeof state.compareReturnFocus.focus === "function") {
+    state.compareReturnFocus.focus();
+  }
+  state.compareReturnFocus = null;
+}
+
+async function openShortlistItem(item) {
+  state.map.flyTo({ center: [item.lon, item.lat], zoom: Math.max(state.map.getZoom(), 14) });
+  try {
+    const payload = await fetchInspectPoint({ lat: item.lat, lng: item.lon }, { cancelPrevious: true });
+    const index = state.shortlist.findIndex(function (entry) { return entry.id === item.id; });
+    if (index >= 0) {
+      state.shortlist[index] = refreshedShortlistItem(state.shortlist[index], payload, state.runtime.build_key);
+      persistShortlist(); renderShortlist();
+    }
+    showGridPopup({ lat: item.lat, lng: item.lon }, inspectPopupHtml(payload, {
+      selectedMode: state.selectedGridTravelMode,
+      buildMetadata: popupBuildMetadata(),
+      allowShortlist: true,
+      shortlistSaved: true
+    }), payload);
+  } catch (error) {
+    updateStatus((error && error.message) || "Shortlist location could not be refreshed");
+    elements.statusPill.style.display = "";
+  }
+}
+
+async function refreshOneShortlistItem(id) {
+  const index = state.shortlist.findIndex(function (item) { return item.id === id; });
+  if (index < 0) return;
+  state.shortlist[index] = { ...state.shortlist[index], status: "refreshing", lastError: null };
+  renderShortlist();
+  try {
+    const item = state.shortlist[index];
+    const payload = await fetchInspectPoint({ lat: item.lat, lng: item.lon }, { cancelPrevious: false });
+    state.shortlist[index] = refreshedShortlistItem(item, payload, state.runtime.build_key);
+  } catch (error) {
+    state.shortlist[index] = { ...state.shortlist[index], status: "stale", lastError: String(error && error.message || error || "Refresh failed") };
+  }
+  persistShortlist(); renderShortlist(); updateShortlistMarkers();
+  if (state.compareOpen && !state.compareEphemeral) {
+    state.compareItems = Array.from(state.compareSelectedIds).map(function (selectedId) {
+      return state.shortlist.find(function (item) { return item.id === selectedId; });
+    }).filter(Boolean);
+    if (state.compareItems.length === 2) renderCompare(); else closeCompareDrawer();
+  }
+}
+
+function downloadShortlist() {
+  const payload = shortlistExport(state.shortlist);
+  const blob = new Blob([JSON.stringify(payload, null, 2) + "\n"], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "livability-shortlist-" + new Date().toISOString().slice(0, 10) + ".json";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+}
+
+async function openSharedComparison(points) {
+  if (!Array.isArray(points) || points.length !== 2 || !runtimeIsDailyAccessModel(state.runtime)) return;
+  if (state.inspectOpen) closeInspectDrawer({ restoreFocus: false });
+  const loadToken = ++state.compareLoadToken;
+  state.compareOpen = true;
+  state.compareEphemeral = true;
+  state.compareReturnFocus = document.activeElement;
+  elements.compareDrawer.hidden = false;
+  document.body.classList.add("compare-open");
+  elements.compareStatus.textContent = "Loading shared comparison…";
+  elements.compareDrawer.focus();
+  try {
+    const payloads = await Promise.all(points.map(function (point) {
+      return fetchInspectPoint({ lat: point.lat, lng: point.lon }, { cancelPrevious: false });
+    }));
+    const items = payloads.map(function (payload, index) {
+      return createShortlistItem(payload, {
+        id: "shared-" + index,
+        buildKey: state.runtime.build_key,
+        label: "Location " + (index + 1),
+        position: index + 1
+      });
+    });
+    if (loadToken !== state.compareLoadToken || !state.compareOpen) return;
+    if (items.some(function (item) { return !item; })) throw new Error("One shared point is not a valid land cell");
+    openCompareDrawer(items, { ephemeral: true, sharedLoad: true });
+  } catch (error) {
+    if (loadToken !== state.compareLoadToken) return;
+    elements.compareStatus.textContent = (error && error.message) || "Shared comparison could not be loaded";
+  }
+}
+
+async function refreshShortlistForBuild() {
+  if (!runtimeIsDailyAccessModel(state.runtime) || !state.shortlist.some(function (item) { return item.buildKey !== state.runtime.build_key; })) return;
+  state.shortlist = await refreshShortlistItems(
+    state.shortlist,
+    state.runtime.build_key,
+    function (point) {
+      return fetchInspectPoint({ lat: point.lat, lng: point.lon }, { cancelPrevious: false });
+    },
+    {
+      concurrency: 3,
+      onUpdate: function (items) {
+        state.shortlist = items;
+        renderShortlist();
+      }
+    }
+  );
+  persistShortlist(); renderShortlist(); updateShortlistMarkers();
 }
 
 function fineSurfaceEnabled() {
@@ -313,6 +1022,9 @@ function applyGridLayerSelection() {
     );
   }
   updateGridLayerNote();
+  renderShortlist();
+  if (state.compareOpen) renderCompare();
+  syncPermalink();
 }
 
 function buildGridLayerControls() {
@@ -379,6 +1091,14 @@ function buildGridTravelModeControls() {
       state.selectedGridTravelMode = option.value;
       saveGridTravelMode(option.value);
       applyGridLayerSelection();
+      if (state.inspectOpen && state.inspectPayload) {
+        renderInspectDrawerHtml(inspectPopupHtml(state.inspectPayload, {
+          selectedMode: state.selectedGridTravelMode,
+          buildMetadata: popupBuildMetadata(),
+          allowShortlist: true,
+          shortlistSaved: savedCell(state.inspectPayload.cell_id)
+        }), state.inspectPayload);
+      }
     });
 
     label.appendChild(title);
@@ -436,8 +1156,24 @@ function amenityTierSummary(category) {
 
 function updatePanelVisibility() {
   document.body.classList.toggle("panel-hidden", state.panelHidden);
-  elements.panelToggle.textContent = state.panelHidden ? "Show panel" : "Hide panel";
+  const label = state.panelHidden ? "Show panel" : "Hide panel";
+  elements.panelToggle.textContent = state.panelHidden ? "›" : "‹";
+  elements.panelToggle.setAttribute("aria-label", label);
+  elements.panelToggle.title = label;
   elements.panelToggle.setAttribute("aria-expanded", state.panelHidden ? "false" : "true");
+}
+
+function ensurePanelHeaderActions() {
+  const header = elements.controlPanel && elements.controlPanel.querySelector(".panel-header");
+  if (!header || !elements.panelToggle || !elements.resolutionChip) return;
+  let actions = header.querySelector(".panel-header-actions");
+  if (!actions) {
+    actions = document.createElement("div");
+    actions.className = "panel-header-actions";
+    header.appendChild(actions);
+  }
+  actions.appendChild(elements.resolutionChip);
+  actions.appendChild(elements.panelToggle);
 }
 
 function resizeMapAfterPanelTransition() {
@@ -2004,12 +2740,13 @@ function maybeBuildDebugGridControl() {
   elements.gridDebug.controls.appendChild(label);
 }
 
-async function fetchInspect(lngLat) {
-  if (state.pendingInspect) {
+async function fetchInspectPoint(lngLat, options = {}) {
+  const cancelPrevious = options.cancelPrevious !== false;
+  if (cancelPrevious && state.pendingInspect) {
     state.pendingInspect.abort();
   }
   const controller = new AbortController();
-  state.pendingInspect = controller;
+  if (cancelPrevious) state.pendingInspect = controller;
   const url = new URL(String(state.runtime.inspect_url), window.location.origin);
   url.searchParams.set("lat", String(lngLat.lat));
   url.searchParams.set("lon", String(lngLat.lng));
@@ -2026,12 +2763,22 @@ async function fetchInspect(lngLat) {
       });
       throw new Error(payload.error || response.statusText);
     }
-    return response.json();
+    const payload = await response.json();
+    if (payload && payload.scoring_model === "daily-access-v4" && payload.scoring_model_version === undefined) {
+      payload.scoring_model_version = state.runtime && state.runtime.daily_access
+        ? state.runtime.daily_access.score_model_version
+        : null;
+    }
+    return payload;
   } finally {
-    if (state.pendingInspect === controller) {
+    if (cancelPrevious && state.pendingInspect === controller) {
       state.pendingInspect = null;
     }
   }
+}
+
+async function fetchInspect(lngLat) {
+  return fetchInspectPoint(lngLat, { cancelPrevious: true });
 }
 
 function isLivabilitySourceEvent(event) {
@@ -2063,6 +2810,56 @@ function wireUi() {
     if (state.map) state.map.zoomOut();
   });
 
+  if (elements.shortlistCompare) {
+    elements.shortlistCompare.addEventListener("click", function () {
+      const items = Array.from(state.compareSelectedIds).map(function (id) {
+        return state.shortlist.find(function (item) { return item.id === id; });
+      }).filter(Boolean);
+      openCompareDrawer(items, { ephemeral: false });
+    });
+    elements.shortlistExport.addEventListener("click", downloadShortlist);
+    elements.shortlistClear.addEventListener("click", function () {
+      if (!window.confirm("Clear all saved locations?")) return;
+      state.shortlist = [];
+      state.compareSelectedIds.clear();
+      persistShortlist(); renderShortlist(); updateShortlistMarkers(); closeCompareDrawer();
+    });
+  }
+
+  if (elements.compareClose) {
+    elements.compareClose.addEventListener("click", closeCompareDrawer);
+    elements.compareShare.addEventListener("click", async function () {
+      try {
+        await window.navigator.clipboard.writeText(currentMapPermalink(null));
+        elements.compareShare.textContent = "Link copied";
+        window.setTimeout(function () { elements.compareShare.textContent = "Copy link"; }, 1500);
+      } catch (error) {
+        elements.compareStatus.textContent = "Copy failed; URL is available in the address bar.";
+      }
+    });
+    elements.compareSaveBoth.addEventListener("click", function () {
+      let full = false;
+      state.compareItems.forEach(function (item) {
+        const result = upsertShortlistItem(state.shortlist, { ...item, id: newShortlistId() });
+        state.shortlist = result.items;
+        full = full || result.full;
+      });
+      state.compareEphemeral = false;
+      elements.compareSaveBoth.hidden = true;
+      persistShortlist(); renderShortlist(); updateShortlistMarkers();
+      if (full) elements.compareStatus.textContent = "Shortlist is full; not every location was saved.";
+    });
+  }
+
+  if (elements.useCurrentBuild) {
+    elements.useCurrentBuild.addEventListener("click", function () {
+      state.linkedBuildUnavailable = false;
+      elements.linkedBuildWarning.hidden = true;
+      elements.statusPill.style.display = "none";
+      syncPermalink();
+    });
+  }
+
   elements.gridToggle.addEventListener("change", function () {
     state.gridVisible = elements.gridToggle.checked;
     applyGridVisibility();
@@ -2093,9 +2890,34 @@ function wireUi() {
   window.addEventListener("resize", function () {
     if (state.map) state.map.resize();
   });
+
+  document.addEventListener("keydown", function (event) {
+    if (state.inspectOpen && event.key === "Escape") {
+      closeInspectDrawer();
+      return;
+    }
+    if (!state.compareOpen) return;
+    if (event.key === "Escape") {
+      closeCompareDrawer();
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = Array.from(elements.compareDrawer.querySelectorAll("button:not([disabled]), [href], [tabindex]:not([tabindex='-1'])"));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (document.activeElement === elements.compareDrawer) {
+      event.preventDefault(); first.focus();
+    } else if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault(); last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault(); first.focus();
+    }
+  });
 }
 
 function initializeMap() {
+  const initialView = state.initialUrlState && state.initialUrlState.view;
   state.map = new maplibregl.Map({
     container: elements.map,
     style: buildRuntimeStyle(state.runtime, {
@@ -2103,8 +2925,10 @@ function initializeMap() {
       selectedGridLayer: state.selectedGridLayer,
       selectedGridTravelMode: state.selectedGridTravelMode
     }),
-    center: [state.runtime.map_center.lon, state.runtime.map_center.lat],
-    zoom: state.runtime.default_zoom || 6,
+    center: initialView
+      ? [initialView.lon, initialView.lat]
+      : [state.runtime.map_center.lon, state.runtime.map_center.lat],
+    zoom: initialView ? initialView.zoom : (state.runtime.default_zoom || 6),
     minZoom: MIN_ZOOM,
     maxZoom: Number(state.runtime.max_zoom || 19),
     attributionControl: false,
@@ -2122,6 +2946,10 @@ function initializeMap() {
     className: "livability-popup",
     maxWidth: "320px"
   });
+  state.popup.on("close", function () {
+    state.permalinkInspect = null;
+    syncPermalink();
+  });
 
   state.map.on("load", function () {
     setResolutionChip();
@@ -2132,8 +2960,44 @@ function initializeMap() {
     applyTransportRealityVisibility();
     applyServiceDesertVisibility();
     applyNoiseVisibility();
-    updateStatus("");
-    elements.statusPill.style.display = "none";
+    installShortlistLayers();
+    renderShortlist();
+    refreshShortlistForBuild();
+    renderBuildMetadata();
+    syncPermalink();
+    if (state.linkedBuildUnavailable) {
+      updateStatus("Linked build is unavailable; showing the current build.");
+      elements.statusPill.style.display = "";
+    } else {
+      updateStatus("");
+      elements.statusPill.style.display = "none";
+    }
+    const initialCompare = state.initialUrlState && state.initialUrlState.compare;
+    const initialInspect = state.initialUrlState && state.initialUrlState.inspect;
+    if (initialCompare && inspectOnClick()) {
+      openSharedComparison(initialCompare);
+    } else if (initialInspect) {
+      const lngLat = { lat: initialInspect.lat, lng: initialInspect.lon };
+      state.map.easeTo({
+        center: [lngLat.lng, lngLat.lat],
+        zoom: Math.max(state.map.getZoom(), 16),
+        duration: 900
+      });
+      highlightLinkedCell(lngLat);
+      if (inspectOnClick()) fetchInspect(lngLat).then(function (payload) {
+        showGridPopup(lngLat, inspectPopupHtml(payload, {
+          selectedMode: state.selectedGridTravelMode,
+          buildMetadata: popupBuildMetadata(),
+          allowShortlist: true,
+          shortlistSaved: savedCell(payload.cell_id)
+        }), payload);
+      }).catch(function (error) {
+        if (!error || error.name !== "AbortError") {
+          updateStatus((error && error.message) || "Linked cell could not be opened");
+          elements.statusPill.style.display = "";
+        }
+      });
+    }
   });
 
   state.map.on("zoom", function () {
@@ -2148,6 +3012,7 @@ function initializeMap() {
   });
   state.map.on("moveend", function () {
     refreshGridDebugCard();
+    syncPermalink();
   });
   state.map.on("sourcedata", function (event) {
     if (!isLivabilitySourceEvent(event)) return;
@@ -2166,6 +3031,16 @@ function initializeMap() {
   });
 
   state.map.on("click", async function (event) {
+    clearLinkedCellHighlight();
+    if (state.map.getLayer("shortlist-pins-circle")) {
+      const pins = state.map.queryRenderedFeatures(event.point, { layers: ["shortlist-pins-circle"] });
+      const id = pins[0] && String(pins[0].properties.id || "");
+      const item = state.shortlist.find(function (entry) { return entry.id === id; });
+      if (item) {
+        openShortlistItem(item);
+        return;
+      }
+    }
     const clickAction = resolveMapClickAction({
       map: state.map,
       point: event.point,
@@ -2173,6 +3048,12 @@ function initializeMap() {
       gridVisible: state.gridVisible,
       activeGridLayerId: activeGridLayerId()
     });
+    if (clickAction.type === CLICK_ACTIONS.FINE_INSPECT || clickAction.type === CLICK_ACTIONS.COARSE_GRID) {
+      highlightRenderedLinkedCell(event.lngLat, clickAction.features[0] || null);
+    }
+    if (state.inspectOpen && clickAction.type !== CLICK_ACTIONS.FINE_INSPECT && clickAction.type !== CLICK_ACTIONS.COARSE_GRID) {
+      closeInspectDrawer({ restoreFocus: false });
+    }
 
     if (clickAction.type === CLICK_ACTIONS.TRANSPORT) {
       const popupRows = Array.from(
@@ -2245,10 +3126,12 @@ function initializeMap() {
     if (clickAction.type === CLICK_ACTIONS.FINE_INSPECT) {
       try {
         const payload = await fetchInspect(event.lngLat);
-        state.popup
-          .setLngLat(event.lngLat)
-          .setHTML(inspectPopupHtml(payload, { selectedMode: state.selectedGridTravelMode }))
-          .addTo(state.map);
+        showGridPopup(event.lngLat, inspectPopupHtml(payload, {
+          selectedMode: state.selectedGridTravelMode,
+          buildMetadata: popupBuildMetadata(),
+          allowShortlist: true,
+          shortlistSaved: savedCell(payload.cell_id)
+        }), payload);
       } catch (error) {
         if (error && error.name === "AbortError") {
           return;
@@ -2260,17 +3143,15 @@ function initializeMap() {
     }
 
     if (clickAction.type === CLICK_ACTIONS.COARSE_GRID) {
-      state.popup
-        .setLngLat(event.lngLat)
-        .setHTML(coarseGridPopupHtml(
+      showGridPopup(event.lngLat, coarseGridPopupHtml(
           clickAction.features[0].properties || {},
           resolutionForZoom(state.map.getZoom()),
           {
             legacyUnavailable: runtimeLegacyFieldsUnavailable(state.runtime).length > 0,
-            selectedMode: state.selectedGridTravelMode
+            selectedMode: state.selectedGridTravelMode,
+            buildMetadata: popupBuildMetadata()
           }
-        ))
-        .addTo(state.map);
+        ));
     }
   });
 
@@ -2318,13 +3199,29 @@ function initializeMap() {
 
 function initializeApp(runtime) {
   state.runtime = runtime;
+  state.initialUrlState = parseMapUrlState(window.location.href, runtime);
+  state.linkedBuildUnavailable = linkedBuildUnavailable(state.initialUrlState, runtime);
   state.gridVisible = true;
   state.activeGridResolutionM = null;
   state.debugGridVisible = false;
   state.gridDebug = createGridDebugState(DEBUG_GRID_ENABLED);
   state.gridDebugSnapshotFallbackText = "";
-  state.selectedGridLayer = readSavedGridLayer();
-  state.selectedGridTravelMode = readSavedGridTravelMode();
+  state.selectedGridLayer = state.initialUrlState.layer || readSavedGridLayer();
+  state.selectedGridTravelMode = state.initialUrlState.mode || readSavedGridTravelMode();
+  state.permalinkInspect = state.initialUrlState.inspect;
+  state.shortlist = runtimeIsDailyAccessModel(runtime) ? loadShortlist(window.localStorage) : [];
+  state.compareSelectedIds = new Set();
+  state.compareItems = [];
+  state.compareOpen = false;
+  state.compareEphemeral = false;
+  state.compareReturnFocus = null;
+  state.compareLoadToken = 0;
+  state.inspectOpen = false;
+  state.inspectPayload = null;
+  state.inspectReturnFocus = null;
+  state.linkedCellMarker = null;
+  state.linkedCellHighlightTimer = null;
+  state.linkedCellGeometry = null;
   state.enabledAmenityCategories = new Set();
   state.enabledAmenityTiers = new Map(
     Object.entries(defaultAmenityTierSelections(runtime)).map(function (entry) {
@@ -2356,6 +3253,7 @@ function initializeApp(runtime) {
     state.selectedNoiseSources.delete("industry");
   }
   state.selectedNoiseBands = new Set(noiseDefaults.bands || []);
+  ensureInspectDrawerElements();
   buildGridLayerControls();
   buildGridTravelModeControls();
   buildAmenityControls();
@@ -2364,6 +3262,7 @@ function initializeApp(runtime) {
   buildTransitControls();
   maybeBuildDebugGridControl();
   wireUi();
+  renderShortlist();
   updatePanelVisibility();
   initializeMap();
 }
@@ -2405,6 +3304,8 @@ async function fetchRuntimePayload() {
   }
   throw lastError || new Error("Failed to load runtime");
 }
+
+ensurePanelHeaderActions();
 
 fetchRuntimePayload()
   .then(initializeApp)

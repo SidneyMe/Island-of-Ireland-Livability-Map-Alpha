@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Island of Ireland Livability</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/app.css?v=2026-07-06-2">
-    <link rel="stylesheet" href="/static/dist/app.css?v=2026-07-06-2">
+    <link rel="stylesheet" href="/static/app.css?v=2026-11-27-panel-attribution-1">
+    <link rel="stylesheet" href="/static/dist/app.css?v=2026-11-27-panel-attribution-1">
 </head>
 <body>
     <div id="app">
@@ -14,29 +14,44 @@
             <div id="map-stage">
                 <div id="map" aria-label="Livability map"></div>
                 <div id="status-pill">Loading map...</div>
+                <div id="data-provenance" class="floating-card" aria-live="polite">
+                    <div class="data-provenance-heading">
+                        <strong>Data &amp; model</strong>
+                        <span id="data-freshness" class="data-freshness data-freshness-incomplete">Incomplete</span>
+                    </div>
+                    <p>OSM: <span id="data-osm">unknown</span></p>
+                    <p>GTFS: <span id="data-gtfs">unknown</span></p>
+                    <p>Model: <span id="data-model">unknown</span></p>
+                    <p>Updated: <span id="data-updated">unknown</span> · build <span id="data-build">unknown</span></p>
+                    <div id="linked-build-warning" class="linked-build-warning" hidden>
+                        <span>The linked build is unavailable.</span>
+                        <button id="use-current-build" type="button">Use current build</button>
+                    </div>
+                </div>
             </div>
             <div id="zoom-controls" class="floating-card">
                 <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
                 <button id="zoom-out" type="button" aria-label="Zoom out">-</button>
             </div>
-            <button
-                id="panel-toggle"
-                class="floating-card"
-                type="button"
-                aria-controls="control-panel"
-                aria-expanded="true"
-            >
-                Hide panel
-            </button>
         </div>
 
         <aside id="control-panel" class="floating-card">
             <div class="panel-header">
-                <div>
+                <div class="panel-header-copy">
                     <p class="eyebrow">Local Web App</p>
                     <h1>Island of Ireland Livability</h1>
                 </div>
-                <div id="resolution-chip">Grid --</div>
+                <div class="panel-header-actions">
+                    <div id="resolution-chip">Grid --</div>
+                    <button
+                        id="panel-toggle"
+                        type="button"
+                        aria-controls="control-panel"
+                        aria-expanded="true"
+                        aria-label="Hide panel"
+                        title="Hide panel"
+                    >‹</button>
+                </div>
             </div>
 
             <p class="panel-copy">
@@ -131,6 +146,20 @@
                 </section>
             </section>
 
+            <section id="shortlist-section" class="panel-section" hidden>
+                <div class="section-heading">
+                    <h2>Shortlist</h2>
+                    <span id="shortlist-count">0 / 20</span>
+                </div>
+                <p id="shortlist-empty" class="panel-copy">Open a Daily Access v4 score popup and save a cell.</p>
+                <div id="shortlist-items" class="shortlist-items"></div>
+                <div class="shortlist-actions">
+                    <button id="shortlist-compare" type="button" disabled>Compare (0)</button>
+                    <button id="shortlist-export" type="button" disabled>Export JSON</button>
+                    <button id="shortlist-clear" type="button" disabled>Clear all</button>
+                </div>
+            </section>
+
             <section class="panel-section">
                 <div class="section-heading">
                     <h2>Amenities</h2>
@@ -180,8 +209,35 @@
                 </ul>
             </section>
         </aside>
+
+        <aside id="inspect-drawer" class="inspect-drawer" role="dialog" aria-modal="false" aria-labelledby="inspect-title" hidden tabindex="-1">
+            <div class="inspect-header">
+                <div>
+                    <p class="eyebrow">Map cell</p>
+                    <h2 id="inspect-title">Cell details</h2>
+                </div>
+                <button id="inspect-close" type="button" aria-label="Close cell details">×</button>
+            </div>
+            <div id="inspect-content" class="inspect-content"></div>
+        </aside>
+
+        <aside id="compare-drawer" class="compare-drawer" role="dialog" aria-modal="true" aria-labelledby="compare-title" hidden tabindex="-1">
+            <div class="compare-header">
+                <div>
+                    <p class="eyebrow">Daily Access v4</p>
+                    <h2 id="compare-title">Compare locations</h2>
+                </div>
+                <div class="compare-header-actions">
+                    <button id="compare-share" type="button">Copy link</button>
+                    <button id="compare-close" type="button" aria-label="Close comparison">×</button>
+                </div>
+            </div>
+            <p id="compare-status" class="panel-copy" aria-live="polite"></p>
+            <div id="compare-content" class="compare-content"></div>
+            <button id="compare-save-both" type="button" hidden>Save both to shortlist</button>
+        </aside>
     </div>
 
-    <script type="module" src="/static/dist/app.js?v=2026-11-26-route-network-1"></script>
+    <script type="module" src="/static/dist/app.js?v=2026-11-27-panel-attribution-1"></script>
 </body>
 </html>

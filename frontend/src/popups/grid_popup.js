@@ -17,6 +17,25 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;");
 }
 
+function buildMetadataHtml(options = {}) {
+  const metadata = options.buildMetadata;
+  const permalink = options.permalink !== false;
+  const details = metadata && (metadata.model || metadata.buildKey)
+    ? "<p class=\"popup-muted\">Model: " + escapeHtml(metadata.model || "unknown") +
+      " · build " + escapeHtml(String(metadata.buildKey || "unknown").slice(0, 10)) + "</p>"
+    : "";
+  return details + (permalink
+    ? '<button class="popup-permalink" type="button">Copy link to this cell</button>'
+    : "");
+}
+
+function shortlistButtonHtml(options = {}) {
+  if (!options.allowShortlist) return "";
+  return '<button class="popup-shortlist" type="button"' +
+    (options.shortlistSaved ? " disabled" : "") + ">" +
+    (options.shortlistSaved ? "Saved" : "Save to shortlist") + "</button>";
+}
+
 function modeAwareHtml(payload) {
   const modeAware = payload && payload.mode_aware;
   if (!modeAware || typeof modeAware !== "object") {
@@ -77,16 +96,25 @@ function dailyAccessSectionHtml(values) {
   const componentItems = ["shops", "transport", "healthcare", "parks"].map(function (category) {
     return "<li><strong>" + scoreLabel(category) + "</strong>: " + pointsText(components[category]) + "</li>";
   }).join("");
-  const penaltyItems = ["railway_proximity", "road_proximity"].map(function (penalty) {
+  const contextLabels = { industrial_context: "Industrial context", over_concentration: "Venue concentration", pitch_noise: "Pitch noise", rail_station_access: "Rail / tram station access", green_buffer: "Residential green buffer" };
+  const penaltyItems = ["railway_proximity", "road_proximity", "industrial_context", "over_concentration", "pitch_noise"].filter(function (name) {
+    return name in penalties;
+  }).map(function (penalty) {
     const value = penalties[penalty];
-    return "<li><strong>" + scoreLabel(penalty) + "</strong>: " +
+    return "<li><strong>" + (contextLabels[penalty] || scoreLabel(penalty)) + "</strong>: " +
       pointsText(isMissing(value) ? null : -Math.abs(Number(value))) + "</li>";
   }).join("");
   const accessItems = Object.keys(NEED_LABELS).map(function (need) {
     const value = access[need];
     return "<li>" + NEED_LABELS[need] + ": " + (isMissing(value) ? "n/a" : Math.round(Number(value) * 100) + "%") + "</li>";
   }).join("");
-  return "<ul>" + componentItems + penaltyItems + "</ul><p>Access</p><ul>" + accessItems + "</ul>";
+  const bonusItems = Object.entries(values.bonuses || {}).map(function ([name, value]) {
+    return "<li><strong>" + escapeHtml(contextLabels[name] || name) + "</strong>: +" + pointsText(value) + "</li>";
+  }).join("");
+  const context = values.context;
+  const contextHtml = context ? '<p class="score-context">Land-use coverage: ' + Math.round(context.landuse_coverage * 100) + "% · Residential: " + Math.round(context.residential_share * 100) + "% · Industrial: " + Math.round(context.industrial_share * 100) + "%</p>" : "";
+  return '<div class="score-breakdown"><ul class="score-metrics">' + componentItems + penaltyItems + bonusItems +
+    '</ul>' + contextHtml + '<h5>Access</h5><ul class="score-access">' + accessItems + "</ul></div>";
 }
 
 // Daily access v4: values come from the score shards; there are no raw
@@ -107,7 +135,7 @@ function modeComparisonHtml(payload) {
     return "<li><strong>" + MODE_LABELS[mode] + "</strong>: " +
       Number(modes[mode].total_score).toFixed(1) + " / 100</li>";
   }).join("");
-  return items ? '<div class="popup-score-variant"><h4>Travel modes</h4><ul>' + items + "</ul></div>" : "";
+  return items ? '<div class="popup-score-variant"><h4>Travel modes</h4><ul class="score-mode-list">' + items + "</ul></div>" : "";
 }
 
 function dailyAccessInspectHtml(payload, options = {}) {
@@ -148,6 +176,8 @@ function dailyAccessInspectHtml(payload, options = {}) {
       modeComparisonHtml(payload) +
       visibleHtml +
       "<p>Model: " + escapeHtml(payload.scoring_model) + "</p>" +
+      shortlistButtonHtml(options) +
+      buildMetadataHtml(options) +
     "</div>"
   );
 }
@@ -195,6 +225,7 @@ export function inspectPopupHtml(payload, options = {}) {
       "<p>Land coverage: " + (Number(payload.effective_area_ratio || 0) * 100).toFixed(0) + "%</p>" +
       "<ul>" + listHtml + "</ul>" +
       modeAwareHtml(payload) +
+      buildMetadataHtml(options) +
     "</div>"
   );
 }
@@ -204,6 +235,12 @@ export function coarseGridPopupHtml(properties, fallbackResolutionM = 50, option
   const selectedMode = String(options && options.selectedMode || "walk");
   const modePrefix = selectedMode === "walk" ? "" : selectedMode + "_";
   const selectedTotal = properties[modePrefix + "total_score"];
+  const extraLabels = {industrial_context: "Industrial context", over_concentration: "Venue concentration", pitch_noise: "Pitch noise", rail_station_access: "Rail / tram station access", green_buffer: "Residential green buffer"};
+  const contextItems = legacyUnavailable ? Object.entries(extraLabels).filter(function ([name]) {
+    return !isMissing(properties[modePrefix + "score_" + name]);
+  }).map(function ([name, label]) {
+    return "<li><strong>" + label + "</strong>: " + pointsText(properties[modePrefix + "score_" + name]) + "</li>";
+  }).join("") : "";
   const listHtml = SCORE_SECTIONS.map(function (category) {
     const title = scoreLabel(category);
     const count = Number(properties["count_" + category] || 0);
@@ -230,9 +267,10 @@ export function coarseGridPopupHtml(properties, fallbackResolutionM = 50, option
       "<h3>" + (legacyUnavailable ? escapeHtml(MODE_LABELS[selectedMode] || "Walk") + " score " : "Walk score ") +
         Number(isMissing(selectedTotal) ? (properties.total_score || 0) : selectedTotal).toFixed(1) + " / 100</h3>" +
       "<p>Visible grid: " + escapeHtml(formatResolutionLabel(properties.resolution_m || fallbackResolutionM)) + "</p>" +
-      "<ul>" + listHtml + "</ul>" +
+      "<ul>" + listHtml + contextItems + "</ul>" +
       (legacyUnavailable ? "<p>Raw counts, clusters and effective units are not part of this model.</p>" : "") +
       modeAwareHtml(properties) +
+      buildMetadataHtml(options) +
     "</div>"
   );
 }

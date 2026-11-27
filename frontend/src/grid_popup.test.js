@@ -147,4 +147,27 @@ import { coarseGridPopupHtml, inspectPopupHtml } from "./popups/grid_popup.js";
   assert.match(html, /Bike score 0\.0 \/ 100/);
 }
 
+{
+  const html = inspectPopupHtml({scoring_model: "daily-access-v4", valid_land: true, network_status: "ok", total_score: 50,
+    component_scores: {}, service_access: {},
+    penalties: { industrial_context: 8, over_concentration: 4, pitch_noise: 2 },
+    bonuses: {rail_station_access: 3, green_buffer: 2},
+    context: {landuse_coverage: .6, residential_share: .5, industrial_share: .1}
+  }, {buildMetadata: {model: "daily-access-v4 · model 3", buildKey: "build-123456"}, allowShortlist: true});
+  assert.match(html, /Industrial context<\/strong>: -8\.0 points/);
+  assert.match(html, /Rail \/ tram station access<\/strong>: \+3\.0 points/);
+  assert.match(html, /Residential green buffer<\/strong>: \+2\.0 points/);
+  assert.match(html, /Land-use coverage: 60%/);
+  assert.match(html, /class="score-metrics"/);
+  assert.match(html, /class="score-access"/);
+  assert.match(html, /build build-123/);
+  assert.match(html, /Copy link to this cell/);
+  assert.match(html, /Save to shortlist/);
+}
+
+{
+  const legacy = inspectPopupHtml({ scoring_model: "v3", valid_land: true, total_score: 10, component_scores: {} }, { allowShortlist: false });
+  assert.doesNotMatch(legacy, /Save to shortlist/);
+}
+
 console.log("grid popup checks passed");

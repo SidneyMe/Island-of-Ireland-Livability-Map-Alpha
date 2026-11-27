@@ -5,19 +5,25 @@ import {
 } from "./landuse_filters.js";
 import PROTOMAPS_LIGHT_STYLE from "./basemap_style.generated.json" with { type: "json" };
 
+function attributionItems(items) {
+  return items.map(function (item) {
+    return '<span class="map-attribution-item">' + item + "</span>";
+  }).join("");
+}
+
 // Every licence below requires attribution wherever the derived tiles are shown.
-const LIVABILITY_ATTRIBUTION = [
+const LIVABILITY_ATTRIBUTION = attributionItems([
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors (ODbL)',
   '<a href="https://overturemaps.org/">Overture Maps Foundation</a> (CDLA-Permissive-2.0)',
   'Transit data: <a href="https://www.transportforireland.ie/transitData/PT_Data.html">National Transport Authority</a> (CC BY 4.0)',
   '<a href="https://www.opendatani.gov.uk/">Translink via OpenDataNI</a> (OGL)',
   'Boundaries: <a href="https://data-osi.opendata.arcgis.com/">Tailte &Eacute;ireann</a> (CC BY 4.0)',
   '&copy; Crown copyright, <a href="https://www.opendatani.gov.uk/">OSNI</a> (OGL)'
-].join(" | ");
-const NOISE_ATTRIBUTION = [
+]);
+const NOISE_ATTRIBUTION = attributionItems([
   'Noise maps: <a href="https://www.epa.ie/our-services/monitoring--assessment/noise/">EPA Ireland</a> (CC BY 4.0)',
   '<a href="https://www.opendatani.gov.uk/dataset/environmental-noise-directive-noise-mapping">DAERA via OpenDataNI</a> (OGL)'
-].join(" | ");
+]);
 const BASEMAP_SOURCE_ID = "basemap";
 const BASEMAP_SOURCE_LAYER_ID = "protomaps";
 const BASEMAP_GLYPHS_PATH = "/static/basemap/fonts/{fontstack}/{range}.pbf";
@@ -955,7 +961,10 @@ function buildStyle(runtime, options = {}) {
     sources[BASEMAP_SOURCE_ID] = {
       type: "vector",
       url: basemapPmtilesUrl,
-      attribution: '<a href="https://github.com/protomaps/basemaps">Protomaps</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> | Landcover: <a href="https://daylightmap.org/">Daylight</a> (ESA WorldCover, CC BY 4.0)'
+      attribution: attributionItems([
+        '<a href="https://github.com/protomaps/basemaps">Protomaps</a> &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        'Landcover: <a href="https://daylightmap.org/">Daylight</a> (ESA WorldCover, CC BY 4.0)'
+      ])
     };
   }
 
