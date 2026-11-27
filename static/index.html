@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Island of Ireland Livability</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/static/app.css?v=2026-11-27-panel-attribution-1">
-    <link rel="stylesheet" href="/static/dist/app.css?v=2026-11-27-panel-attribution-1">
+    <link rel="stylesheet" href="/static/app.css?v=2026-11-27-workspace-1">
+    <link rel="stylesheet" href="/static/dist/app.css?v=2026-11-27-workspace-1">
 </head>
 <body>
     <div id="app">
@@ -14,20 +14,11 @@
             <div id="map-stage">
                 <div id="map" aria-label="Livability map"></div>
                 <div id="status-pill">Loading map...</div>
-                <div id="data-provenance" class="floating-card" aria-live="polite">
-                    <div class="data-provenance-heading">
-                        <strong>Data &amp; model</strong>
-                        <span id="data-freshness" class="data-freshness data-freshness-incomplete">Incomplete</span>
-                    </div>
-                    <p>OSM: <span id="data-osm">unknown</span></p>
-                    <p>GTFS: <span id="data-gtfs">unknown</span></p>
-                    <p>Model: <span id="data-model">unknown</span></p>
-                    <p>Updated: <span id="data-updated">unknown</span> · build <span id="data-build">unknown</span></p>
                     <div id="linked-build-warning" class="linked-build-warning" hidden>
                         <span>The linked build is unavailable.</span>
                         <button id="use-current-build" type="button">Use current build</button>
                     </div>
-                </div>
+
             </div>
             <div id="zoom-controls" class="floating-card">
                 <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
@@ -38,11 +29,10 @@
         <aside id="control-panel" class="floating-card">
             <div class="panel-header">
                 <div class="panel-header-copy">
-                    <p class="eyebrow">Local Web App</p>
-                    <h1>Island of Ireland Livability</h1>
+                    <p class="eyebrow">Explore the island</p>
+                    <h1>Ireland <span>Livability</span></h1>
                 </div>
                 <div class="panel-header-actions">
-                    <div id="resolution-chip">Grid --</div>
                     <button
                         id="panel-toggle"
                         type="button"
@@ -54,18 +44,23 @@
                 </div>
             </div>
 
-            <p class="panel-copy">
-                Pan and zoom across the island. The app only requests the active grid resolution for the visible viewport.
-            </p>
-
+            <nav class="workspace-tabs" role="tablist" aria-label="Map workspace">
+                <button id="tab-explore" type="button" role="tab" aria-selected="true" aria-controls="workspace-explore">Explore</button>
+                <button id="tab-layers" type="button" role="tab" aria-selected="false" aria-controls="workspace-layers" tabindex="-1">Layers <span id="active-layer-count" hidden>0</span></button>
+                <button id="tab-saved" type="button" role="tab" aria-selected="false" aria-controls="workspace-saved" tabindex="-1">Saved</button>
+                <button id="tab-about" type="button" role="tab" aria-selected="false" aria-controls="workspace-about" tabindex="-1">About</button>
+            </nav>
+            <div class="workspace-body">
+            <div id="workspace-explore" role="tabpanel" aria-labelledby="tab-explore" tabindex="0">
             <section class="panel-section">
-                <h2>Grid</h2>
+                <div class="section-heading"><h2>Livability score</h2><div id="resolution-chip">Grid --</div></div>
                 <label class="toggle-row" for="grid-toggle">
-                    <span>Show livability score grid</span>
+                    <span>Show score on map</span>
                     <input id="grid-toggle" type="checkbox" checked>
                 </label>
-                <div id="grid-travel-mode-controls" class="grid-layer-controls" hidden></div>
-                <div id="grid-layer-controls" class="grid-layer-controls"></div>
+                <div id="grid-travel-mode-controls" class="grid-layer-controls" role="group" aria-label="Travel mode" hidden></div>
+                <p class="control-caption">What matters to you?</p>
+                <div id="grid-layer-controls" class="grid-layer-controls" role="group" aria-label="Score category"></div>
                 <p id="grid-layer-note" class="grid-layer-note">Active layer: Walk · Combined</p>
 
                 <section id="grid-debug-section" class="grid-debug-section" hidden>
@@ -146,19 +141,22 @@
                 </section>
             </section>
 
-            <section id="shortlist-section" class="panel-section" hidden>
-                <div class="section-heading">
-                    <h2>Shortlist</h2>
-                    <span id="shortlist-count">0 / 20</span>
+                <div class="score-legend" aria-label="Score scale: 0 is lower access, 100 is higher access">
+                    <div class="legend-heading"><span>Lower access</span><span>Higher access</span></div>
+                    <div class="score-gradient"></div>
+                    <div class="legend-ticks"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>
                 </div>
-                <p id="shortlist-empty" class="panel-copy">Open a Daily Access v4 score popup and save a cell.</p>
-                <div id="shortlist-items" class="shortlist-items"></div>
-                <div class="shortlist-actions">
-                    <button id="shortlist-compare" type="button" disabled>Compare (0)</button>
-                    <button id="shortlist-export" type="button" disabled>Export JSON</button>
-                    <button id="shortlist-clear" type="button" disabled>Clear all</button>
-                </div>
-            </section>
+                <p class="map-tip"><span aria-hidden="true">⌖</span> Click any scored area to see what’s nearby.</p>
+            </div>
+            <div id="workspace-layers" role="tabpanel" aria-labelledby="tab-layers" tabindex="0" hidden>
+                <div class="workspace-intro"><h2>Map overlays</h2><p>Add places and networks to the map. <span id="active-layer-summary">No overlays on</span>.</p></div>
+                <nav class="layer-tabs" role="tablist" aria-label="Overlay categories">
+                    <button id="tab-places" type="button" role="tab" aria-selected="true" aria-controls="layers-places">Places</button>
+                    <button id="tab-transport" type="button" role="tab" aria-selected="false" aria-controls="layers-transport" tabindex="-1">Transport</button>
+                    <button id="tab-environment" type="button" role="tab" aria-selected="false" aria-controls="layers-environment" tabindex="-1">Environment</button>
+                </nav>
+                <div id="layers-places" role="tabpanel" aria-labelledby="tab-places" tabindex="0">
+
 
             <section class="panel-section">
                 <div class="section-heading">
@@ -168,6 +166,8 @@
                 <div id="amenity-controls"></div>
             </section>
 
+                </div>
+                <div id="layers-transport" role="tabpanel" aria-labelledby="tab-transport" tabindex="0" hidden>
             <section class="panel-section">
                 <div class="section-heading">
                     <h2>Transport network</h2>
@@ -178,36 +178,75 @@
 
             <section class="panel-section">
                 <div class="section-heading">
-                    <h2>Land-use context</h2>
-                    <span id="landuse-note">Off until enabled</span>
-                </div>
-                <div id="landuse-controls"></div>
-            </section>
-
-            <section class="panel-section">
-                <div class="section-heading">
-                    <h2>Official-derived transport/industry noise overlay</h2>
-                    <span id="noise-note">Off until enabled</span>
-                </div>
-                <div id="noise-controls"></div>
-            </section>
-
-            <section class="panel-section">
-                <div class="section-heading">
                     <h2>Service deserts</h2>
                 </div>
                 <div id="transit-controls"></div>
                 <p class="panel-copy">Areas with baseline reachable stops but no public departures in the desert window.</p>
             </section>
+                </div>
+                <div id="layers-environment" role="tabpanel" aria-labelledby="tab-environment" tabindex="0" hidden>
+            <section class="panel-section">
+                <div class="section-heading">
+                    <h2>Land-use context</h2>
+                    <span id="landuse-note">Off until enabled</span>
+                </div>
+                <p class="section-description">See residential areas, farmland, forests and other land uses.</p>
+                <div id="landuse-controls"></div>
+            </section>
 
             <section class="panel-section">
-                <h2>How it works</h2>
-                <ul id="facts-list">
-                    <li>Base map tiles stream separately from the scoring data.</li>
-                    <li>Only one grid resolution is active at a time.</li>
-                    <li>Amenity overlays are fetched only after you turn them on.</li>
-                </ul>
+                <div class="section-heading">
+                    <h2>Noise exposure</h2>
+                    <span id="noise-note">Off until enabled</span>
+                </div>
+                <p class="section-description">Estimated exposure from official transport and industry noise maps. Not a measurement at a specific address; this overlay does not change the score.</p>
+                <div id="noise-controls"></div>
             </section>
+
+
+
+                </div>
+            </div>
+            <div id="workspace-saved" role="tabpanel" aria-labelledby="tab-saved" tabindex="0" hidden>
+                <div class="workspace-intro"><h2>Saved places</h2><p>Build a shortlist and compare everyday access.</p></div>
+            <section id="shortlist-section" class="panel-section" hidden>
+                <div class="section-heading">
+                    <h2>Shortlist</h2>
+                    <span id="shortlist-count">0 / 20</span>
+                </div>
+                <p id="shortlist-empty" class="panel-copy">Click a scored area on the map, then save it from the details panel. Choose two saved places to compare.</p>
+                <div id="shortlist-items" class="shortlist-items"></div>
+                <div class="shortlist-actions">
+                    <button id="shortlist-compare" type="button" disabled>Compare (0)</button>
+                    <button id="shortlist-export" type="button" disabled>Export JSON</button>
+                    <button id="shortlist-clear" type="button" disabled>Clear all</button>
+                </div>
+            </section>
+                <p id="shortlist-unavailable" class="panel-copy">Saving and comparing places is available with a Daily Access v4 dataset.</p>
+            </div>
+            <div id="workspace-about" role="tabpanel" aria-labelledby="tab-about" tabindex="0" hidden>
+                <div class="workspace-intro"><h2>About this map</h2><p>Use the score as a starting point to explore Ireland and Northern Ireland.</p></div>
+                <section class="panel-section">
+                    <h2>How to explore</h2>
+                    <ul id="facts-list">
+                        <li>Choose a travel mode and a category to colour the map.</li>
+                        <li>Zoom in and click a scored area for its access breakdown.</li>
+                        <li>Add overlays to see nearby places, transport and land use.</li>
+                    </ul>
+                </section>
+                <div id="data-provenance" class="floating-card" aria-live="polite">
+                    <div class="data-provenance-heading">
+                        <strong>Data &amp; model</strong>
+                        <span id="data-freshness" class="data-freshness data-freshness-incomplete">Incomplete</span>
+                    </div>
+                    <p>OSM: <span id="data-osm">unknown</span></p>
+                    <p>GTFS: <span id="data-gtfs">unknown</span></p>
+                    <p>Model: <span id="data-model">unknown</span></p>
+                    <p>Updated: <span id="data-updated">unknown</span> · build <span id="data-build">unknown</span></p>
+                </div>
+            </div>
+            </div>
+            <footer class="workspace-footer"><span>Island of Ireland</span><span>Explore · Inspect · Compare</span></footer>
         </aside>
 
         <aside id="inspect-drawer" class="inspect-drawer" role="dialog" aria-modal="false" aria-labelledby="inspect-title" hidden tabindex="-1">
@@ -238,6 +277,6 @@
         </aside>
     </div>
 
-    <script type="module" src="/static/dist/app.js?v=2026-11-27-panel-attribution-1"></script>
+    <script type="module" src="/static/dist/app.js?v=2026-11-27-workspace-1"></script>
 </body>
 </html>

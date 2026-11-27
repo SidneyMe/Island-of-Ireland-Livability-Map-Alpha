@@ -2,6 +2,8 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { Protocol } from "pmtiles";
 import "./main.css";
+import "./workspace.css";
+import { initializeWorkspace } from "./workspace_ui.js";
 import {
   buildAmenityLayerFilter,
   defaultAmenityTierSelections,
@@ -1043,9 +1045,14 @@ function buildGridLayerControls() {
     title.textContent = option.label;
 
     const subtitle = document.createElement("span");
-    subtitle.textContent = option.value === "combined"
-      ? "Total score"
-      : "Single-category view";
+    const descriptions = {
+      combined: "The everyday essentials, together",
+      shops: "Groceries & errands",
+      transport: "Stops & connections",
+      healthcare: "Care & pharmacies",
+      parks: "Green space nearby"
+    };
+    subtitle.textContent = descriptions[option.value] || "Category score";
 
     const input = document.createElement("input");
     input.type = "radio";
@@ -1165,14 +1172,13 @@ function updatePanelVisibility() {
 
 function ensurePanelHeaderActions() {
   const header = elements.controlPanel && elements.controlPanel.querySelector(".panel-header");
-  if (!header || !elements.panelToggle || !elements.resolutionChip) return;
+  if (!header || !elements.panelToggle) return;
   let actions = header.querySelector(".panel-header-actions");
   if (!actions) {
     actions = document.createElement("div");
     actions.className = "panel-header-actions";
     header.appendChild(actions);
   }
-  actions.appendChild(elements.resolutionChip);
   actions.appendChild(elements.panelToggle);
 }
 
@@ -1771,10 +1777,11 @@ function updateLanduseNote() {
   }
   const minZoom = Number(runtimeLanduseContextLayerMinZoom(state.runtime));
   const maxZoom = Number(state.runtime.landuse_context_max_zoom || 11);
-  const caveat = "Phase 2 land-use context overlay. Visible at z" + minZoom + "-z" + maxZoom + ". Residential, commercial, industrial, retail, farmland, forest. Not yet used in scoring.";
+  const caveat = "Residential, commercial, industrial, retail, farmland and forest. This visual overlay does not change the score.";
+  elements.landuseNote.title = caveat;
   elements.landuseNote.textContent = state.landuseVisible
-    ? caveat
-    : caveat + " Off until enabled.";
+    ? "On · visible at zoom " + minZoom + "–" + maxZoom
+    : "Off";
 }
 
 function applyLanduseFilter() {
@@ -1836,9 +1843,8 @@ function updateNoiseNote() {
     return;
   }
   const caveat = "Official-derived noise overlay. Road/rail use grid proxy; airport/industry use resolved official noise polygons. Not measured point noise.";
-  elements.noiseNote.textContent = state.noiseVisible
-    ? caveat
-    : caveat + " Off until enabled.";
+  elements.noiseNote.title = caveat;
+  elements.noiseNote.textContent = state.noiseVisible ? "On" : "Off";
 }
 
 function applyNoiseFilter() {
@@ -2340,7 +2346,7 @@ function buildLanduseControls() {
   const overlaySubtitle = document.createElement("span");
   const minZoom = Number(runtimeLanduseContextLayerMinZoom(state.runtime));
   const maxZoom = Number(state.runtime.landuse_context_max_zoom || 11);
-  overlaySubtitle.textContent = "Phase 2 context overlay (z" + minZoom + "-z" + maxZoom + ")";
+  overlaySubtitle.textContent = "Visible at zoom " + minZoom + "–" + maxZoom;
 
   const overlayInput = document.createElement("input");
   overlayInput.type = "checkbox";
@@ -2939,6 +2945,15 @@ function initializeMap() {
     new maplibregl.AttributionControl({ compact: true }),
     "bottom-left"
   );
+  // MapLibre initially expands compact attribution as sources arrive. Keep the
+  // workspace clear on first load; the standard info button still opens it.
+  state.map.once("load", function () {
+    const attribution = state.map.getContainer().querySelector(".maplibregl-ctrl-attrib");
+    if (attribution) {
+      attribution.removeAttribute("open");
+      attribution.classList.remove("maplibregl-compact-show");
+    }
+  });
 
   state.popup = new maplibregl.Popup({
     closeButton: true,
@@ -3305,6 +3320,7 @@ async function fetchRuntimePayload() {
   throw lastError || new Error("Failed to load runtime");
 }
 
+initializeWorkspace();
 ensurePanelHeaderActions();
 
 fetchRuntimePayload()

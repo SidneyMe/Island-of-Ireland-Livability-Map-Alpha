@@ -11,11 +11,11 @@ assert.ok(
   "land-use toggle label must be present"
 );
 assert.ok(
-  mainJs.includes('overlaySubtitle.textContent = "Phase 2 context overlay (z" + minZoom + "-z" + maxZoom + ")";'),
+  mainJs.includes('overlaySubtitle.textContent = "Visible at zoom " + minZoom + "–" + maxZoom;'),
   "land-use subtitle must describe the zoom range"
 );
 assert.ok(
-  mainJs.includes('const caveat = "Phase 2 land-use context overlay. Visible at z" + minZoom + "-z" + maxZoom + ". Residential, commercial, industrial, retail, farmland, forest. Not yet used in scoring.";'),
+  mainJs.includes('const caveat = "Residential, commercial, industrial, retail, farmland and forest. This visual overlay does not change the score.";'),
   "land-use note must explain the overlay and its scope"
 );
 assert.ok(
