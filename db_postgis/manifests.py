@@ -11,6 +11,7 @@ from .tables import (
     transit_feed_manifest,
     transit_railway_corridor_manifest,
     transit_reality_manifest,
+    transit_route_network_manifest,
 )
 
 
@@ -134,6 +135,33 @@ def has_complete_transit_railway_corridor_manifest(
     if manifest is None or manifest.get("status") != "complete":
         return False
     return str(manifest.get("railway_proximity_hash") or "") == railway_proximity_hash
+
+
+def load_transit_route_network_manifest(
+    engine: Engine,
+    reality_fingerprint: str,
+) -> dict[str, Any] | None:
+    with engine.connect() as connection:
+        row = connection.execute(
+            select(transit_route_network_manifest).where(
+                transit_route_network_manifest.c.reality_fingerprint == reality_fingerprint
+            )
+        ).mappings().first()
+    return dict(row) if row is not None else None
+
+
+def has_complete_transit_route_network_manifest(
+    engine: Engine,
+    reality_fingerprint: str,
+    *,
+    route_network_hash: str,
+) -> bool:
+    manifest = load_transit_route_network_manifest(engine, reality_fingerprint)
+    return bool(
+        manifest
+        and manifest.get("status") == "complete"
+        and str(manifest.get("route_network_hash") or "") == route_network_hash
+    )
 
 
 def has_complete_build(engine: Engine, build_key: str) -> bool:

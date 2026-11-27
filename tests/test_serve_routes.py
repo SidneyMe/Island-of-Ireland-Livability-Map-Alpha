@@ -33,6 +33,10 @@ class ServeRoutesTests(TestCase):
                 ),
                 "/api/runtime": ("api_runtime", None),
                 "/api/inspect": ("api_inspect", None),
+                "/transit/routes/build-1/index.json": (
+                    "route_asset",
+                    Path(tmp_name) / "route-assets" / "build-1" / "index.json",
+                ),
             }
 
             for path, (kind, target_path) in cases.items():
@@ -44,6 +48,7 @@ class ServeRoutesTests(TestCase):
                         pmtiles_path_for_url=pmtiles_path_for_url,
                         noise_pmtiles_url_path=None,
                         noise_pmtiles_path=None,
+                        route_assets_dir=Path(tmp_name) / "route-assets",
                     )
                     self.assertIsNotNone(route)
                     assert route is not None
@@ -53,6 +58,25 @@ class ServeRoutesTests(TestCase):
 
                     if path == "/tiles/surface/250/15/3/4.png":
                         self.assertEqual(route.groups, ("250", "15", "3", "4"))
+
+    def test_route_assets_reject_path_traversal_and_unhashed_details(self) -> None:
+        with TemporaryDirectory() as tmp_name:
+            kwargs = {
+                "static_dir": Path(tmp_name) / "static",
+                "export_path": Path(tmp_name) / "export.zip",
+                "route_assets_dir": Path(tmp_name) / "route-assets",
+                "pmtiles_path_for_url": lambda path: None,
+                "noise_pmtiles_url_path": None,
+                "noise_pmtiles_path": None,
+            }
+            self.assertIsNone(serve_routes.resolve_get_route("/transit/routes/../index.json", **kwargs))
+            self.assertIsNone(serve_routes.resolve_get_route("/transit/routes/build/route.geojson", **kwargs))
+            route = serve_routes.resolve_get_route(
+                "/transit/routes/build/0123456789abcdef01234567.geojson", **kwargs
+            )
+            self.assertIsNotNone(route)
+            assert route is not None
+            self.assertEqual(route.kind, "route_asset")
 
     def test_resolve_get_route_prioritizes_pmtiles_before_static_and_api(self) -> None:
         with TemporaryDirectory() as tmp_name:

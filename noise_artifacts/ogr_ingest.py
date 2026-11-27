@@ -44,7 +44,8 @@ _OGR2OGR_FID_START_ENV = "NOISE_OGR2OGR_FID_START"
 _DEFAULT_OGR2OGR_FID_START = 0
 _OGR2OGR_GDB_WORKERS_ENV = "NOISE_OGR2OGR_GDB_WORKERS"
 _DEFAULT_OGR2OGR_GDB_WORKERS = 2
-_MAX_OGR2OGR_GDB_WORKERS = 6
+_MAX_OGR2OGR_GDB_WORKERS = 64
+_OGR2OGR_SOURCE_WORKERS_ENV = "NOISE_OGR2OGR_SOURCE_WORKERS"
 _WINDOWS_DEFAULT_OGR2OGR_GDB_WORKERS = 2
 _WINDOWS_ROAD_GDB_TIMEOUT_SECONDS = 900
 _DEFAULT_ROAD_GDB_TIMEOUT_SECONDS = 1800
@@ -2743,6 +2744,107 @@ def _imported_stage_row_count_or_fail(
     return row_count
 
 
+def _ogr2ogr_source_workers() -> int:
+    """Concurrent non-chunked noise sources (each ogr2ogr + normalize is one core).
+
+    Defaults to 1 (serial, on the shared connection) because parallel GDAL
+    imports are fragile on Windows; raise it on large Linux build hosts.
+    """
+    value = _env_int(_OGR2OGR_SOURCE_WORKERS_ENV, 1)
+    if value <= 0:
+        raise NoiseIngestError(f"{_OGR2OGR_SOURCE_WORKERS_ENV} must be > 0; got {value}")
+    return value
+
+
+def _ingest_simple_noise_source(
+    conn,
+    *,
+    engine: Engine,
+    source_path: Path,
+    layer_name: str | None,
+    stage_table: str,
+    selected_fields: list[str],
+    source_label: str,
+    normalize,
+    progress_cb=None,
+) -> tuple[float, float, int]:
+    """Import one non-chunked source into its stage table and normalize it.
+
+    The stage table must already be prepared (dropped and committed). Returns
+    (import seconds, normalize seconds, inserted rows).
+    """
+    started = time.perf_counter()
+    try:
+        timeout_for_source = _ogr2ogr_timeout_for_source(source_path=source_path, layer_name=layer_name)
+        try:
+            _run_ogr2ogr_import(
+                engine=engine,
+                source_path=source_path,
+                stage_table=stage_table,
+                layer_name=layer_name,
+                selected_fields=selected_fields,
+                progress_cb=progress_cb,
+                timeout_seconds=timeout_for_source,
+            )
+        except NoiseIngestError as exc:
+            if "timed out" not in str(exc).lower() or not _source_is_small_shapefile(
+                source_path=source_path,
+                layer_name=layer_name,
+            ):
+                raise
+            _progress(
+                progress_cb,
+                "ogr2ogr direct import timed out for small shapefile; retrying via local gpkg fallback",
+            )
+            _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
+            _run_small_shapefile_fallback_import(
+                engine=engine,
+                source_path=source_path,
+                stage_table=stage_table,
+                selected_fields=selected_fields,
+                progress_cb=progress_cb,
+            )
+        import_elapsed = time.perf_counter() - started
+        _imported_stage_row_count_or_fail(
+            conn,
+            stage_table=stage_table,
+            source_label=source_label,
+            elapsed_seconds=import_elapsed,
+            progress_cb=progress_cb,
+        )
+        _prepare_stage_table(conn, stage_table)
+        normalize_started = time.perf_counter()
+        inserted = int(normalize(conn))
+        normalize_elapsed = time.perf_counter() - normalize_started
+        conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+        conn.commit()
+        return import_elapsed, normalize_elapsed, inserted
+    except BaseException:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        if not _keep_failed_stage_tables():
+            _drop_tables_best_effort(conn, [stage_table], progress_cb=progress_cb)
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        raise
+
+
+def _locked_progress_cb(progress_cb):
+    if progress_cb is None:
+        return None
+    lock = threading.Lock()
+
+    def _locked(*args, **kwargs):
+        with lock:
+            return progress_cb(*args, **kwargs)
+
+    return _locked
+
+
 def ingest_noise_normalized_ogr2ogr(
     engine: Engine,
     noise_source_hash: str,
@@ -2790,6 +2892,82 @@ def ingest_noise_normalized_ogr2ogr(
         if skipped_parts:
             _progress(progress_cb, f"skipped historical rounds: {'; '.join(skipped_parts)}")
 
+    source_workers = _ogr2ogr_source_workers()
+    if source_workers > 1:
+        progress_cb = _locked_progress_cb(progress_cb)
+        _progress(progress_cb, f"ogr2ogr parallel source ingest enabled: workers={source_workers}")
+    source_pool = ThreadPoolExecutor(max_workers=source_workers, thread_name_prefix="noise-src") if source_workers > 1 else None
+    pending_sources: list[Any] = []
+
+    def _accumulate(result: tuple[float, float, int]) -> None:
+        nonlocal raw_extract_seconds, normalize_insert_seconds, total_inserted
+        import_seconds, normalize_seconds, inserted = result
+        raw_extract_seconds += import_seconds
+        normalize_insert_seconds += normalize_seconds
+        total_inserted += inserted
+
+    def _run_simple_source(shared_conn, **kwargs) -> None:
+        if source_pool is None:
+            try:
+                _accumulate(_ingest_simple_noise_source(shared_conn, engine=engine, progress_cb=progress_cb, **kwargs))
+            except BaseException:
+                _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
+                raise
+            return
+
+        def _task() -> tuple[float, float, int]:
+            with engine.connect() as task_conn:
+                return _ingest_simple_noise_source(task_conn, engine=engine, progress_cb=progress_cb, **kwargs)
+
+        pending_sources.append(source_pool.submit(_task))
+
+    def _drain_sources() -> None:
+        try:
+            for future in pending_sources:
+                _accumulate(future.result())
+        except BaseException:
+            for future in pending_sources:
+                future.cancel()
+            _terminate_active_ogr2ogr_processes(progress_cb=progress_cb)
+            raise
+        finally:
+            pending_sources.clear()
+
+    try:
+        _ingest_sources_ogr2ogr(
+            engine,
+            noise_source_hash=noise_source_hash,
+            data_dir=data_dir,
+            selected_roi_specs=selected_roi_specs,
+            selected_ni_specs=selected_ni_specs,
+            run_simple_source=_run_simple_source,
+            accumulate=_accumulate,
+            progress_cb=progress_cb,
+        )
+        _drain_sources()
+    finally:
+        if source_pool is not None:
+            source_pool.shutdown(wait=True, cancel_futures=True)
+
+    _progress(progress_cb, f"ingest done: read via ogr2ogr; inserted {total_inserted:,}")
+    _timing(progress_cb, "ingest.raw_extract", raw_extract_seconds)
+    _timing(progress_cb, "ingest.normalize_insert", normalize_insert_seconds)
+    _timing(progress_cb, "ingest.total", time.perf_counter() - total_started)
+    return total_inserted
+
+
+def _ingest_sources_ogr2ogr(
+    engine: Engine,
+    *,
+    noise_source_hash: str,
+    data_dir,
+    selected_roi_specs,
+    selected_ni_specs,
+    run_simple_source,
+    accumulate,
+    progress_cb=None,
+) -> None:
+    """Walk the selected sources: chunked Road GDB inline, the rest via run_simple_source."""
     with engine.connect() as conn:
         _cleanup_stale_noise_import_backends(conn, progress_cb=progress_cb)
         for spec in selected_roi_specs:
@@ -2905,8 +3083,7 @@ def ingest_noise_normalized_ogr2ogr(
                                 source_layer=spec.member,
                                 progress_cb=progress_cb,
                             )
-                            normalize_insert_seconds += time.perf_counter() - norm_started
-                            total_inserted += inserted_rows
+                            accumulate((0.0, time.perf_counter() - norm_started, inserted_rows))
                             conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
                             conn.commit()
                             _progress(
@@ -2969,8 +3146,7 @@ def ingest_noise_normalized_ogr2ogr(
                                 raise NoiseIngestError(
                                     f"Road GDB chunk import produced zero rows after retries: source={canonical_cache}"
                                 )
-                            total_inserted += inserted_rows
-                            normalize_insert_seconds += 0.0
+                            accumulate((0.0, 0.0, inserted_rows))
                             _progress(
                                 progress_cb,
                                 f"Road GDB total imported rows={imported_rows:,} normalized rows={inserted_rows:,}",
@@ -2999,51 +3175,10 @@ def ingest_noise_normalized_ogr2ogr(
                         "WARNING: NOISE_ROAD_GDB_CANONICAL_CACHE=0; falling back to direct FileGDB import path",
                     )
             if not used_chunking:
-                timeout_for_source = _ogr2ogr_timeout_for_source(source_path=source_path, layer_name=layer_name)
-                try:
-                    _run_ogr2ogr_import(
-                        engine=engine,
-                        source_path=source_path,
-                        stage_table=stage_table,
-                        layer_name=layer_name,
-                        selected_fields=selected_fields,
-                        progress_cb=progress_cb,
-                        timeout_seconds=timeout_for_source,
-                    )
-                except NoiseIngestError as exc:
-                    if "timed out" not in str(exc).lower() or not _source_is_small_shapefile(
-                        source_path=source_path,
-                        layer_name=layer_name,
-                    ):
-                        raise
-                    _progress(
-                        progress_cb,
-                        "ogr2ogr direct import timed out for small shapefile; retrying via local gpkg fallback",
-                    )
-                    _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
-                    _run_small_shapefile_fallback_import(
-                        engine=engine,
-                        source_path=source_path,
-                        stage_table=stage_table,
-                        selected_fields=selected_fields,
-                        progress_cb=progress_cb,
-                    )
-            import_elapsed = time.perf_counter() - import_started
-            raw_extract_seconds += import_elapsed
-            try:
-                if not used_chunking:
-                    _imported_stage_row_count_or_fail(
-                        conn,
-                        stage_table=stage_table,
-                        source_label=f"ROI layer {spec.member}",
-                        elapsed_seconds=import_elapsed,
-                        progress_cb=progress_cb,
-                    )
 
-                    _prepare_stage_table(conn, stage_table)
-                    started = time.perf_counter()
-                    inserted = _normalize_roi_stage(
-                        conn,
+                def _normalize_roi(task_conn, spec=spec, stage_table=stage_table) -> int:
+                    return _normalize_roi_stage(
+                        task_conn,
                         stage_table=stage_table,
                         noise_source_hash=noise_source_hash,
                         round_number=spec.round_number,
@@ -3052,9 +3187,20 @@ def ingest_noise_normalized_ogr2ogr(
                         source_layer=spec.member,
                         progress_cb=progress_cb,
                     )
-                    normalize_insert_seconds += time.perf_counter() - started
-                    total_inserted += inserted
-                    conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
+
+                run_simple_source(
+                    conn,
+                    source_path=source_path,
+                    layer_name=layer_name,
+                    stage_table=stage_table,
+                    selected_fields=selected_fields,
+                    source_label=f"ROI layer {spec.member}",
+                    normalize=_normalize_roi,
+                )
+                continue
+            import_elapsed = time.perf_counter() - import_started
+            accumulate((import_elapsed, 0.0, 0))
+            try:
                 conn.commit()
             except Exception:
                 if used_chunking:
@@ -3138,66 +3284,33 @@ def ingest_noise_normalized_ogr2ogr(
                 stage_table = f"_noise_raw_{_short_hash(f'ni:{zip_name}:{member}')}"
                 _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
 
-                started = time.perf_counter()
-                timeout_for_source = _ogr2ogr_timeout_for_source(source_path=source_path, layer_name=None)
-                try:
-                    _run_ogr2ogr_import(
-                        engine=engine,
-                        source_path=source_path,
-                        stage_table=stage_table,
-                        layer_name=None,
-                        selected_fields=selected_fields,
-                        progress_cb=progress_cb,
-                        timeout_seconds=timeout_for_source,
-                    )
-                except NoiseIngestError as exc:
-                    if "timed out" not in str(exc).lower() or not _source_is_small_shapefile(
-                        source_path=source_path,
-                        layer_name=None,
-                    ):
-                        raise
-                    _progress(
-                        progress_cb,
-                        "ogr2ogr direct import timed out for small shapefile; retrying via local gpkg fallback",
-                    )
-                    _prepare_stage_table_for_external_import(conn, stage_table=stage_table, progress_cb=progress_cb)
-                    _run_small_shapefile_fallback_import(
-                        engine=engine,
-                        source_path=source_path,
-                        stage_table=stage_table,
-                        selected_fields=selected_fields,
-                        progress_cb=progress_cb,
-                    )
-                import_elapsed = time.perf_counter() - started
-                raw_extract_seconds += import_elapsed
-                _imported_stage_row_count_or_fail(
-                    conn,
+                def _normalize_ni(
+                    task_conn,
                     stage_table=stage_table,
-                    source_label=f"NI layer {member}",
-                    elapsed_seconds=import_elapsed,
-                    progress_cb=progress_cb,
-                )
-
-                _prepare_stage_table(conn, stage_table)
-                started = time.perf_counter()
-                inserted = _normalize_ni_stage(
-                    conn,
-                    stage_table=stage_table,
-                    noise_source_hash=noise_source_hash,
-                    round_number=int(round_number),
+                    round_number=round_number,
                     source_type=source_type,
                     metric=metric,
-                    source_dataset=zip_name,
-                    source_layer=member,
-                    progress_cb=progress_cb,
-                )
-                normalize_insert_seconds += time.perf_counter() - started
-                total_inserted += inserted
-                conn.execute(text(f"DROP TABLE IF EXISTS {_quote_ident(stage_table)}"))
-                conn.commit()
+                    zip_name=zip_name,
+                    member=member,
+                ) -> int:
+                    return _normalize_ni_stage(
+                        task_conn,
+                        stage_table=stage_table,
+                        noise_source_hash=noise_source_hash,
+                        round_number=int(round_number),
+                        source_type=source_type,
+                        metric=metric,
+                        source_dataset=zip_name,
+                        source_layer=member,
+                        progress_cb=progress_cb,
+                    )
 
-    _progress(progress_cb, f"ingest done: read via ogr2ogr; inserted {total_inserted:,}")
-    _timing(progress_cb, "ingest.raw_extract", raw_extract_seconds)
-    _timing(progress_cb, "ingest.normalize_insert", normalize_insert_seconds)
-    _timing(progress_cb, "ingest.total", time.perf_counter() - total_started)
-    return total_inserted
+                run_simple_source(
+                    conn,
+                    source_path=source_path,
+                    layer_name=None,
+                    stage_table=stage_table,
+                    selected_fields=selected_fields,
+                    source_label=f"NI layer {member}",
+                    normalize=_normalize_ni,
+                )

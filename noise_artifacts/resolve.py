@@ -11,11 +11,15 @@ Provenance is group-level aggregate — no expensive per-polygon spatial joins.
 from __future__ import annotations
 
 import logging
+import os
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.pool import NullPool
 
 log = logging.getLogger(__name__)
 
@@ -64,12 +68,36 @@ def materialize_resolved_display(
 
     domain_table = domain_parts_table_name(noise_resolved_hash)
     newer_table = newer_pieces_table_name(noise_resolved_hash)
+    workers = min(_resolve_workers(), max(1, total_groups))
     domain_started = time.perf_counter()
     with engine.begin() as conn:
         domain_parts = _create_domain_parts_table(conn, domain_table, domain_wkb)
         _create_newer_pieces_table(conn, newer_table)
     _timing(progress_cb, "resolve.domain_parts", time.perf_counter() - domain_started)
     _progress(progress_cb, f"resolve domain split into {domain_parts:,} indexed parts")
+    if workers > 1:
+        # Groups are independent; rounds inside a group stay sequential because
+        # newer rounds mask older ones. Each group gets its own newer-pieces table.
+        _progress(progress_cb, f"resolve parallel: workers={workers}")
+        try:
+            total_inserted = _resolve_groups_parallel(
+                engine,
+                groups=groups,
+                workers=workers,
+                noise_resolved_hash=noise_resolved_hash,
+                round_table=round_table,
+                domain_table=domain_table,
+                newer_table=newer_table,
+                topology_grid_metres=topology_grid_metres,
+                created_at=created_at,
+                progress_cb=progress_cb,
+            )
+        finally:
+            with engine.begin() as conn:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{domain_table}"'))
+                conn.execute(text(f'DROP TABLE IF EXISTS "{newer_table}"'))
+        _timing(progress_cb, "resolve.total", time.perf_counter() - total_started)
+        return {"total_inserted": total_inserted, "groups_processed": total_groups}
     try:
         for jurisdiction, source_type, metric in groups:
             group_num = groups_processed + 1
@@ -138,6 +166,99 @@ def materialize_resolved_display(
 
     _timing(progress_cb, "resolve.total", time.perf_counter() - total_started)
     return {"total_inserted": total_inserted, "groups_processed": groups_processed}
+
+
+def _resolve_workers() -> int:
+    raw = (os.getenv("NOISE_RESOLVE_WORKERS") or "").strip()
+    if not raw:
+        return 1
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"NOISE_RESOLVE_WORKERS must be > 0; got {value}")
+    return value
+
+
+def _resolve_groups_parallel(
+    engine: Engine,
+    *,
+    groups: list[tuple[str, str, str]],
+    workers: int,
+    noise_resolved_hash: str,
+    round_table: str,
+    domain_table: str,
+    newer_table: str,
+    topology_grid_metres: float,
+    created_at,
+    progress_cb,
+) -> int:
+    # NullPool so each group has its own backend whatever the shared pool size.
+    worker_engine = create_engine(engine.url, poolclass=NullPool, future=True)
+    lock = threading.Lock()
+
+    def _report(message: str) -> None:
+        with lock:
+            _progress(progress_cb, message)
+
+    def _one(group_num: int, group: tuple[str, str, str]) -> int:
+        jurisdiction, source_type, metric = group
+        group_newer = f"{newer_table}_g{group_num}"
+        group_started = time.perf_counter()
+        inserted = 0
+        with worker_engine.begin() as conn:
+            _create_newer_pieces_table(conn, group_newer)
+        try:
+            with worker_engine.connect() as conn:
+                rounds = _fetch_rounds(conn, round_table, jurisdiction, source_type, metric)
+            for round_number in rounds:
+                round_started = time.perf_counter()
+                with worker_engine.begin() as conn:
+                    n, fallbacks = _insert_resolved_round(
+                        conn,
+                        noise_resolved_hash=noise_resolved_hash,
+                        round_table=round_table,
+                        domain_table=domain_table,
+                        newer_table=group_newer,
+                        jurisdiction=jurisdiction,
+                        source_type=source_type,
+                        metric=metric,
+                        round_number=round_number,
+                        topology_grid_metres=topology_grid_metres,
+                        created_at=created_at,
+                    )
+                    inserted += n
+                    _insert_provenance(
+                        conn,
+                        noise_resolved_hash=noise_resolved_hash,
+                        round_table=round_table,
+                        jurisdiction=jurisdiction,
+                        source_type=source_type,
+                        metric=metric,
+                        round_number=round_number,
+                    )
+                _report(
+                    f"[noise:timing] resolve.group_{group_num}.round_{round_number} rows={n:,} "
+                    f"{time.perf_counter() - round_started:.1f}s"
+                )
+                if fallbacks:
+                    _report(
+                        f"resolve GEOS fallbacks in {jurisdiction} {source_type} {metric} "
+                        f"round {round_number}: {fallbacks}"
+                    )
+        finally:
+            with worker_engine.begin() as conn:
+                conn.execute(text(f'DROP TABLE IF EXISTS "{group_newer}"'))
+        _report(
+            f"[noise:timing] resolve.group_{group_num} {jurisdiction} {source_type} {metric} "
+            f"{time.perf_counter() - group_started:.1f}s"
+        )
+        return inserted
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="noise-resolve") as executor:
+            futures = [executor.submit(_one, num, group) for num, group in enumerate(groups, start=1)]
+            return sum(future.result() for future in futures)
+    finally:
+        worker_engine.dispose()
 
 
 def domain_parts_table_name(noise_resolved_hash: str) -> str:

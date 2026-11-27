@@ -259,6 +259,8 @@ WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'db_user')
 \gexec
 SELECT format('ALTER ROLE %I LOGIN PASSWORD %L CREATEDB', :'db_user', :'db_password')
 \gexec
+SELECT format('GRANT pg_read_all_settings TO %I', :'db_user')
+\gexec
 SQL
 
 "${PG_ADMIN[@]}" psql --set=ON_ERROR_STOP=1 --set=db_name="$DB_NAME" --set=db_user="$DB_USER" -p "$DB_PORT" -d postgres <<'SQL'

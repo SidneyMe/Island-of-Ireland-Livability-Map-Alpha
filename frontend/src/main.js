@@ -69,6 +69,17 @@ import {
   renderGridDebugCard
 } from "./grid_debug.js";
 import { transportRealityPopupHtml } from "./transport_reality_popup.js";
+import {
+  emptyRouteFeatureCollection,
+  focusFeatureFilter,
+  mergeRouteFeatureCollections,
+  normalizeRouteIndex,
+  overviewModeFilter,
+  parseRouteKeys,
+  routeDirectionGroups,
+  routeDisplayName,
+  searchRoutes
+} from "./route_network.js";
 import { fetchWithTimeout } from "./api_client.js";
 import { sourceLoaded as mapSourceLoaded } from "./map_source_guard.js";
 import { amenityPopupHtml } from "./popups/amenity_popup.js";
@@ -99,6 +110,7 @@ const elements = {
   resolutionChip: document.getElementById("resolution-chip"),
   amenityControls: document.getElementById("amenity-controls"),
   amenityNote: document.getElementById("amenity-note"),
+  transportNetworkControls: document.getElementById("transport-network-controls"),
   transitControls: document.getElementById("transit-controls"),
   noiseControls: document.getElementById("noise-controls"),
   noiseNote: document.getElementById("noise-note"),
@@ -157,6 +169,15 @@ const state = {
   selectedTransportModes: new Set(["bus", "rail", "tram"]),
   transportIncludeUnscheduled: false,
   transportRequireExceptionOnly: false,
+  routeIndex: [],
+  routeIndexLoaded: false,
+  routeSearchQuery: "",
+  focusedRouteKeys: [],
+  selectedRouteKey: null,
+  selectedRoutePatternId: null,
+  routeFeatureCollection: emptyRouteFeatureCollection(),
+  routeBrowserElement: null,
+  pendingRouteAssets: null,
   serviceDesertsVisible: false,
   noiseVisible: false,
   noiseOpacity: runtimeDefaultNoiseOpacity,
@@ -581,6 +602,347 @@ function applyTransportRealityVisibility() {
     state.transportRealityVisible ? "visible" : "none"
   );
   applyTransportRealityFilter();
+  applyTransportNetworkVisibility();
+}
+
+const ROUTE_OVERVIEW_LAYERS = [
+  "transport-routes-casing",
+  "transport-routes-line",
+  "transport-routes-approximate",
+  "transport-transfer-hubs"
+];
+const ROUTE_FOCUS_LAYERS = [
+  "transport-focus-casing",
+  "transport-focus-line",
+  "transport-focus-approximate",
+  "transport-focus-arrows",
+  "transport-focus-stops",
+  "transport-focus-transfers",
+  "transport-focus-endpoints"
+];
+
+function setOptionalLayerVisibility(layerId, visibility) {
+  if (state.map && state.map.getLayer(layerId)) {
+    state.map.setLayoutProperty(layerId, "visibility", visibility);
+  }
+}
+
+function applyTransportNetworkFilters() {
+  if (!state.map) return;
+  const modeFilter = overviewModeFilter(state.selectedTransportModes);
+  if (state.map.getLayer("transport-routes-casing")) {
+    state.map.setFilter("transport-routes-casing", modeFilter);
+    state.map.setFilter("transport-routes-line", ["all", modeFilter, ["!=", ["get", "geometry_source"], "stop_sequence_approximate"]]);
+    state.map.setFilter("transport-routes-approximate", ["all", modeFilter, ["==", ["get", "geometry_source"], "stop_sequence_approximate"]]);
+    const hubModeFilters = Array.from(state.selectedTransportModes).map(function (mode) {
+      return ["in", "," + mode + ",", ["concat", ",", ["coalesce", ["get", "modes"], ""], ","]];
+    });
+    state.map.setFilter("transport-transfer-hubs", hubModeFilters.length ? ["any", ...hubModeFilters] : ["==", 1, 0]);
+  }
+  const patternId = state.selectedRoutePatternId;
+  const lineKinds = ["pattern"];
+  ["transport-focus-casing", "transport-focus-arrows"].forEach(function (layerId) {
+    if (state.map.getLayer(layerId)) state.map.setFilter(layerId, focusFeatureFilter(state.selectedTransportModes, patternId, lineKinds));
+  });
+  if (state.map.getLayer("transport-focus-line")) {
+    state.map.setFilter("transport-focus-line", ["all", focusFeatureFilter(state.selectedTransportModes, patternId, lineKinds), ["!=", ["get", "geometry_source"], "stop_sequence_approximate"]]);
+    state.map.setFilter("transport-focus-approximate", ["all", focusFeatureFilter(state.selectedTransportModes, patternId, lineKinds), ["==", ["get", "geometry_source"], "stop_sequence_approximate"]]);
+  }
+  const patternFilter = patternId ? ["==", ["get", "pattern_id"], patternId] : null;
+  ["transport-focus-stops", "transport-focus-endpoints"].forEach(function (layerId) {
+    if (!state.map.getLayer(layerId)) return;
+    const base = layerId === "transport-focus-endpoints"
+      ? ["all", ["==", ["get", "feature_kind"], "stop"], ["==", ["get", "is_endpoint"], true]]
+      : ["==", ["get", "feature_kind"], "stop"];
+    const stopModeFilter = ["in", ["get", "mode"], ["literal", Array.from(state.selectedTransportModes)]];
+    state.map.setFilter(layerId, patternFilter ? ["all", base, patternFilter, stopModeFilter] : ["all", base, stopModeFilter]);
+  });
+  if (state.map.getLayer("transport-focus-transfers")) {
+    const focusHubModeFilters = Array.from(state.selectedTransportModes).map(function (mode) {
+      return ["in", "," + mode + ",", ["concat", ",", ["coalesce", ["get", "modes"], ""], ","]];
+    });
+    state.map.setFilter("transport-focus-transfers", [
+      "all",
+      ["==", ["get", "feature_kind"], "transfer"],
+      focusHubModeFilters.length ? ["any", ...focusHubModeFilters] : ["==", 1, 0]
+    ]);
+  }
+}
+
+function applyTransportNetworkVisibility() {
+  if (!state.map) return;
+  const enabled = Boolean(state.runtime.transport_network_enabled && state.transportRealityVisible);
+  const focused = state.focusedRouteKeys.length > 0;
+  ROUTE_OVERVIEW_LAYERS.forEach(function (layerId) {
+    setOptionalLayerVisibility(layerId, enabled && !focused ? "visible" : "none");
+  });
+  ROUTE_FOCUS_LAYERS.forEach(function (layerId) {
+    setOptionalLayerVisibility(layerId, enabled && focused ? "visible" : "none");
+  });
+  applyTransportNetworkFilters();
+}
+
+function routeForKey(routeKey) {
+  return state.routeIndex.find(function (route) { return route.route_key === routeKey; }) || null;
+}
+
+function escapeTransportText(value) {
+  return String(value || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+async function ensureRouteIndex() {
+  if (state.routeIndexLoaded) return state.routeIndex;
+  const url = String(state.runtime.transport_route_index_url || "");
+  if (!state.runtime.transport_network_enabled || !url) return [];
+  const response = await fetchWithTimeout(url, {}, INSPECT_FETCH_TIMEOUT_MS);
+  if (!response.ok) throw new Error("Route index unavailable (" + response.status + ")");
+  state.routeIndex = normalizeRouteIndex(await response.json());
+  state.routeIndexLoaded = true;
+  renderRouteBrowser();
+  return state.routeIndex;
+}
+
+function routeAssetTransferKeys() {
+  const keys = new Set();
+  state.routeFeatureCollection.features.forEach(function (feature) {
+    if (feature && feature.properties && feature.properties.feature_kind === "transfer") {
+      parseRouteKeys(feature.properties.route_keys).forEach(function (key) {
+        if (key !== state.selectedRouteKey) keys.add(key);
+      });
+    }
+  });
+  return Array.from(keys);
+}
+
+async function focusRoutes(routeKeys, selectedRouteKey = null) {
+  await ensureRouteIndex();
+  const keys = Array.from(new Set((routeKeys || []).map(String))).filter(function (key) {
+    const route = routeForKey(key);
+    return route && state.selectedTransportModes.has(route.mode);
+  });
+  if (state.pendingRouteAssets) state.pendingRouteAssets.abort();
+  state.pendingRouteAssets = new AbortController();
+  const controller = state.pendingRouteAssets;
+  try {
+    const payloads = await Promise.all(keys.map(async function (key) {
+      const route = routeForKey(key);
+      const response = await fetchWithTimeout(route.asset_url, { signal: controller.signal }, INSPECT_FETCH_TIMEOUT_MS);
+      if (!response.ok) throw new Error("Route detail unavailable (" + response.status + ")");
+      return response.json();
+    }));
+    if (controller.signal.aborted) return;
+    state.focusedRouteKeys = keys;
+    state.selectedRouteKey = selectedRouteKey && keys.includes(selectedRouteKey) ? selectedRouteKey : null;
+    state.selectedRoutePatternId = null;
+    state.routeFeatureCollection = mergeRouteFeatureCollections(payloads);
+    const source = state.map && state.map.getSource("transport-route-focus");
+    if (source) source.setData(state.routeFeatureCollection);
+    applyTransportNetworkVisibility();
+    renderRouteBrowser();
+  } catch (error) {
+    if (error && error.name === "AbortError") return;
+    updateStatus(error.message || "Unable to load route");
+    elements.statusPill.style.display = "";
+  }
+}
+
+function clearRouteSelection() {
+  if (state.pendingRouteAssets) state.pendingRouteAssets.abort();
+  state.focusedRouteKeys = [];
+  state.selectedRouteKey = null;
+  state.selectedRoutePatternId = null;
+  state.routeFeatureCollection = emptyRouteFeatureCollection();
+  const source = state.map && state.map.getSource("transport-route-focus");
+  if (source) source.setData(state.routeFeatureCollection);
+  applyTransportNetworkVisibility();
+  renderRouteBrowser();
+}
+
+function reconcileFocusedRoutesToModes() {
+  if (!state.focusedRouteKeys.length) return;
+  const allowed = state.focusedRouteKeys.filter(function (key) {
+    const route = routeForKey(key);
+    return route && state.selectedTransportModes.has(route.mode);
+  });
+  if (!allowed.length) {
+    clearRouteSelection();
+    return;
+  }
+  if (allowed.length !== state.focusedRouteKeys.length) {
+    const selected = allowed.includes(state.selectedRouteKey) ? state.selectedRouteKey : null;
+    focusRoutes(allowed, selected);
+  }
+}
+
+function renderRouteBrowser() {
+  const target = state.routeBrowserElement;
+  if (!target) return;
+  target.replaceChildren();
+  if (!state.runtime.transport_network_enabled) {
+    const message = document.createElement("p");
+    message.className = "panel-copy";
+    message.textContent = "Route lines are not available in this build; stop points still work.";
+    target.appendChild(message);
+    return;
+  }
+  const search = document.createElement("input");
+  search.type = "search";
+  search.className = "transport-route-search";
+  search.placeholder = "Route number, name or terminus";
+  search.value = state.routeSearchQuery;
+  search.disabled = !state.transportRealityVisible;
+  search.addEventListener("input", function () {
+    state.routeSearchQuery = search.value;
+    renderRouteBrowser();
+    const replacement = state.routeBrowserElement && state.routeBrowserElement.querySelector("input[type=search]");
+    if (replacement) {
+      replacement.focus();
+      replacement.setSelectionRange(replacement.value.length, replacement.value.length);
+    }
+  });
+  target.appendChild(search);
+
+  if (state.focusedRouteKeys.length) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "transport-route-clear";
+    clear.textContent = "Clear selection";
+    clear.addEventListener("click", clearRouteSelection);
+    target.appendChild(clear);
+  }
+
+  const selected = routeForKey(state.selectedRouteKey);
+  if (selected) {
+    const heading = document.createElement("strong");
+    heading.className = "transport-route-selection-title";
+    heading.textContent = routeDisplayName(selected);
+    target.appendChild(heading);
+    const allDirections = document.createElement("button");
+    allDirections.type = "button";
+    allDirections.className = "transport-direction-button";
+    allDirections.textContent = "Both directions";
+    allDirections.disabled = !state.selectedRoutePatternId;
+    allDirections.addEventListener("click", function () {
+      state.selectedRoutePatternId = null;
+      applyTransportNetworkFilters();
+      renderRouteBrowser();
+    });
+    target.appendChild(allDirections);
+    routeDirectionGroups(selected, state.routeFeatureCollection).forEach(function (group) {
+      if (group.directions.length === 1) {
+        const direction = group.directions[0];
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "transport-direction-button";
+        button.textContent = group.label;
+        button.disabled = state.selectedRoutePatternId === direction.pattern_id;
+        button.addEventListener("click", function () {
+          state.selectedRoutePatternId = direction.pattern_id;
+          applyTransportNetworkFilters();
+          renderRouteBrowser();
+        });
+        target.appendChild(button);
+        return;
+      }
+
+      const select = document.createElement("select");
+      select.className = "transport-direction-select";
+      select.setAttribute("aria-label", group.label + " variants");
+      const prompt = document.createElement("option");
+      prompt.value = "";
+      prompt.textContent = group.label + " (" + group.directions.length + " variants)";
+      prompt.disabled = true;
+      select.appendChild(prompt);
+
+      const baseLabels = group.directions.map(function (direction) {
+        const origin = String(direction.origin_name || "").trim();
+        const destination = String(direction.destination_name || "").trim();
+        return origin && destination ? origin + " → " + destination : group.label;
+      });
+      const labelCounts = new Map();
+      baseLabels.forEach(function (label) { labelCounts.set(label, (labelCounts.get(label) || 0) + 1); });
+      const labelIndexes = new Map();
+      group.directions.forEach(function (direction, index) {
+        const baseLabel = baseLabels[index];
+        const nextIndex = (labelIndexes.get(baseLabel) || 0) + 1;
+        labelIndexes.set(baseLabel, nextIndex);
+        const option = document.createElement("option");
+        option.value = String(direction.pattern_id);
+        option.textContent = labelCounts.get(baseLabel) > 1
+          ? baseLabel + " · variant " + nextIndex
+          : baseLabel;
+        select.appendChild(option);
+      });
+      const selectedInGroup = group.directions.some(function (direction) {
+        return String(direction.pattern_id) === String(state.selectedRoutePatternId || "");
+      });
+      select.value = selectedInGroup ? String(state.selectedRoutePatternId) : "";
+      select.addEventListener("change", function () {
+        if (!select.value) return;
+        state.selectedRoutePatternId = select.value;
+        applyTransportNetworkFilters();
+        renderRouteBrowser();
+      });
+      target.appendChild(select);
+    });
+    const transferKeys = routeAssetTransferKeys();
+    if (transferKeys.length) {
+      const label = document.createElement("span");
+      label.className = "transport-route-meta";
+      label.textContent = "Transfers";
+      target.appendChild(label);
+      transferKeys.slice(0, 12).forEach(function (key) {
+        const route = routeForKey(key);
+        if (!route) return;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "transport-route-result";
+        button.textContent = routeDisplayName(route);
+        button.addEventListener("click", function () { focusRoutes([key], key); });
+        target.appendChild(button);
+      });
+    }
+    return;
+  }
+
+  if (state.focusedRouteKeys.length) {
+    const label = document.createElement("span");
+    label.className = "transport-route-meta";
+    label.textContent = "Routes at selection";
+    target.appendChild(label);
+    state.focusedRouteKeys.map(routeForKey).filter(Boolean).forEach(function (route) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "transport-route-result";
+      const swatch = document.createElement("span");
+      swatch.className = "transport-route-swatch";
+      swatch.style.background = route.route_color || "#2563eb";
+      button.appendChild(swatch);
+      button.appendChild(document.createTextNode(routeDisplayName(route)));
+      button.addEventListener("click", function () { focusRoutes([route.route_key], route.route_key); });
+      target.appendChild(button);
+    });
+    return;
+  }
+
+  const matches = searchRoutes(state.routeIndex, state.routeSearchQuery, state.selectedTransportModes, 12);
+  matches.forEach(function (route) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "transport-route-result";
+    const swatch = document.createElement("span");
+    swatch.className = "transport-route-swatch";
+    swatch.style.background = "#" + String(route.route_color || "2563eb").replace(/^#/, "");
+    button.appendChild(swatch);
+    button.appendChild(document.createTextNode(routeDisplayName(route)));
+    button.addEventListener("click", function () { focusRoutes([route.route_key], route.route_key); });
+    target.appendChild(button);
+  });
 }
 
 function applyServiceDesertVisibility() {
@@ -731,6 +1093,7 @@ function applyNoiseVisibility() {
 
 function buildAmenityControls() {
   elements.amenityControls.replaceChildren();
+  if (elements.transportNetworkControls) elements.transportNetworkControls.replaceChildren();
   const colors = state.runtime.category_colors || {};
   const counts = state.runtime.amenity_counts || {};
   let transportCardAdded = false;
@@ -747,13 +1110,14 @@ function buildAmenityControls() {
     overlayTextWrap.className = "toggle-label";
 
     const overlayTitle = document.createElement("strong");
-    overlayTitle.textContent = "Transport";
+    overlayTitle.textContent = "Transport network";
     if (color) {
       overlayTitle.style.color = color;
     }
 
     const overlaySubtitle = document.createElement("span");
-    overlaySubtitle.textContent = String(transportMappedCount(counts)) + " mapped";
+    const routeCount = Number((state.runtime.transport_route_counts || {}).total || 0);
+    overlaySubtitle.textContent = String(transportMappedCount(counts)) + " stops · " + routeCount + " routes";
 
     const overlayInput = document.createElement("input");
     overlayInput.type = "checkbox";
@@ -768,9 +1132,14 @@ function buildAmenityControls() {
     card.appendChild(overlayLabel);
 
     if (!state.runtime.transport_reality_enabled) {
-      elements.amenityControls.appendChild(card);
+      elements.transportNetworkControls.appendChild(card);
       return;
     }
+
+    const routeBrowser = document.createElement("div");
+    routeBrowser.className = "transport-route-browser";
+    state.routeBrowserElement = routeBrowser;
+    card.appendChild(routeBrowser);
 
     const tierDetails = document.createElement("details");
     tierDetails.className = "amenity-tier-details";
@@ -841,6 +1210,9 @@ function buildAmenityControls() {
         }
         syncTransportInputs();
         applyTransportRealityFilter();
+        if (entry.type === "mode") reconcileFocusedRoutesToModes();
+        applyTransportNetworkVisibility();
+        renderRouteBrowser();
       });
 
       tierRows.push({ type: entry.type, value: entry.value, input: input });
@@ -985,10 +1357,18 @@ function buildAmenityControls() {
       state.transportRealityVisible = overlayInput.checked;
       syncTransportInputs();
       applyTransportRealityVisibility();
+      renderRouteBrowser();
+      if (state.transportRealityVisible) {
+        ensureRouteIndex().catch(function (error) {
+          updateStatus(error.message || "Route index unavailable");
+          elements.statusPill.style.display = "";
+        });
+      }
     });
 
     syncTransportInputs();
-    elements.amenityControls.appendChild(card);
+    renderRouteBrowser();
+    elements.transportNetworkControls.appendChild(card);
   }
 
   Object.keys(colors)
@@ -1744,6 +2124,32 @@ function initializeMap() {
         .setLngLat(event.lngLat)
         .setHTML(transportRealityPopupHtml(popupRows))
         .addTo(state.map);
+      const routeKeys = Array.from(new Set(popupRows.flatMap(function (row) {
+        return parseRouteKeys(row.route_keys_json);
+      })));
+      if (routeKeys.length && state.runtime.transport_network_enabled) {
+        focusRoutes(routeKeys).catch(function () {});
+      }
+      return;
+    }
+
+    if (clickAction.type === CLICK_ACTIONS.TRANSPORT_HUB) {
+      const properties = clickAction.features[0] && clickAction.features[0].properties || {};
+      const keys = parseRouteKeys(properties.route_keys_json || properties.route_keys);
+      if (keys.length) focusRoutes(keys);
+      state.popup
+        .setLngLat(event.lngLat)
+        .setHTML('<div class="popup-content"><h3>' + escapeTransportText(properties.hub_name || "Transfer hub") + '</h3><p>' + keys.length + ' connecting routes</p></div>')
+        .addTo(state.map);
+      return;
+    }
+
+    if (clickAction.type === CLICK_ACTIONS.TRANSPORT_ROUTE) {
+      const properties = clickAction.features[0] && clickAction.features[0].properties || {};
+      const routeKey = String(properties.route_key || "");
+      if (routeKey) {
+        focusRoutes([routeKey], routeKey);
+      }
       return;
     }
 
@@ -1812,6 +2218,11 @@ function initializeMap() {
   state.map.on("mouseleave", "transport-reality-circle", function () {
     state.map.getCanvas().style.cursor = "";
   });
+  ["transport-routes-line", "transport-routes-approximate", "transport-focus-line", "transport-focus-approximate", "transport-transfer-hubs", "transport-focus-transfers"].forEach(function (layerId) {
+    if (!state.map.getLayer(layerId)) return;
+    state.map.on("mouseenter", layerId, function () { state.map.getCanvas().style.cursor = "pointer"; });
+    state.map.on("mouseleave", layerId, function () { state.map.getCanvas().style.cursor = ""; });
+  });
   state.map.on("mouseenter", "service-deserts-fill", function () {
     state.map.getCanvas().style.cursor = "pointer";
   });
@@ -1859,6 +2270,14 @@ function initializeApp(runtime) {
   state.selectedTransportModes = new Set(["bus", "rail", "tram"]);
   state.transportIncludeUnscheduled = false;
   state.transportRequireExceptionOnly = false;
+  state.routeIndex = [];
+  state.routeIndexLoaded = false;
+  state.routeSearchQuery = "";
+  state.focusedRouteKeys = [];
+  state.selectedRouteKey = null;
+  state.selectedRoutePatternId = null;
+  state.routeFeatureCollection = emptyRouteFeatureCollection();
+  state.routeBrowserElement = null;
   state.noiseVisible = false;
   state.noiseOpacity = runtimeDefaultNoiseOpacity;
   const noiseDefaults = defaultNoiseSelections(runtime);

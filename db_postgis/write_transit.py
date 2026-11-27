@@ -15,12 +15,16 @@ from .tables import (
     transit_reality_manifest,
     transit_railway_corridor_manifest,
     transit_railway_corridors,
+    transit_route_network_manifest,
+    transit_route_pattern_stops,
+    transit_route_patterns,
     transit_routes,
     transit_service_classification,
     transit_service_desert_cells,
     transit_stop_times,
     transit_stops,
     transit_trips,
+    transit_transfer_hubs,
 )
 
 
@@ -217,6 +221,46 @@ def replace_transit_railway_corridors(
                 == manifest["reality_fingerprint"]
             )
             .values(status="complete", completed_at=datetime.now(timezone.utc))
+        )
+
+
+def replace_transit_route_network(
+    engine: Engine,
+    *,
+    materialization,
+    progress_cb: ProgressCallback | None = None,
+) -> None:
+    root = root_module()
+    manifest = dict(getattr(materialization, "manifest", {}) or {})
+    reality_fingerprint = str(manifest["reality_fingerprint"])
+    with engine.begin() as connection:
+        for table in (
+            transit_route_patterns,
+            transit_route_pattern_stops,
+            transit_transfer_hubs,
+            transit_route_network_manifest,
+        ):
+            connection.execute(
+                delete(table).where(table.c.reality_fingerprint == reality_fingerprint)
+            )
+        connection.execute(insert(transit_route_network_manifest), [manifest])
+        root._bulk_insert(
+            connection,
+            transit_route_patterns,
+            materialization.patterns,
+            progress_cb=progress_cb,
+        )
+        root._bulk_insert(
+            connection,
+            transit_route_pattern_stops,
+            materialization.stops,
+            progress_cb=progress_cb,
+        )
+        root._bulk_insert(
+            connection,
+            transit_transfer_hubs,
+            materialization.transfer_hubs,
+            progress_cb=progress_cb,
         )
 
 

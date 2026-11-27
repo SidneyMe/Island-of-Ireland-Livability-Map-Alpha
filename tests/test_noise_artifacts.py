@@ -989,6 +989,54 @@ class DevFastModeTests(TestCase):
             with self.assertRaisesRegex(NoiseIngestError, "NOISE_DEV_FAST_MAX_WORKERS"):
                 _dev_fast_parallel_max_workers()
 
+    def test_dev_fast_geom_workers_defaults_to_cpu_count_and_validates(self) -> None:
+        from noise_artifacts.dev_fast import _dev_fast_geom_workers
+        from noise_artifacts.exceptions import NoiseIngestError
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NOISE_DEV_FAST_GEOM_WORKERS", None)
+            self.assertEqual(_dev_fast_geom_workers(), max(1, os.cpu_count() or 1))
+        with patch.dict(os.environ, {"NOISE_DEV_FAST_GEOM_WORKERS": "1"}, clear=False):
+            self.assertEqual(_dev_fast_geom_workers(), 1)
+        with patch.dict(os.environ, {"NOISE_DEV_FAST_GEOM_WORKERS": "0"}, clear=False):
+            with self.assertRaisesRegex(NoiseIngestError, "NOISE_DEV_FAST_GEOM_WORKERS"):
+                _dev_fast_geom_workers()
+
+    def test_dev_fast_per_geom_merge_matches_serial_accumulation(self) -> None:
+        from shapely.geometry import box
+
+        from noise_artifacts.dev_fast import _add_geom_cells, _geom_cells_worker, _merge_grid_acc
+
+        jobs = [
+            dict(
+                jurisdiction="roi",
+                source_type="road",
+                metric="Lden",
+                round_number=4,
+                report_period="Round 4",
+                db_low=low,
+                db_high=low + 4.0,
+                db_value=f"{int(low)}-{int(low) + 4}",
+                geom=geom,
+                grid_size_m=100,
+            )
+            for low, geom in [
+                (55.0, box(0, 0, 250, 250)),
+                (70.0, box(150, 150, 350, 350)),
+                (55.0, box(50, 50, 120, 120)),
+                (45.0, box(0, 0, 400, 50)),
+            ]
+        ]
+        serial: dict = {}
+        serial_touched = sum(_add_geom_cells(serial, **job) for job in jobs)
+        merged: dict = {}
+        merged_touched = 0
+        for row_acc, touched in map(_geom_cells_worker, jobs):
+            _merge_grid_acc(merged, row_acc)
+            merged_touched += touched
+        self.assertEqual(merged_touched, serial_touched)
+        self.assertEqual(merged, serial)
+
     def test_dev_fast_arrow_batch_size_defaults_to_memory_safer_value(self) -> None:
         from noise_artifacts.dev_fast import _dev_fast_arrow_batch_size
 

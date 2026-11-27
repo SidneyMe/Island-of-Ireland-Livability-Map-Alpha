@@ -201,6 +201,7 @@ struct StopServiceSummary {
     sunday_deps: f64,
     friday_evening_deps: f64,
     transport_score_units: u32,
+    transport_mode_tier: Option<String>,
     bus_daytime_deps: f64,
     bus_daytime_headway_min: Option<f64>,
     bus_frequency_tier: Option<String>,
@@ -237,6 +238,7 @@ struct GtfsStopReality {
     sunday_deps: f64,
     friday_evening_deps: f64,
     transport_score_units: u32,
+    transport_mode_tier: Option<String>,
     bus_daytime_deps: f64,
     bus_daytime_headway_min: Option<f64>,
     bus_frequency_tier: Option<String>,
@@ -628,6 +630,7 @@ impl DerivedWriters {
                     "sunday_deps",
                     "friday_evening_deps",
                     "transport_score_units",
+                    "transport_mode_tier",
                     "bus_daytime_deps",
                     "bus_daytime_headway_min",
                     "bus_frequency_tier",
@@ -668,6 +671,7 @@ impl DerivedWriters {
                     "sunday_deps",
                     "friday_evening_deps",
                     "transport_score_units",
+                    "transport_mode_tier",
                     "bus_daytime_deps",
                     "bus_daytime_headway_min",
                     "bus_frequency_tier",
@@ -742,6 +746,7 @@ impl DerivedWriters {
             &float_string(row.sunday_deps),
             &float_string(row.friday_evening_deps),
             &row.transport_score_units.to_string(),
+            row.transport_mode_tier.as_deref().unwrap_or(""),
             &float_string(row.bus_daytime_deps),
             &optional_float_string(row.bus_daytime_headway_min),
             row.bus_frequency_tier.as_deref().unwrap_or(""),
@@ -788,6 +793,7 @@ impl DerivedWriters {
             &float_string(row.sunday_deps),
             &float_string(row.friday_evening_deps),
             &row.transport_score_units.to_string(),
+            row.transport_mode_tier.as_deref().unwrap_or(""),
             &float_string(row.bus_daytime_deps),
             &optional_float_string(row.bus_daytime_headway_min),
             row.bus_frequency_tier.as_deref().unwrap_or(""),
@@ -1826,6 +1832,22 @@ fn bus_frequency_tier_from_headway(headway_minutes: Option<f64>) -> (Option<Stri
     (Some(tier.to_string()), units)
 }
 
+// Mirrors transport_mode_tier_from_route_modes in transit/service.py
+// (tests/test_transit_native_parity.py compares both paths).
+fn transport_mode_tier_from_route_modes(route_modes: &[String]) -> (Option<&'static str>, u32) {
+    let has = |wanted: &str| route_modes.iter().any(|mode| mode == wanted);
+    match (has("bus"), has("rail"), has("tram")) {
+        (true, true, true) => (Some("bus_rail_tram"), 5),
+        (false, true, true) => (Some("rail_tram"), 5),
+        (true, false, true) => (Some("bus_tram"), 5),
+        (false, false, true) => (Some("tram"), 5),
+        (true, true, false) => (Some("bus_rail"), 4),
+        (false, true, false) => (Some("rail"), 4),
+        (true, false, false) => (Some("bus_only"), 0),
+        (false, false, false) => (None, 0),
+    }
+}
+
 fn transport_score_units_from_frequency(
     weekday_morning_peak_deps: f64,
     weekday_evening_peak_deps: f64,
@@ -2032,8 +2054,12 @@ fn summarize_gtfs_stops(
             payload.public_departures_30d,
         );
         let route_modes: Vec<String> = payload.route_modes.into_iter().collect();
+        let (transport_mode_tier, mode_tier_score_units) =
+            transport_mode_tier_from_route_modes(&route_modes);
         let transport_score_units = if route_modes.len() == 1 && route_modes[0] == "bus" {
             bus_frequency_score_units
+        } else if mode_tier_score_units > 0 && payload.public_departures_30d > 0 {
+            bus_frequency_score_units.max(mode_tier_score_units)
         } else {
             legacy_transport_score_units
         };
@@ -2050,6 +2076,7 @@ fn summarize_gtfs_stops(
             sunday_deps,
             friday_evening_deps,
             transport_score_units,
+            transport_mode_tier: transport_mode_tier.map(str::to_string),
             bus_daytime_deps,
             bus_daytime_headway_min,
             bus_frequency_tier,
@@ -2156,6 +2183,7 @@ fn derive_gtfs_stop_reality(
             sunday_deps: summary.sunday_deps,
             friday_evening_deps: summary.friday_evening_deps,
             transport_score_units: summary.transport_score_units,
+            transport_mode_tier: summary.transport_mode_tier.clone(),
             bus_daytime_deps: summary.bus_daytime_deps,
             bus_daytime_headway_min: summary.bus_daytime_headway_min,
             bus_frequency_tier: summary.bus_frequency_tier.clone(),
@@ -2256,6 +2284,7 @@ mod tests {
             sunday_deps: 0.0,
             friday_evening_deps: 0.0,
             transport_score_units: if public_departures_30d > 0 { 1 } else { 0 },
+            transport_mode_tier: Some("bus_only".to_string()),
             bus_daytime_deps: 0.0,
             bus_daytime_headway_min: None,
             bus_frequency_tier: None,
@@ -2600,6 +2629,70 @@ mod tests {
             assert_eq!(summaries[0].bus_frequency_score_units, expected_units);
             assert_eq!(summaries[0].transport_score_units, expected_units);
         }
+    }
+
+    fn summary_for_modes(analysis_date: Date, modes: &[(&str, u32)]) -> StopServiceSummary {
+        let settings = default_settings(analysis_date);
+        let mut dataset = single_bus_dataset("SVC1", [1, 1, 1, 1, 1, 0, 0], Some(0));
+        dataset.stop_service_buckets.clear();
+        for (index, (mode, departures)) in modes.iter().enumerate() {
+            dataset.stop_service_buckets.insert(
+                (
+                    "S1".to_string(),
+                    "SVC1".to_string(),
+                    format!("R{index}"),
+                    mode.to_string(),
+                ),
+                StopTimeBuckets {
+                    total: *departures,
+                    offpeak: *departures,
+                    bus_daytime: *departures,
+                    ..Default::default()
+                },
+            );
+        }
+        let service_windows = expand_service_windows(&dataset, &settings);
+        let service_classifications =
+            classify_services(&dataset, "reality-123", &service_windows);
+        let mut summaries = summarize_gtfs_stops(
+            &dataset,
+            &settings,
+            "reality-123",
+            &service_windows,
+            &service_classifications,
+        );
+        assert_eq!(summaries.len(), 1);
+        summaries.remove(0)
+    }
+
+    #[test]
+    fn summarize_gtfs_stops_applies_fixed_rail_and_tram_tiers() {
+        let analysis_date = Date::from_calendar_date(2026, time::Month::April, 14).unwrap();
+        let cases: [(&[(&str, u32)], Option<&str>, u32); 8] = [
+            (&[("rail", 1)], Some("rail"), 4),
+            (&[("tram", 1)], Some("tram"), 5),
+            (&[("rail", 1), ("tram", 1)], Some("rail_tram"), 5),
+            (&[("bus", 6), ("rail", 1)], Some("bus_rail"), 4),
+            (&[("bus", 56), ("rail", 1)], Some("bus_rail"), 5),
+            (&[("bus", 6), ("tram", 1)], Some("bus_tram"), 5),
+            (&[("bus", 6)], Some("bus_only"), 1),
+            (&[("ferry", 1)], None, 1),
+        ];
+        for (modes, expected_tier, expected_units) in cases {
+            let summary = summary_for_modes(analysis_date, modes);
+            assert_eq!(summary.transport_mode_tier.as_deref(), expected_tier, "{modes:?}");
+            assert_eq!(summary.transport_score_units, expected_units, "{modes:?}");
+        }
+    }
+
+    #[test]
+    fn summarize_gtfs_stops_gives_no_units_to_rail_without_public_departures() {
+        // The service ended in April, so no departure falls in the window.
+        let analysis_date = Date::from_calendar_date(2026, time::Month::July, 14).unwrap();
+        let summary = summary_for_modes(analysis_date, &[("rail", 1)]);
+        assert_eq!(summary.public_departures_30d, 0);
+        assert_eq!(summary.transport_mode_tier.as_deref(), Some("rail"));
+        assert_eq!(summary.transport_score_units, 0);
     }
 
     #[test]

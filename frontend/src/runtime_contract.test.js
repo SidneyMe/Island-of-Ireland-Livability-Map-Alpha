@@ -252,6 +252,7 @@ const devRuntime = {
   const runtimeWithoutBasemap = { ...devRuntime, basemap_pmtiles_url: null };
   const style = buildStyle(runtimeWithoutBasemap, { windowOrigin: "http://127.0.0.1:8000" });
   assert.equal(style.sources[BASEMAP_SOURCE_ID], undefined);
+  assert.equal(style.glyphs, "http://127.0.0.1:8000" + BASEMAP_GLYPHS_PATH);
   assert.equal(style.sources.livability.attribution, LIVABILITY_ATTRIBUTION);
   assert.equal(style.sources.noise.attribution, NOISE_ATTRIBUTION);
   for (const required of ["OpenStreetMap", "ODbL", "Overture", "National Transport Authority", "Translink", "Tailte", "OSNI"]) {
@@ -380,6 +381,18 @@ const devRuntime = {
   const transportRealityLayer = style.layers.find(function (layer) {
     return layer.id === "transport-reality-circle";
   });
+  const transportRoutesLayer = style.layers.find(function (layer) {
+    return layer.id === "transport-routes-line";
+  });
+  const transportApproximateLayer = style.layers.find(function (layer) {
+    return layer.id === "transport-routes-approximate";
+  });
+  const transportFocusLayer = style.layers.find(function (layer) {
+    return layer.id === "transport-focus-line";
+  });
+  const transportEndpointLayer = style.layers.find(function (layer) {
+    return layer.id === "transport-focus-endpoints";
+  });
   const landuseFillLayer = style.layers.find(function (layer) {
     return layer.id === LANDUSE_CONTEXT_FILL_LAYER_ID;
   });
@@ -404,6 +417,13 @@ const devRuntime = {
 
   assert.equal(gridFillLayers.length, 1);
   assert.equal(gridOutlineLayers.length, 1);
+  assert.equal(transportRoutesLayer["source-layer"], "transport_routes");
+  assert.equal(transportRoutesLayer.minzoom, 6);
+  assert.equal(transportRoutesLayer.layout.visibility, "none");
+  assert.deepEqual(transportApproximateLayer.paint["line-dasharray"], [2, 2]);
+  assert.equal(transportFocusLayer.source, "transport-route-focus");
+  assert.ok(JSON.stringify(transportEndpointLayer.filter).includes("is_endpoint"));
+  assert.equal(style.sources["transport-route-focus"].type, "geojson");
   assert.equal(gridLayerIds(fullRuntime).length, gridFillLayerIds(fullRuntime).length);
   assert.deepEqual(gridLayerIds(fullRuntime), ["grid-fill-active"]);
   assert.equal(landuseFillLayer.source, "livability");

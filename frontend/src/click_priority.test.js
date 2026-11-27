@@ -38,6 +38,12 @@ function fakeMap(featuresByLayer) {
   assert.equal(action.features[0].id, "desert");
   assert.deepEqual(map.calls, [
     "transport-reality-circle",
+    "transport-focus-transfers",
+    "transport-transfer-hubs",
+    "transport-focus-line",
+    "transport-focus-approximate",
+    "transport-routes-line",
+    "transport-routes-approximate",
     "amenities-circle",
     "service-deserts-fill"
   ]);
@@ -59,10 +65,32 @@ function fakeMap(featuresByLayer) {
   assert.equal(action.features[0].id, "noise");
   assert.deepEqual(map.calls, [
     "transport-reality-circle",
+    "transport-focus-transfers",
+    "transport-transfer-hubs",
+    "transport-focus-line",
+    "transport-focus-approximate",
+    "transport-routes-line",
+    "transport-routes-approximate",
     "amenities-circle",
     "service-deserts-fill",
     "noise-proxy-fill"
   ]);
+}
+
+{
+  const map = fakeMap({
+    "transport-routes-line": [fakeFeature("route", { route_key: "feed:10" })],
+    "amenities-circle": [fakeFeature("amenity")]
+  });
+  const action = resolveMapClickAction({
+    map,
+    point: { x: 10, y: 20 },
+    fineSurfaceEnabled: true,
+    gridVisible: true,
+    activeGridLayerId: "grid-fill-active"
+  });
+  assert.equal(action.type, CLICK_ACTIONS.TRANSPORT_ROUTE);
+  assert.equal(action.features[0].properties.route_key, "feed:10");
 }
 
 {
@@ -99,7 +127,16 @@ function fakeMap(featuresByLayer) {
 
   assert.equal(action.type, CLICK_ACTIONS.AMENITY);
   assert.equal(action.features[0].id, "amenity");
-  assert.deepEqual(map.calls, ["transport-reality-circle", "amenities-circle"]);
+  assert.deepEqual(map.calls, [
+    "transport-reality-circle",
+    "transport-focus-transfers",
+    "transport-transfer-hubs",
+    "transport-focus-line",
+    "transport-focus-approximate",
+    "transport-routes-line",
+    "transport-routes-approximate",
+    "amenities-circle"
+  ]);
 }
 
 {
@@ -118,6 +155,12 @@ function fakeMap(featuresByLayer) {
   assert.equal(action.features[0].id, "grid");
   assert.deepEqual(map.calls, [
     "transport-reality-circle",
+    "transport-focus-transfers",
+    "transport-transfer-hubs",
+    "transport-focus-line",
+    "transport-focus-approximate",
+    "transport-routes-line",
+    "transport-routes-approximate",
     "amenities-circle",
     "service-deserts-fill",
     "noise-proxy-fill",
@@ -138,6 +181,12 @@ function fakeMap(featuresByLayer) {
   assert.equal(action.type, CLICK_ACTIONS.FINE_INSPECT);
   assert.deepEqual(map.calls, [
     "transport-reality-circle",
+    "transport-focus-transfers",
+    "transport-transfer-hubs",
+    "transport-focus-line",
+    "transport-focus-approximate",
+    "transport-routes-line",
+    "transport-routes-approximate",
     "amenities-circle",
     "service-deserts-fill",
     "noise-proxy-fill"

@@ -176,7 +176,10 @@ def _write_staged_build(engine, *, hashes, extract_path, walk_rows, summary_json
     be reused for an archive rebake without touching the live data.
     """
     from sqlalchemy import delete, insert, select, update
-    from db_postgis.tables import amenities, build_manifest, grid_walk, noise_polygons, service_deserts, transport_reality
+    from db_postgis.tables import (
+        amenities, build_manifest, grid_walk, noise_polygons, service_deserts,
+        transport_reality, transport_route_patterns, transport_transfer_hubs,
+    )
     from db_postgis.write_common import _bulk_insert
     from db_postgis.write_noise import copy_noise_artifact_to_noise_polygons, _update_noise_summary_from_database
 
@@ -188,7 +191,10 @@ def _write_staged_build(engine, *, hashes, extract_path, walk_rows, summary_json
             if existing[0] == hashes.config_hash.removesuffix(STAGING_SUFFIX) and existing[1] == "complete":
                 return False
             raise DailyAccessBuildError(f"Refusing to replace non-staging build {hashes.build_key}")
-        for table in (grid_walk, amenities, transport_reality, service_deserts, noise_polygons, build_manifest):
+        for table in (
+            grid_walk, amenities, transport_reality, transport_route_patterns,
+            transport_transfer_hubs, service_deserts, noise_polygons, build_manifest,
+        ):
             connection.execute(delete(table).where(table.c.build_key == hashes.build_key))
         now = datetime.now(timezone.utc)
         connection.execute(insert(build_manifest), [{
@@ -201,8 +207,14 @@ def _write_staged_build(engine, *, hashes, extract_path, walk_rows, summary_json
             "noise_mode": "artifact", "status": "building", "created_at": now,
             "python_version": python_version(), "packages_json": package_snapshot(), "summary_json": summary_json,
         }])
-        for table, rows in ((grid_walk, walk_rows), (amenities, display_layers.amenities),
-                            (transport_reality, display_layers.transport), (service_deserts, display_layers.deserts)):
+        for table, rows in (
+            (grid_walk, walk_rows),
+            (amenities, display_layers.amenities),
+            (transport_reality, display_layers.transport),
+            (transport_route_patterns, display_layers.route_patterns),
+            (transport_transfer_hubs, display_layers.transfer_hubs),
+            (service_deserts, display_layers.deserts),
+        ):
             _bulk_insert(connection, table, rows)
         if artifact is not None:
             count = copy_noise_artifact_to_noise_polygons(
@@ -222,10 +234,16 @@ def _write_staged_build(engine, *, hashes, extract_path, walk_rows, summary_json
 def _delete_build(engine, build_key: str, staging_config_hash: str) -> None:
     from sqlalchemy import delete
 
-    from db_postgis.tables import amenities, build_manifest, grid_walk, noise_polygons, service_deserts, transport_reality
+    from db_postgis.tables import (
+        amenities, build_manifest, grid_walk, noise_polygons, service_deserts,
+        transport_reality, transport_route_patterns, transport_transfer_hubs,
+    )
 
     with engine.begin() as connection:
-        for table in (grid_walk, amenities, transport_reality, service_deserts, noise_polygons, build_manifest):
+        for table in (
+            grid_walk, amenities, transport_reality, transport_route_patterns,
+            transport_transfer_hubs, service_deserts, noise_polygons, build_manifest,
+        ):
             connection.execute(delete(table).where(table.c.build_key == build_key).where(table.c.config_hash == staging_config_hash))
 
 
@@ -233,10 +251,16 @@ def switch_active_build(engine, *, build_key: str, staging_config_hash: str, liv
     """Make the staged build the one runtimes select (one transaction)."""
     from sqlalchemy import update
 
-    from db_postgis.tables import amenities, build_manifest, grid_walk, noise_polygons, service_deserts, transport_reality
+    from db_postgis.tables import (
+        amenities, build_manifest, grid_walk, noise_polygons, service_deserts,
+        transport_reality, transport_route_patterns, transport_transfer_hubs,
+    )
 
     with engine.begin() as connection:
-        for table in (grid_walk, amenities, transport_reality, service_deserts, noise_polygons):
+        for table in (
+            grid_walk, amenities, transport_reality, transport_route_patterns,
+            transport_transfer_hubs, service_deserts, noise_polygons,
+        ):
             connection.execute(update(table).where(table.c.build_key == build_key).values(config_hash=live_config_hash))
         updated = connection.execute(
             update(build_manifest)

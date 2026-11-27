@@ -721,6 +721,67 @@ function buildStyle(runtime, options = {}) {
   });
 
   layers.push({
+    id: "transport-routes-casing",
+    type: "line",
+    source: "livability",
+    "source-layer": "transport_routes",
+    minzoom: 6,
+    maxzoom: 12,
+    layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+    paint: {
+      "line-color": "#ffffff",
+      "line-opacity": 0.78,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 6, 2.5, 12, 6, 18, 9]
+    }
+  });
+  layers.push({
+    id: "transport-routes-line",
+    type: "line",
+    source: "livability",
+    "source-layer": "transport_routes",
+    minzoom: 6,
+    maxzoom: 12,
+    layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+    filter: ["!=", ["get", "geometry_source"], "stop_sequence_approximate"],
+    paint: {
+      "line-color": ["coalesce", ["get", "route_color"], "#2563eb"],
+      "line-opacity": 0.82,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1.2, 12, 3.5, 18, 6]
+    }
+  });
+  layers.push({
+    id: "transport-routes-approximate",
+    type: "line",
+    source: "livability",
+    "source-layer": "transport_routes",
+    minzoom: 6,
+    maxzoom: 12,
+    layout: { visibility: "none", "line-cap": "butt", "line-join": "round" },
+    filter: ["==", ["get", "geometry_source"], "stop_sequence_approximate"],
+    paint: {
+      "line-color": ["coalesce", ["get", "route_color"], "#2563eb"],
+      "line-opacity": 0.76,
+      "line-dasharray": [2, 2],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 6, 1.2, 12, 3.5, 18, 6]
+    }
+  });
+  layers.push({
+    id: "transport-transfer-hubs",
+    type: "circle",
+    source: "livability",
+    "source-layer": "transport_transfer_hubs",
+    minzoom: 6,
+    maxzoom: 12,
+    layout: { visibility: "none" },
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 3, 16, 7],
+      "circle-color": "#ffffff",
+      "circle-stroke-color": "#111827",
+      "circle-stroke-width": 2
+    }
+  });
+
+  layers.push({
     id: "transport-reality-circle",
     type: "circle",
     source: "livability",
@@ -740,11 +801,109 @@ function buildStyle(runtime, options = {}) {
     }
   });
 
+  layers.push({
+    id: "transport-focus-casing",
+    type: "line",
+    source: "transport-route-focus",
+    layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+    filter: ["==", ["get", "feature_kind"], "pattern"],
+    paint: {
+      "line-color": "#ffffff",
+      "line-opacity": 0.95,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 6, 12, 10, 18, 14]
+    }
+  });
+  layers.push({
+    id: "transport-focus-line",
+    type: "line",
+    source: "transport-route-focus",
+    layout: { visibility: "none", "line-cap": "round", "line-join": "round" },
+    filter: ["all", ["==", ["get", "feature_kind"], "pattern"], ["!=", ["get", "geometry_source"], "stop_sequence_approximate"]],
+    paint: {
+      "line-color": ["coalesce", ["get", "route_color"], "#2563eb"],
+      "line-opacity": 0.96,
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3, 12, 6, 18, 9]
+    }
+  });
+  layers.push({
+    id: "transport-focus-approximate",
+    type: "line",
+    source: "transport-route-focus",
+    layout: { visibility: "none", "line-cap": "butt", "line-join": "round" },
+    filter: ["all", ["==", ["get", "feature_kind"], "pattern"], ["==", ["get", "geometry_source"], "stop_sequence_approximate"]],
+    paint: {
+      "line-color": ["coalesce", ["get", "route_color"], "#2563eb"],
+      "line-opacity": 0.94,
+      "line-dasharray": [2, 1.5],
+      "line-width": ["interpolate", ["linear"], ["zoom"], 5, 3, 12, 6, 18, 9]
+    }
+  });
+  layers.push({
+    id: "transport-focus-arrows",
+    type: "symbol",
+    source: "transport-route-focus",
+    minzoom: 9,
+    layout: {
+      visibility: "none",
+      "symbol-placement": "line",
+      "symbol-spacing": 110,
+      "text-field": "▶",
+      "text-size": 13,
+      "text-rotation-alignment": "map",
+      "text-keep-upright": false
+    },
+    filter: ["==", ["get", "feature_kind"], "pattern"],
+    paint: { "text-color": "#111827", "text-halo-color": "#ffffff", "text-halo-width": 1 }
+  });
+  layers.push({
+    id: "transport-focus-stops",
+    type: "circle",
+    source: "transport-route-focus",
+    minzoom: 9,
+    layout: { visibility: "none" },
+    filter: ["==", ["get", "feature_kind"], "stop"],
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 9, 2.5, 17, 6],
+      "circle-color": "#ffffff",
+      "circle-stroke-color": "#111827",
+      "circle-stroke-width": 1.5
+    }
+  });
+  layers.push({
+    id: "transport-focus-transfers",
+    type: "circle",
+    source: "transport-route-focus",
+    minzoom: 8,
+    layout: { visibility: "none" },
+    filter: ["==", ["get", "feature_kind"], "transfer"],
+    paint: { "circle-radius": 6, "circle-color": "#fbbf24", "circle-stroke-color": "#111827", "circle-stroke-width": 2 }
+  });
+  layers.push({
+    id: "transport-focus-endpoints",
+    type: "symbol",
+    source: "transport-route-focus",
+    minzoom: 8,
+    layout: {
+      visibility: "none",
+      "text-field": ["get", "stop_name"],
+      "text-size": 12,
+      "text-offset": [0, 1.1],
+      "text-anchor": "top",
+      "text-allow-overlap": false
+    },
+    filter: ["all", ["==", ["get", "feature_kind"], "stop"], ["==", ["get", "is_endpoint"], true]],
+    paint: { "text-color": "#111827", "text-halo-color": "#ffffff", "text-halo-width": 1.5 }
+  });
+
   const sources = {
     livability: {
       type: "vector",
       url: pmtilesUrl,
       attribution: LIVABILITY_ATTRIBUTION
+    },
+    "transport-route-focus": {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] }
     },
   };
   if (noisePmtilesUrl) {
@@ -765,10 +924,10 @@ function buildStyle(runtime, options = {}) {
   const style = {
     version: 8,
     sources: sources,
-    layers: layers
+    layers: layers,
+    glyphs: absoluteUrl(origin, BASEMAP_GLYPHS_PATH)
   };
   if (basemapPmtilesUrl) {
-    style.glyphs = absoluteUrl(origin, BASEMAP_GLYPHS_PATH);
     style.sprite = absoluteUrl(origin, BASEMAP_SPRITE_PATH);
   }
   return style;

@@ -56,6 +56,7 @@ class DisplayPreparationTests(TestCase):
             "load_transport_reality_points": [stop()] if reality_rows is None else reality_rows,
             "load_walk_graph_index": mock.sentinel.graph, "compute_service_desert_rows": [],
             "load_landuse_context_rows": [], "load_road_rows": [],
+            "load_transit_route_network_rows": ([], [], []),
             "load_transit_railway_corridor_manifest": None, "load_railway_corridor_rows": [],
         }
         handles = {name: stack.enter_context(mock.patch.object(display, name, return_value=value)) for name, value in mocks.items()}
@@ -67,7 +68,10 @@ class DisplayPreparationTests(TestCase):
         with ExitStack() as stack:
             handles = self.inputs(stack)
             result = display.prepare_display_layers(context(), {}, hashes=HASHES, created_at=NOW)
-        self.assertEqual(result.counts(), {"amenities": 1, "transport_reality": 1, "service_deserts": 0})
+        self.assertEqual(result.counts(), {
+            "amenities": 1, "transport_reality": 1, "transport_route_patterns": 0,
+            "transport_transfer_hubs": 0, "service_deserts": 0,
+        })
         self.assertEqual(result.amenities[0]["name"], "Shop")
         self.assertEqual(result.amenities[0]["build_key"], "v4-key")
         self.assertEqual(result.summary["amenity_counts"]["shops"], 1)

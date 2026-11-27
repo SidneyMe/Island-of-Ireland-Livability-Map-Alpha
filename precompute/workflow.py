@@ -380,6 +380,7 @@ def run_precompute_impl(
     set_source_state,
     ensure_transit_reality=None,
     transit_preflight=None,
+    transport_route_rows=None,
     fine_surface_ready=None,
     bake_pmtiles=None,
     pmtiles_output_path: Path | None = None,
@@ -859,6 +860,15 @@ def run_precompute_impl(
         publish_started_at,
         progress_cb=publish_progress_cb,
     )
+    transport_route_payload = (
+        transport_route_rows(
+            engine,
+            publish_started_at,
+            progress_cb=publish_progress_cb,
+        )
+        if transport_route_rows is not None
+        else {"patterns": [], "stops": [], "hubs": [], "index": None}
+    )
     service_desert_row_payload = service_desert_rows(
         engine,
         publish_started_at,
@@ -879,6 +889,19 @@ def run_precompute_impl(
         transport_reality_rows=transport_reality_row_payload,
         noise_rows=None,
     )
+    route_index = transport_route_payload.get("index") or {}
+    summary_payload.update(
+        {
+            "transport_network_enabled": bool(transport_route_payload["patterns"]),
+            "transport_route_index_url": (
+                f"/transit/routes/{hashes.build_key}/index.json"
+                if transport_route_payload["patterns"]
+                else None
+            ),
+            "transport_route_counts": dict(route_index.get("counts") or {}),
+            "transport_route_min_zooms": {"backbone": 6, "regional": 8, "local": 10},
+        }
+    )
     tracker.record_substep(
         "publish",
         "summary_prep",
@@ -889,6 +912,8 @@ def run_precompute_impl(
         len(walk_row_payload)
         + len(amenity_row_payload)
         + len(transport_reality_row_payload)
+        + len(transport_route_payload["patterns"])
+        + len(transport_route_payload["hubs"])
         + len(service_desert_row_payload)
         + len(noise_row_payload)
     )
@@ -922,6 +947,8 @@ def run_precompute_impl(
         packages_json=package_snapshot(),
         summary_json=summary_payload,
         transport_reality_rows=transport_reality_row_payload,
+        transport_route_pattern_rows=transport_route_payload["patterns"],
+        transport_transfer_hub_rows=transport_route_payload["hubs"],
         service_desert_rows=service_desert_row_payload,
         noise_rows=noise_row_payload,
         study_area_wgs84=study_area_wgs84,

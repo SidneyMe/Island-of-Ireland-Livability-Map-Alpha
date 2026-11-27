@@ -82,6 +82,10 @@ jobs:
             exit 1
           }
 
+      # The Python/Rust parity tests skip themselves without this binary.
+      - name: Build walkgraph
+        run: cargo build --release --manifest-path walkgraph/Cargo.toml
+
       - name: Run Python tests
         run: python -m unittest discover -s tests -t . -p "test_*.py"
 

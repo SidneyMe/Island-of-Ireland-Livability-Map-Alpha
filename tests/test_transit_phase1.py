@@ -1268,6 +1268,7 @@ class TransitWorkflowTests(TestCase):
                 mock.patch.object(transit_workflow, "load_gtfs_stop_reality_models", return_value=[_gtfs_reality_row()]) as load_models_mock,
                 mock.patch.object(transit_workflow, "export_transport_reality_bundle"),
                 mock.patch.object(transit_workflow, "_ensure_railway_track_proximity") as railway_proximity_mock,
+                mock.patch.object(transit_workflow, "_ensure_route_network") as route_network_mock,
             ):
                 transit_workflow.ensure_transit_reality(
                     mock.sentinel.engine,
@@ -1280,6 +1281,11 @@ class TransitWorkflowTests(TestCase):
         railway_proximity_mock.assert_called_once_with(
             mock.sentinel.engine,
             import_fingerprint="import-123",
+            reality_state=reality_state,
+            progress_cb=None,
+        )
+        route_network_mock.assert_called_once_with(
+            mock.sentinel.engine,
             reality_state=reality_state,
             progress_cb=None,
         )

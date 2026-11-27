@@ -46,8 +46,8 @@ https://github.com/user-attachments/assets/f58ef4f1-82c1-44be-9baa-99d70d5f9e10
 - Builds a compact walk graph with the Rust `walkgraph` helper.
 - Computes livability scores across multiple grid resolutions.
 - Scores access to shops, public transport, healthcare, and parks using tiered units, amenity clustering, and distance decay.
-- Publishes GTFS transport stops with base-calendar weekly bus tiers, weekday daytime bus frequency tiers, commute/off-peak/weekend departure metrics, stricter unscheduled-stop detection, and a service-desert overlay.
-- Bakes grid, amenity, transport reality, and service-desert layers into `.livability_cache/livability.pmtiles`.
+- Publishes GTFS transport stops plus a static bus/rail/tram route network with direction variants, transfer hubs, route search, and stop/route focus modes.
+- Bakes grid, amenity, transport reality, route network, transfer-hub, and service-desert layers into `.livability_cache/livability.pmtiles`.
 - Serves a local MapLibre app from `static/index.html`.
 
 ## Architecture Overview
@@ -229,12 +229,22 @@ gtfs/nta_gtfs.zip
 gtfs/translink_gtfs.zip
 ```
 
+Optional official Translink display-geometry inputs use these paths:
+
+```text
+gtfs/translink_ulsterbus_routes_20250923.zip
+gtfs/translink_metro_glider_routes_20250923.zip
+gtfs/translink_rail_network.geojson
+```
+
 ### Where to get the feeds
 
 Transport scoring is GTFS-only, so both feeds are required input. Download the static GTFS zip for each operator and place it at the matching path above:
 
 - **NTA (Republic of Ireland)** — the [Transport for Ireland GTFS page](https://www.transportforireland.ie/transitData/PT_Data.html) lists the current static GTFS download. Prefer the portal link; the direct bundle URL changes between releases (a previous one was `https://www.transportforireland.ie/transitData/Data/GTFS_All.zip`).
 - **Translink (Northern Ireland)** — the [OpenDataNI transport group](https://admin.opendatani.gov.uk/group/transport) hosts the Translink GTFS dataset.
+
+The OpenDataNI `Translink Ulsterbus Routes`, `Translink Metro & Glider Bus Routes`, and `Northern Ireland Railways NIR Railway Network` datasets provide optional official linework for the display-only route network. The two bus archives are MapInfo MIF/MID bundles; the rail GeoJSON declares EPSG:29902. They do not replace GTFS timetable data.
 
 Missing, broken, or unrefreshed GTFS now produces **zero transport signal** — OSM stops are intentionally not a fallback. `python main.py precompute` refuses to publish such a build unless you pass `--allow-missing-transport` (see the precompute section below).
 
@@ -243,6 +253,9 @@ Useful environment overrides:
 ```text
 GTFS_NTA_ZIP_PATH=gtfs/nta_gtfs.zip
 GTFS_TRANSLINK_ZIP_PATH=gtfs/translink_gtfs.zip
+GTFS_TRANSLINK_ULSTERBUS_ROUTES_PATH=gtfs/translink_ulsterbus_routes_20250923.zip
+GTFS_TRANSLINK_METRO_ROUTES_PATH=gtfs/translink_metro_glider_routes_20250923.zip
+GTFS_TRANSLINK_RAIL_NETWORK_PATH=gtfs/translink_rail_network.geojson
 GTFS_AS_OF_DATE=2026-04-14
 GTFS_ANALYSIS_WINDOW_DAYS=30
 GTFS_SERVICE_DESERT_WINDOW_DAYS=7
@@ -271,6 +284,8 @@ python3 main.py transit
 `transit` now reuses the existing transit reality when the GTFS inputs and current OSM import fingerprint still match. Use `--force-transit-refresh` when you want a full rebuild anyway.
 The refreshed transport dataset now keeps one published stop row per GTFS stop, emits unscheduled boarding stops only when a `stops.txt` row has no `stop_times`, and carries weekly bus subtier plus frequency fields into the export bundle, PMTiles layer, and runtime JSON.
 
+The display-only route network is also rebuilt during transit refresh. It includes active public bus, rail, and tram patterns only; school-only services are excluded. Geometry precedence is GTFS `shapes.txt`, official Translink bus/rail linework, local Valhalla for remaining buses, then a dashed stop-sequence fallback. Translink `LineDIVA` candidates are selected per pattern by route number and stop coverage, while the rail source is noded and routed through ordered station stops. Missing files, unavailable GDAL, stale routes, Larne's gap in the published rail network, and cross-border rail beyond the NI network degrade non-fatally to the existing fallback. Source fingerprints invalidate route display output only. The network overview uses `backbone` (z6), `regional` (z8), and `local` (z10) visibility classes through z11; selecting a stop or route loads a build-keyed GeoJSON focus layer that remains visible at any zoom. This visualization does not change transport scoring or scoring caches.
+
 Run precompute using an existing raw import:
 
 ```text
@@ -281,6 +296,8 @@ python3 main.py precompute
 `precompute` now ensures GTFS transit reality exists before transport scoring runs. The publish step also writes:
 
 - `transport_reality` PMTiles/runtime layer
+- `transport_routes` and `transport_transfer_hubs` PMTiles/runtime layers
+- build-keyed route search index plus one GeoJSON detail asset per route under `.livability_cache/transit_routes/`
 - `service_deserts` PMTiles/runtime layer
 - `.livability_cache/exports/transport-reality.zip`
 
@@ -469,6 +486,7 @@ Implemented as the GTFS-first transport reality layer. Stops are sourced from sc
 - [x] Flag service deserts — grid cells with reachable GTFS baseline stops but zero reachable public departures — and expose them as a dedicated overlay.
 - [x] Replace the old binary map view with weekly bus subtiers (`Whole week`, `Mon-Sat`, `Tue-Sun`, `Weekdays only`, `Weekends only`, `Single-day only`, `Partial week`, `Unscheduled`) derived from base GTFS calendar patterns.
 - [x] Classify bus-only stops by weekday daytime frequency: `frequent`, `moderate`, `low_frequency`, `very_low_frequency`, and `token_skeletal`.
+- [x] **Route network visualization:** render active static GTFS bus/rail/tram lines, direction variants, endpoints, and transfer hubs; support route/terminus search plus overview → stop → route → direction focus without changing scoring.
 - [ ] Publish a standalone "active vs inactive Irish transport" dataset derived from the above, licensed ODbL. Local export to `.livability_cache/exports/` is generated after each transit refresh; hosted publishing is pending Phase 8.
 
 ### Transport scoring overhaul
@@ -515,7 +533,7 @@ A display-only official-derived noise proxy overlay is now merged. It is intenti
 ### UI and features
 
 - [x] **Per-cell score breakdowns on click** - click popups now show total score plus per-category raw counts, cluster counts, effective units, and component scores; fine-surface clicks use `/api/inspect` for exact values.
-- [x] **Operational overlay controls** - transport reality, service deserts, and official-derived noise overlays are controlled independently; transport has nested schedule/frequency/mode filters, and noise has metric/source/opacity controls.
+- [x] **Operational overlay controls** - the separate Transport network card controls route lines and stop points, with route search/focus, direction selection, transfer links, nested point schedule/frequency filters, and whole-network mode filters; service deserts and official-derived noise remain independent overlays.
 - [x] **Grid debug mode** - `/?debug-grid=1` reveals source/rendered counts, active layer/filter state, diagnosis text, and a copyable debug snapshot without occupying the normal status pill.
 - [ ] **User-adjustable weight sliders** — let users score for their own priorities rather than the built-in defaults.
 - [x] **Layer toggles** — view the map by a single category instead of only the combined score.

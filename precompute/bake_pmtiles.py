@@ -61,8 +61,12 @@ from pmtiles_bake_worker import (  # noqa: E402  (intentional top-level worker)
     _LAYER_GRID,
     _LAYER_SERVICE_DESERTS,
     _LAYER_TRANSPORT_REALITY,
+    _LAYER_TRANSPORT_ROUTES,
+    _LAYER_TRANSPORT_TRANSFER_HUBS,
     _SERVICE_DESERT_TILE_SQL,
     _TRANSPORT_REALITY_TILE_SQL,
+    _TRANSPORT_ROUTES_TILE_SQL,
+    _TRANSPORT_TRANSFER_HUBS_TILE_SQL,
 )
 
 
@@ -77,6 +81,10 @@ DEFAULT_BBOX = (-11.0, 51.3, -5.3, 55.5)
 # features; below this zoom they would be unreadable noise.
 AMENITY_MIN_ZOOM = 9
 TRANSPORT_REALITY_MIN_ZOOM = 9
+# The shared network is an overview layer. Above z11, selecting a stop/route
+# switches to the build-keyed GeoJSON focus layer, avoiding incomplete sparse
+# line tiles and keeping the main archive bounded.
+TRANSPORT_NETWORK_MAX_ZOOM = 11
 NOISE_MIN_ZOOM = 8
 NOISE_MAX_ZOOM_DEFAULT = 13
 GRID_AMENITY_CATEGORIES = ("shops", "transport", "healthcare", "parks")
@@ -206,10 +214,49 @@ def _pmtiles_metadata(
                     "bus_active_days_mask_7d": "String",
                     "bus_service_subtier": "String",
                     "route_modes": "String",
+                    "route_keys_json": "String",
                     "is_unscheduled_stop": "Number",
                     "has_exception_only_service": "Number",
                     "has_any_bus_service": "Number",
                     "has_daily_bus_service": "Number",
+                },
+            },
+            {
+                "id": "transport_routes",
+                "minzoom": 6,
+                "maxzoom": min(max_zoom, TRANSPORT_NETWORK_MAX_ZOOM),
+                "fields": {
+                    "route_key": "String",
+                    "pattern_id": "String",
+                    "feed_id": "String",
+                    "route_id": "String",
+                    "route_short_name": "String",
+                    "route_long_name": "String",
+                    "mode": "String",
+                    "route_color": "String",
+                    "route_text_color": "String",
+                    "direction_id": "Number",
+                    "headsign": "String",
+                    "origin_name": "String",
+                    "destination_name": "String",
+                    "geometry_source": "String",
+                    "is_approximate": "Number",
+                    "visibility_class": "String",
+                    "min_zoom": "Number",
+                },
+            },
+            {
+                "id": "transport_transfer_hubs",
+                "minzoom": 6,
+                "maxzoom": min(max_zoom, TRANSPORT_NETWORK_MAX_ZOOM),
+                "fields": {
+                    "hub_id": "String",
+                    "hub_name": "String",
+                    "route_keys_json": "String",
+                    "modes": "String",
+                    "route_count": "Number",
+                    "backbone_route_count": "Number",
+                    "regional_route_count": "Number",
                 },
             },
             {
@@ -451,6 +498,7 @@ def _iter_tile_specs(
     for zoom in range(min_zoom, max_zoom + 1):
         include_amenities = zoom >= amenity_min_zoom
         include_transport_reality = zoom >= transport_reality_min_zoom
+        include_transport_network = 6 <= zoom <= TRANSPORT_NETWORK_MAX_ZOOM
         include_landuse_context = landuse_context_min_zoom <= zoom <= landuse_context_max_zoom
         include_grid = zoom <= coarse_grid_max_zoom
         include_fine_grid = zoom in fine_grid_tile_coords_by_zoom
@@ -465,6 +513,8 @@ def _iter_tile_specs(
             layers |= _LAYER_AMENITIES
         if include_transport_reality:
             layers |= _LAYER_TRANSPORT_REALITY
+        if include_transport_network:
+            layers |= _LAYER_TRANSPORT_ROUTES | _LAYER_TRANSPORT_TRANSFER_HUBS
         if include_landuse_context:
             layers |= _LAYER_LANDUSE_CONTEXT
         if include_service_deserts:
@@ -499,6 +549,11 @@ def _iter_tile_specs(
             _add_tile_layers(
                 _point_tile_coordinates(transport_reality_points, zoom=zoom, bbox=bbox),
                 _LAYER_TRANSPORT_REALITY,
+            )
+        if include_transport_network:
+            _add_tile_layers(
+                _point_tile_coordinates(transport_reality_points, zoom=zoom, bbox=bbox),
+                _LAYER_TRANSPORT_ROUTES | _LAYER_TRANSPORT_TRANSFER_HUBS,
             )
         for (x, y), tile_layer_mask in sorted(tile_layers.items()):
             yield zoom, x, y, tile_layer_mask

@@ -45,6 +45,7 @@ osm/*.osm.pbf
 osm/extract_manifest.json
 osm/flat-nodes.bin
 gtfs/*.zip
+gtfs/translink_rail_network.geojson
 boundaries/*.geojson
 ireland_main_island_shp/
 noise_datasets/*.zip
@@ -79,4 +80,4 @@ Thumbs.db
 .vscode/
 .idea/
 
-valhalla/custom_files 
+valhalla/custom_files

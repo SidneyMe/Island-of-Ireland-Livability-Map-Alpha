@@ -33,6 +33,8 @@ _LAYER_SERVICE_DESERTS = 1 << 3
 _LAYER_FINE_GRID = 1 << 4
 _LAYER_NOISE = 1 << 5
 _LAYER_LANDUSE_CONTEXT = 1 << 6
+_LAYER_TRANSPORT_ROUTES = 1 << 7
+_LAYER_TRANSPORT_TRANSFER_HUBS = 1 << 8
 
 
 # ── Per-tile SQL (one ST_AsMVT call per layer) ──────────────────────────────
@@ -154,6 +156,7 @@ _TRANSPORT_REALITY_TILE_SQL = text(
                 array_to_string(ARRAY(SELECT jsonb_array_elements_text(t.route_modes_json)), ','),
                 ''
             ) AS route_modes,
+            COALESCE(t.route_keys_json::text, '[]') AS route_keys_json,
             CASE WHEN t.is_unscheduled_stop THEN 1 ELSE 0 END AS is_unscheduled_stop,
             CASE WHEN t.has_exception_only_service THEN 1 ELSE 0 END AS has_exception_only_service,
             CASE WHEN t.has_any_bus_service THEN 1 ELSE 0 END AS has_any_bus_service,
@@ -171,6 +174,91 @@ _TRANSPORT_REALITY_TILE_SQL = text(
           AND ST_Intersects(t.geom, tile.env_4326)
     )
     SELECT ST_AsMVT(mvtgeom, 'transport_reality', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
+_TRANSPORT_ROUTES_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            r.route_key,
+            r.pattern_id,
+            r.feed_id,
+            r.route_id,
+            COALESCE(r.route_short_name, '') AS route_short_name,
+            COALESCE(r.route_long_name, '') AS route_long_name,
+            r.mode,
+            r.route_color,
+            r.route_text_color,
+            COALESCE(r.direction_id, -1) AS direction_id,
+            COALESCE(r.headsign, '') AS headsign,
+            COALESCE(r.origin_name, '') AS origin_name,
+            COALESCE(r.destination_name, '') AS destination_name,
+            r.geometry_source,
+            CASE WHEN r.is_approximate THEN 1 ELSE 0 END AS is_approximate,
+            r.visibility_class,
+            r.min_zoom,
+            ST_AsMVTGeom(
+                ST_Transform(r.geom, 3857),
+                tile.env_3857,
+                4096,
+                128,
+                true
+            ) AS geom
+        FROM transport_route_patterns AS r, tile
+        WHERE r.build_key = :build_key
+          AND r.min_zoom <= :z
+          AND r.geom && tile.env_4326
+          AND ST_Intersects(r.geom, tile.env_4326)
+    )
+    SELECT ST_AsMVT(mvtgeom, 'transport_routes', 4096, 'geom') FROM mvtgeom
+    """
+)
+
+
+_TRANSPORT_TRANSFER_HUBS_TILE_SQL = text(
+    """
+    WITH tile AS (
+        SELECT
+            ST_TileEnvelope(:z, :x, :y) AS env_3857,
+            ST_Transform(ST_TileEnvelope(:z, :x, :y), 4326) AS env_4326
+    ),
+    mvtgeom AS (
+        SELECT
+            h.hub_id,
+            COALESCE(h.hub_name, '') AS hub_name,
+            h.route_keys_json::text AS route_keys_json,
+            COALESCE(
+                array_to_string(ARRAY(SELECT jsonb_array_elements_text(h.modes_json)), ','),
+                ''
+            ) AS modes,
+            h.route_count,
+            h.backbone_route_count,
+            h.regional_route_count,
+            ST_AsMVTGeom(
+                ST_Transform(h.geom, 3857),
+                tile.env_3857,
+                4096,
+                64,
+                true
+            ) AS geom
+        FROM transport_transfer_hubs AS h, tile
+        WHERE h.build_key = :build_key
+          AND h.geom && tile.env_4326
+          AND ST_Intersects(h.geom, tile.env_4326)
+          AND (
+              (:z >= 10 AND h.route_count >= 2)
+              OR (:z >= 8 AND :z < 10 AND h.regional_route_count >= 2)
+              OR (:z < 8 AND h.backbone_route_count >= 2)
+          )
+    )
+    SELECT ST_AsMVT(mvtgeom, 'transport_transfer_hubs', 4096, 'geom') FROM mvtgeom
     """
 )
 
@@ -387,6 +475,24 @@ def _tile_mvt_bytes_by_flags(
             or b""
         )
         chunks.append(bytes(transport_reality_bytes))
+    if layers & _LAYER_TRANSPORT_ROUTES:
+        route_bytes = (
+            connection.execute(
+                _TRANSPORT_ROUTES_TILE_SQL,
+                {"z": z, "x": x, "y": y, "build_key": build_key},
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(route_bytes))
+    if layers & _LAYER_TRANSPORT_TRANSFER_HUBS:
+        hub_bytes = (
+            connection.execute(
+                _TRANSPORT_TRANSFER_HUBS_TILE_SQL,
+                {"z": z, "x": x, "y": y, "build_key": build_key},
+            ).scalar()
+            or b""
+        )
+        chunks.append(bytes(hub_bytes))
     if layers & _LAYER_SERVICE_DESERTS:
         service_desert_bytes = (
             connection.execute(
@@ -512,9 +618,13 @@ __all__ = [
     "_LAYER_FINE_GRID",
     "_LAYER_NOISE",
     "_LAYER_LANDUSE_CONTEXT",
+    "_LAYER_TRANSPORT_ROUTES",
+    "_LAYER_TRANSPORT_TRANSFER_HUBS",
     "_GRID_TILE_SQL",
     "_AMENITY_TILE_SQL",
     "_TRANSPORT_REALITY_TILE_SQL",
+    "_TRANSPORT_ROUTES_TILE_SQL",
+    "_TRANSPORT_TRANSFER_HUBS_TILE_SQL",
     "_SERVICE_DESERT_TILE_SQL",
     "_NOISE_TILE_SQL",
     "_LANDUSE_CONTEXT_TILE_SQL",

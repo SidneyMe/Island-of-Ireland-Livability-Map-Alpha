@@ -508,7 +508,7 @@ def summarize_gtfs_stops(
         transport_score_units = legacy_transport_score_units
         if route_modes == ("bus",):
             transport_score_units = bus_frequency_score_units
-        elif transport_mode_tier_score_units > 0:
+        elif transport_mode_tier_score_units > 0 and payload["public_departures_30d"] > 0:
             transport_score_units = max(bus_frequency_score_units, transport_mode_tier_score_units)
         summaries.append(
             StopServiceSummary(

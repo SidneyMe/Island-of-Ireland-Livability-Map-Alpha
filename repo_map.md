@@ -50,6 +50,7 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | "Build published zero transport" / publish gate | `precompute/workflow.py` (search `No GTFS transport rows`) → `main.py` (`--allow-missing-transport`) → `precompute/__init__.py` (`run_precompute`) → `tests/test_precompute_behavior.py` (gate tests) | scoring internals |
 | GTFS download / cache freshness | `transit/gtfs_download.py` → `transit/sources.py` → `config.py` (`transit_feed_configs`, `GTFS_*`) → `README.md` GTFS section → `tests/test_gtfs_download.py` | precompute phases |
 | Transit reality rebuild (stops, masks, deserts) | `transit/workflow.py` (`ensure_transit_reality`) → `transit/rust_gtfs.py` (`run_walkgraph_gtfs_refresh`) → `walkgraph/src/gtfs/mod.rs` → `transit_refresh_runner.py` → `tests/test_transit_phase1.py`, `tests/test_transit_refresh_runner.py` | noise, frontend |
+| GTFS route network visualization (patterns, official Translink geometry, transfers, focus assets) | `transit/translink_geometry.py` → `transit/route_network.py` → `transit/route_assets.py` → `db_postgis/{tables,write_transit,reads}.py` → `precompute/{display_layers,bake_pmtiles}.py` + `pmtiles_bake_worker.py` → `serve_from_db.py` / `serve_routes.py` → `frontend/src/{route_network,main,runtime_contract}.js` → `tests/test_transit_route_network.py`, `frontend/src/route_network.test.js` | scoring math; this path is display-only |
 | Overture merge / dedupe | `overture/loader.py` → `overture/merge.py` → `db_postgis/amenity_merge.py` → `config.py` (`AMENITY_MERGE_ALGO_VERSION`) → `tests/test_overture_loader.py` | everything else |
 | Noise overlay (display only) | `noise/loader.py` (legacy path) or `noise_artifacts/{runner,builder,materialize,resolve,dissolve,bake}.py` → `db_postgis/write_noise.py` → `frontend/src/noise_filters.js` → `docs/notes.md` → `tests/test_noise_artifacts.py`, `tests/test_noise_loader.py` | scoring, transport |
 | Noise ingest performance / ogr2ogr / FileGDB | `noise_artifacts/ogr_ingest.py` → `noise_artifacts/ingest.py` → `scripts/win/*noise*.cmd` → §8 env rows `NOISE_*` | frontend |
@@ -65,7 +66,7 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | PMTiles bake: new field / layer / zoom | `precompute/bake_pmtiles.py` (`_pmtiles_metadata`) → `pmtiles_bake_worker.py` → `tests/test_pmtiles_bake.py` (+ `fine_vector_pmtiles_worker.py` if fine grid) | runtime server |
 | Frontend layer, control, popup | `frontend/src/` (small modules; start `runtime_contract.js` or the matching `*.js`) → matching `*.test.js` → rebuild `static/dist/` | Python pipeline |
 | Runtime HTTP API / routes / caching | `serve_from_db.py` (`RuntimeState`) → `serve_routes.py` → `frontend/src/runtime_contract.js` → `tests/test_server_behavior.py`, `tests/test_serve_routes.py` | precompute |
-| Schema change | §7 "Schema change" list → `db_postgis/migrations/versions/` (head `000023`) → `tests/test_db_constraint_migration.py`, `scripts/db_integrity_check.py` | frontend unless surfaced |
+| Schema change | §7 "Schema change" list → `db_postgis/migrations/versions/` (head `000024`) → `tests/test_db_constraint_migration.py`, `scripts/db_integrity_check.py` | frontend unless surfaced |
 | OSM raw import / importer rules | `local_osm_import/*` → `osm2pgsql_livability.lua` → `config.py` (`IMPORTER_CONFIG_VERSION`) → `db_postgis/{reads,writes}.py` (`legacy_v3_amenity_category`) → `tests/test_osm_import_handling.py`, `tests/test_local_osm_rules.py` | transit, frontend |
 | Daily access score (v4) inputs: classification, logical places, green sites | `config.py` (`DAILY_ACCESS_*`, `daily_access_classification_params`) → `precompute/daily_access_classify.py` → `db_postgis/daily_access_green.py` → `db_postgis/reads.py` (`load_daily_access_source_rows`) → `scripts/daily_access_inventory.py` → `tests/test_daily_access_classify.py` | v3 tiers/clusters, frontend, Rust |
 | Daily access score (v4) Python reference: edge entries, reach, curves | `config.py` (`DAILY_ACCESS_*`, `daily_access_geometry_params`, `daily_access_score_params`) → `precompute/daily_access_geometry.py` → `precompute/daily_access_snap.py` → `precompute/daily_access_reach.py` → `precompute/daily_access_score.py` → `precompute/daily_access_reference.py` → `db_postgis/daily_access_green.py` (`stage_park_approaches`) → `tests/test_daily_access_geometry.py`, `tests/test_daily_access_reference.py` | v3 scoring, frontend |
@@ -82,8 +83,8 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | `importer_config_hash`, `transit_config_hash`, `current_normalization_scope_hash`, `package_snapshot` | `config.py` |
 | `IMPORTER_CONFIG_VERSION` = `"2026-10-10-daily-access-v4-import-1"` (l.56), `SCORING_MODEL_VERSION` = `"v3-gtfs-only-transport-rail-proximity-2026-09-25"` (l.453) | `config.py` |
 | `TAGS`, `CAPS`, `WALK_RADIUS_M`, `TRANSIT_ACCESS_WALK_RADIUS_M`, `TRANSIT_EGRESS_WALK_RADIUS_M` | `config.py` |
-| `TRANSIT_REALITY_ALGO_VERSION` (10), `AMENITY_MERGE_ALGO_VERSION` (4), `WALKGRAPH_FORMAT_VERSION` (4) | `config.py` |
-| `FINE_SURFACE_SCHEMA_VERSION` (2), `PMTILES_SCHEMA_VERSION` (13), `GRID_GEOMETRY_SCHEMA_VERSION` (4), `CACHE_SCHEMA_VERSION` (14) | `config.py` |
+| `TRANSIT_REALITY_ALGO_VERSION` (10), `TRANSIT_ROUTE_NETWORK_ALGO_VERSION` (3), `AMENITY_MERGE_ALGO_VERSION` (4), `WALKGRAPH_FORMAT_VERSION` (4) | `config.py` |
+| `FINE_SURFACE_SCHEMA_VERSION` (2), `PMTILES_SCHEMA_VERSION` (14), `GRID_GEOMETRY_SCHEMA_VERSION` (4), `CACHE_SCHEMA_VERSION` (14) | `config.py` |
 | `PROTOMAPS_BASEMAPS_COMMIT`, `PROTOMAPS_ASSETS_COMMIT`, `PROTOMAPS_TILE_SCHEMA_MAJOR`, `BASEMAP_FONT_STACKS`, `BASEMAP_CACHE_DIR` | `config.py` |
 | `OSM_EXTRACT_PATH`, `GTFS_DIR`, `BOUNDARIES_DIR`, `ROI_BOUNDARY_PATH`, `NI_BOUNDARY_PATH`, `MAIN_ISLAND_BOUNDARY_PATH`, `CACHE_DIR` | `config.py` |
 | `resolution_for_zoom`, `profile_fine_surface_enabled`, `normalize_build_profile`, `pmtiles_output_path` | `config.py` |
@@ -118,12 +119,13 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | `load_walk_graph_index`, `WalkGraphIndex` | `network/loader.py` (root `network/` package) |
 | `run_walkgraph_gtfs_refresh`, `load_gtfs_stop_reality_models` | `transit/rust_gtfs.py` |
 | `ensure_transit_reality`, `transit_reality_refresh_required` | `transit/workflow.py` |
+| `load_translink_geometry_sources`, `resolve_translink_geometry_source_state`, `build_route_network_materialization`, `route_network_hash_for_state`, `ValhallaAutoRouter`, `publish_route_assets` | `transit/translink_geometry.py`, `transit/route_network.py`, `transit/route_assets.py` |
 | `refresh_gtfs_feed`, `refresh_gtfs_feeds`, `ensure_transit_feed_available` | `transit/gtfs_download.py` |
 | `BUS_FREQUENCY_TIER_UNITS` | `transit/service.py` |
 | `railway_proximity_hash_for_state`, `build_railway_corridor_materialization`, `compute_railway_proximity_penalties`, `railway_proximity_penalty_for_distance` | `transit/railway_corridors.py` |
 | `parse_maxspeed_kmh`, `road_penalty_for_distance`, `compute_road_proximity_penalties` | `precompute/road_proximity.py` |
 | `RuntimeState`, `LivabilityRequestHandler`, `serve_livability_app` | `serve_from_db.py` |
-| route kind table (`ROUTE_*`/kind names: root, export, pmtiles, surface_tile, static, api_runtime, api_inspect) | `serve_routes.py` |
+| route kind table (`ROUTE_*`/kind names: root, export, pmtiles, surface_tile, static, route_asset, api_runtime, api_inspect) | `serve_routes.py` |
 | `ensure_database_ready`, `import_payload_ready`, `raw_import_ready` | `db_postgis/schema.py` |
 | `load_source_amenity_rows`, `load_transport_reality_rows_for_scoring`, `load_transport_reality_points`, `load_road_rows`, `load_landuse_context_rows`, `load_daily_access_source_rows`, `legacy_v3_amenity_category` | `db_postgis/reads.py` |
 | `_AMENITY_CATEGORY_VALUES` (excludes transport) | `db_postgis/reads.py` |
@@ -205,13 +207,14 @@ Get-ChildItem -Recurse -File -Include *.py,*.js,*.rs,*.md | Where-Object { $_.Fu
 | OSM extract | `osm/ireland-and-northern-ireland-latest.osm.pbf` | import, transit fingerprint, basemap | import fails / `--auto-refresh-import` needed |
 | osm2pgsql flat nodes | `osm/flat-nodes.bin` (~40 GiB) — only when `OSM2PGSQL_FLAT_NODES` is set; default off | import with `--create` (never `--append`) | nothing — a stale copy is dead weight and safe to delete |
 | GTFS feeds | `gtfs/nta_gtfs.zip`, `gtfs/translink_gtfs.zip` (or `GTFS_NTA_ZIP_PATH` / `GTFS_TRANSLINK_ZIP_PATH` / `GTFS_*_URL`) | transit reality, transport scoring | **zero transport → publish gate blocks the build** |
+| Translink route geometry (optional) | `gtfs/translink_ulsterbus_routes_20250923.zip`, `gtfs/translink_metro_glider_routes_20250923.zip`, `gtfs/translink_rail_network.geojson` (or `GTFS_TRANSLINK_*_ROUTES_PATH` / `GTFS_TRANSLINK_RAIL_NETWORK_PATH`) | display-only route network | warns and falls through to Valhalla/stop-sequence approximation; scoring unchanged |
 | ROI boundary | `boundaries/Counties_NationalStatutoryBoundaries_Ungeneralised_2024_-6732842875837866666.geojson` | study area fallback | fallback path unavailable |
 | NI boundary | `boundaries/osni_open_data_largescale_boundaries_ni_outline.geojson` | study area fallback | fallback path unavailable |
 | Main-island coast (preferred) | `ireland_main_island_shp/ireland_main_island.shp` + `.shx/.dbf/.prj/.cpg` | exact study-area mask | falls back to ROI+NI merge + coastal cleanup |
 | Overture Places (optional) | `overture/ireland_places.geoparquet` (+ `.state`) | amenity merge | degrades gracefully |
 | Noise datasets | `noise_datasets/NOISE_Round{2,3,4}.zip`, `end_noisedata_round{1,2,3}.zip` | display-only overlay; `full` builds an **accurate** artifact from all rounds | `full` precompute fails building the accurate artifact unless one is already active; scoring unaffected |
 
-All inputs are fetched by `scripts/fetch_datasets.py` (env `*_URL` → mirror `DATASET_MIRROR_BASE_URL`, default `livability-data` release v2 → official upstream). EPA noise is email-gated and OpenDataNI returns 403 to scripts, so those archives and the Translink GTFS exist only in the mirror.
+Core inputs are fetched by `scripts/fetch_datasets.py` (env `*_URL` → mirror `DATASET_MIRROR_BASE_URL`, default `livability-data` release v2 → official upstream). The optional Translink route-geometry files are currently placed manually under `gtfs/`; EPA noise is email-gated and OpenDataNI returns 403 to unattended requests, so those archives and the Translink GTFS otherwise rely on local files or the mirror.
 
 Local trap: the repo root contains an **empty directory** named `ireland-and-northern-ireland-latest.osm.pbf/`. It is not the PBF. The real extract lives under `osm/`.
 
@@ -253,7 +256,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 | `walkgraph/target/**` | Cargo output |
 | `schema.sql` | Stale bootstrap snapshot; Alembic is canonical |
 | `CHANGELOG.md` | History only; read the top entry at most |
-| `db_postgis/migrations/versions/*` except head/relevant one | 23 migrations; read `000023` and the file you are changing |
+| `db_postgis/migrations/versions/*` except head/relevant one | 24 migrations; read `000024` and the file you are changing |
 | `osm/flat-nodes.bin`, `osm/*.pbf` | Large binary inputs (flat-nodes only exists when opted in) |
 | `noise_datasets/*.zip`, `overture/*.geoparquet`, `gtfs/*.zip` | Large local inputs |
 | `legacy/`, `data/`, `reports/`, `.agents/`, `.test_logs/`, `__pycache__`, `.mypy_cache`, `.uv-cache`, `.uv-python` | Local/generated/empty; never runtime truth |
@@ -266,16 +269,18 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 3. `python main.py import` also runs `basemap.build_if_stale()` → **requires Docker**. On a Docker-less server use `python main.py precompute --auto-refresh-import` instead.
 4. `precompute` refuses to publish a build with **zero GTFS transport**; only `--allow-missing-transport` overrides it.
 5. The noise overlay is **display-only** and never scored. Penalising noise is new work, not a bug fix.
-6. Mode-aware transit is always unavailable: `phase_grids_impl` supplies no transit effective units. Coarse grids can carry walk/bike comparison payloads; fine-surface scoring receives neither bike nor transit units. The published default remains walk-only.
-7. `HASHES = build_config_hashes()` and `_STATE = _BuildState.bootstrap()` run at **import time**; missing inputs hash as zero-like metadata instead of raising, which silently reuses caches.
-8. `pmtiles_bake_worker._resolution_for_zoom()` is **not** `config.resolution_for_zoom()`.
-9. `pmtiles_bake_worker.py` must stay import-light (Windows spawn); fine-grid work belongs in `fine_vector_pmtiles_worker.py`.
-10. Transport scoring is strictly GTFS-only: `TAGS["transport"] = {"source": "gtfs_direct"}`, `_AMENITY_CATEGORY_VALUES` excludes transport, and OSM stop helpers were deleted (`load_osm_transport_features`, `clear_normalized_network_rows`, `transit/chained_reach.py` no longer exist — do not import them).
-11. v3 `precompute` noise accuracy follows the profile and env override. v4 `daily-access --publish` never builds raw noise artifacts: `full` strictly requires a prepared **accurate** artifact (env cannot downgrade it); `dev`/`test` resolve the configured mode and explicitly disable noise if its artifact is missing.
-12. PMTiles archives are "current" only when their metadata `build_key` matches the build (`pmtiles_archive_build_key` / `_pmtiles_archive_is_current` in `precompute/workflow.py`). File existence alone is not enough: a failed bake keeps the old archive while the manifest is already `complete`, and a rerun then rebakes.
-13. `precompute --explain` prints `Transit reality fingerprint: transit-unavailable` and a provisional build key: transit is resolved only during a real run, so do not treat that line as a transit failure.
-14. osm2pgsql ≥1.9 (Ubuntu's 1.11) prints `--version` with a wall-clock timestamp prefix; `detect_importer_version_impl` strips it. If the import fingerprint changes on every run, every run re-imports OSM (~3 min) and invalidates every downstream cache.
-15. Single-core hot spots found by sampling a 96-core build, now fixed — keep them fixed: unprepared `within` against the island outline (`overture/loader.py`, 247 s → 0.1 s), one `ProcessPool` task per ROI noise geometry (`dev_fast.py`), per-pair Python penalty loop (`road_proximity.py`), BallTree rebuilt per graph reload and repeated snaps of identical points (`precompute/network.py` keys the index by coordinate digest and memoizes lat/lon → node), bike graph built after the walk graph (`_start_bike_graph_prebuild` now overlaps them), and a 512-spec first bake chunk holding all z5–z10 tiles (`_chunked_by_zoom`).
+6. The GTFS route network is also **display-only**: its algorithm version and optional official Translink source fingerprints invalidate render/display output only. Geometry precedence is GTFS shape → official Translink GIS → Valhalla bus → stop sequence. Shared PMTiles lines end at z11; a selected route uses its GeoJSON focus asset at any zoom.
+7. Mode-aware transit is always unavailable: `phase_grids_impl` supplies no transit effective units. Coarse grids can carry walk/bike comparison payloads; fine-surface scoring receives neither bike nor transit units. The published default remains walk-only.
+8. `HASHES = build_config_hashes()` and `_STATE = _BuildState.bootstrap()` run at **import time**; missing inputs hash as zero-like metadata instead of raising, which silently reuses caches.
+9. `pmtiles_bake_worker._resolution_for_zoom()` is **not** `config.resolution_for_zoom()`.
+10. `pmtiles_bake_worker.py` must stay import-light (Windows spawn); fine-grid work belongs in `fine_vector_pmtiles_worker.py`.
+11. Transport scoring is strictly GTFS-only: `TAGS["transport"] = {"source": "gtfs_direct"}`, `_AMENITY_CATEGORY_VALUES` excludes transport, and OSM stop helpers were deleted (`load_osm_transport_features`, `clear_normalized_network_rows`, `transit/chained_reach.py` no longer exist — do not import them).
+12. v3 `precompute` noise accuracy follows the profile and env override. v4 `daily-access --publish` never builds raw noise artifacts: `full` strictly requires a prepared **accurate** artifact (env cannot downgrade it); `dev`/`test` resolve the configured mode and explicitly disable noise if its artifact is missing.
+13. PMTiles archives are "current" only when their metadata `build_key` matches the build (`pmtiles_archive_build_key` / `_pmtiles_archive_is_current` in `precompute/workflow.py`). File existence alone is not enough: a failed bake keeps the old archive while the manifest is already `complete`, and a rerun then rebakes.
+14. `precompute --explain` prints `Transit reality fingerprint: transit-unavailable` and a provisional build key: transit is resolved only during a real run, so do not treat that line as a transit failure.
+15. osm2pgsql ≥1.9 (Ubuntu's 1.11) prints `--version` with a wall-clock timestamp prefix; `detect_importer_version_impl` strips it. If the import fingerprint changes on every run, every run re-imports OSM (~3 min) and invalidates every downstream cache.
+16. Single-core hot spots found by sampling a 96-core build, now fixed — keep them fixed: unprepared `within` against the island outline (`overture/loader.py`, 247 s → 0.1 s), one `ProcessPool` task per ROI noise geometry (`dev_fast.py`), per-pair Python penalty loop (`road_proximity.py`), BallTree rebuilt per graph reload and repeated snaps of identical points (`precompute/network.py` keys the index by coordinate digest and memoizes lat/lon → node), bike graph built after the walk graph (`_start_bike_graph_prebuild` now overlaps them), and a 512-spec first bake chunk holding all z5–z10 tiles (`_chunked_by_zoom`).
+17. Big-host `full` builds are still capped by laptop-safe defaults: Rust `walkgraph surface` auto-threads clamp to 6 (`LIVABILITY_SURFACE_THREADS`), fine-grid bake to 4 workers (`LIVABILITY_FINE_BAKE_WORKERS`), Road GDB ingest to 2 workers / 25-feature chunks (`NOISE_OGR2OGR_GDB_WORKERS`, `NOISE_OGR2OGR_GDB_CHUNK_SIZE`), and accurate noise ingest/dissolve/resolve to 1 (`NOISE_OGR2OGR_SOURCE_WORKERS`, `NOISE_DISSOLVE_WORKERS`, `NOISE_RESOLVE_WORKERS`). On a 384-core host the parallel dissolve took 8.6 min (serial: hours) and matched serial output to ≤50 m² slivers on the 1 m grid.
 
 ---
 
@@ -337,8 +342,8 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 - **Valhalla benchmark helper**: `scripts/bench_valhalla.py`, `scripts/win/bench_valhalla.ps1`
 - **Runtime request logging**: `serve_from_db.py` emits compact route-aware GET/HEAD logs with status, duration, response size, and disconnect hints.
 - **Land-use context overlay**: `db_postgis/reads.py`, `precompute/_rows.py`, `precompute/bake_pmtiles.py`, `pmtiles_bake_worker.py`, `frontend/src/landuse_filters.js`; frontend style construction omits the `filter` property when all land-use classes are selected because MapLibre rejects `filter: null`.
-- **Alembic schema-hardening migration**: `db_postgis/migrations/versions/20260617_000021_add_candidate_key_constraints.py` (head: `20260708_000023_transport_mode_tiering.py`)
-- **Frontend source**: `frontend/src/` — modules: `main.js`, `runtime_contract.js`, `api_client.js`, `amenity_filters.js`, `transport_filters.js`, `transport_reality_popup.js`, `noise_filters.js`, `landuse_filters.js`, `click_priority.js`, `grid_debug.js`, `map_source_guard.js`; served bundle in `static/dist/`
+- **Alembic schema-hardening migration**: `db_postgis/migrations/versions/20260617_000021_add_candidate_key_constraints.py` (head: `20261124_000024_transit_route_network.py`)
+- **Frontend source**: `frontend/src/` — modules: `main.js`, `runtime_contract.js`, `route_network.js`, `api_client.js`, `amenity_filters.js`, `transport_filters.js`, `transport_reality_popup.js`, `noise_filters.js`, `landuse_filters.js`, `click_priority.js`, `grid_debug.js`, `map_source_guard.js`; served bundle in `static/dist/`
 - **Human docs / design notes**: `README.md`, `docs/PHASES.md`, `docs/notes.md`, `docs/BASEMAP.md`
 - **Read-only DB integrity preflight**: `scripts/db_integrity_check.py` + `tests/test_db_integrity_check.py`; checks logical duplicate groups and NULL key values before PK/unique/FK constraints and deliberately skips `amenities` as ambiguous.
 
@@ -372,7 +377,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
 - One-command bootstrap up to a servable map; `--skip-build` / `-SkipBuild` stops before the pipeline, `--refresh-data` / `-RefreshData` re-downloads OSM + GTFS. Reruns reuse finished work (planner skips, datasets reused). (Confirmed)
 - Both call `scripts/fetch_datasets.py` (stdlib only) for **every** input, so the dataset list lives in one place. (Confirmed)
 - After the frontend build they run `main.py import` (also builds the basemap, hence Docker) → `main.py transit` → `main.py precompute --profile full` (accurate noise) → `scripts/sanity_check.py --profile full`, then print the `serve --deployment` command. (Confirmed)
-- `setup.sh`: Debian/Ubuntu packages via apt (Cargo, PostgreSQL/PostGIS, GDAL incl. `ogr2ogr`, osm2pgsql, Node, Python); Docker Engine + Compose v2 via `get.docker.com` when `docker compose` is missing, adds the user to `docker` and runs the import through `sg docker` until relogin; rustup stable fallback when distro Cargo fails to build walkgraph (Ubuntu 24.04's Cargo 1.75 cannot read the v4 `Cargo.lock`); Node 22 from NodeSource when the distro Node is older (Vite 7); local PostgreSQL service + role/db/extensions idempotently; prompts for `POSTGRES_PASSWORD` only in an interactive shell and writes it into a new owner-only `.env` (an existing `.env` is kept). (Confirmed)
+- `setup.sh`: Debian/Ubuntu packages via apt (Cargo, PostgreSQL/PostGIS, GDAL incl. `ogr2ogr`, osm2pgsql, Node, Python); Docker Engine + Compose v2 via `get.docker.com` when `docker compose` is missing, adds the user to `docker` and runs the import through `sg docker` until relogin; rustup stable fallback when distro Cargo fails to build walkgraph (Ubuntu 24.04's Cargo 1.75 cannot read the v4 `Cargo.lock`); Node 22 from NodeSource when the distro Node is older (Vite 7); local PostgreSQL service + role/db/extensions idempotently, granting the app role `pg_read_all_settings` so noise disk preflight can read `data_directory`; prompts for `POSTGRES_PASSWORD` only in an interactive shell and writes it into a new owner-only `.env` (an existing `.env` is kept). (Confirmed)
 - `setup.ps1`: winget installs Miniforge, VS Build Tools + rustup (only when `cargo` is missing), and Docker Desktop; creates/updates conda env `livability-gdal` from `environment.yml` (GDAL, PostgreSQL + PostGIS, osm2pgsql, Node 22, Python deps) and runs every step through `scripts\win\geo_env.cmd`. Reuses the database from `.env` when it is reachable; otherwise creates a private cluster in `%LOCALAPPDATA%\livability\pgdata` (random password, first free port ≥5432) and **appends** its settings to `.env` — it never overwrites `.env`. The private cluster does not auto-start after a reboot; rerunning `setup.cmd` starts it. (Confirmed)
 
 ### `.github/workflows/scheduled_refresh.yml`
@@ -446,6 +451,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
    -> refreshes/verifies gitignored GTFS feed ZIP freshness when auto-refresh is requested
    -> walkgraph gtfs-refresh
    -> transit_raw.* + transit_derived.*
+   -> route_network_manifest + route_patterns + route_pattern_stops + transfer_hubs
 
 4. Precompute
    python main.py precompute        (add --allow-missing-transport only if GTFS is genuinely unavailable)
@@ -462,6 +468,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
    -> grid_walk
    -> amenities
    -> transport_reality
+   -> transport_route_patterns + transport_transfer_hubs
    -> service_deserts
    -> noise_polygons
    -> build_manifest
@@ -470,6 +477,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
    -> precompute/bake_pmtiles.py
    -> pmtiles_bake_worker.py + fine_vector_pmtiles_worker.py subprocesses
    -> coarse SQL MVT through z11, sparse fine vector grid at z12-z15
+   -> `transport_routes` + `transport_transfer_hubs` overview source-layers at z6-z11
    -> main PMTiles excludes noise by default
    -> noise_artifacts/bake.py writes a separate noise-only archive from noise_polygons with source-layer `noise_proxy`
    -> PMTiles source max zoom capped at 15; profile noise caps default to z10 (dev) and z13 (full/test)
@@ -491,6 +499,8 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
      GET /tiles/noise-test.pmtiles
      GET /tiles/surface/{resolution}/{z}/{x}/{y}.png
      GET /exports/transport-reality.zip
+     GET /transit/routes/{build_key}/index.json
+     GET /transit/routes/{build_key}/{route_hash}.geojson
    -> server startup fails immediately if static/index.html, static/dist/app.css, or static/dist/app.js is missing
 
 8. Frontend
@@ -500,7 +510,7 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
    -> renders one active vector grid fill+outline pair with a client-side Combined/Shops/Transport/Healthcare/Parks color toggle, recreates layers when the zoom band changes, overzooms z15 source tiles to z19
    -> default-off noise proxy panel on the separate `noise` vector source / `noise_proxy` source-layer, with metric+kind filtering, opacity control, and an explicit grid-proxy caveat
    -> control panel scrolls internally when contents exceed viewport height
-   -> transport tiers render inside Amenities -> Transport: Bus subgroup (Schedule weekly patterns, Frequency headway tiers) plus Bus/Rail/Tram mode toggles; default all-mode state applies no vector filter so older PMTiles still show stops
+   -> separate Transport network card: overview lines/hubs + stops, route/terminus search, stop/hub focus, route selection, exact-pattern deduplication, terminal-grouped variant dropdowns, transfer links, point-only schedule/frequency filters, whole-network Bus/Rail/Tram filters
    -> /?debug-grid=1 reveals a persistent Grid debug card (live source-vs-rendered counts, diagnosis, copyable snapshot)
    -> clicking transport rows renders all colocated stop rows in one popup; clicking the active grid opens the score breakdown popup via /api/inspect when available
 ```
@@ -559,7 +569,7 @@ Notes:
   - `VARIETY_CLUSTER_RADIUS_M = 25.0`
   - `DISTANCE_DECAY_HALF_DISTANCE_M = {"shops": 150.0, "transport": 250.0, "healthcare": 300.0, "parks": 350.0}`
   - `TRANSIT_REALITY_ALGO_VERSION = 10`, `AMENITY_MERGE_ALGO_VERSION = 4`, `WALKGRAPH_FORMAT_VERSION = 4` (format 4 adds `walk_graph.edge_flags.bin` u8 per CSR slot, bit 1 = recreation edge, and `walk_graph.components.bin` u32 per node numbered by lowest node index)
-  - `FINE_SURFACE_SCHEMA_VERSION = 2`, `PMTILES_SCHEMA_VERSION = 13`, `GRID_GEOMETRY_SCHEMA_VERSION = 4`, `CACHE_SCHEMA_VERSION = 14`
+  - `FINE_SURFACE_SCHEMA_VERSION = 2`, `PMTILES_SCHEMA_VERSION = 14`, `GRID_GEOMETRY_SCHEMA_VERSION = 4`, `CACHE_SCHEMA_VERSION = 14`
   - `IMPORTER_CONFIG_VERSION = "2026-10-10-daily-access-v4-import-1"`, `SCORING_MODEL_VERSION = "v3-gtfs-only-transport-rail-proximity-2026-09-25"`
   - `WALK_RADIUS_M = 500`, `TRANSIT_ACCESS_WALK_RADIUS_M = 800`, `TRANSIT_EGRESS_WALK_RADIUS_M = 800`
   - `RAILWAY_PROXIMITY_ACTIVE_MODES = ("rail", "tram")`, full-penalty at 50 m, zero at 200 m, `RAILWAY_PROXIMITY_MAX_PENALTY = 4.0`
@@ -721,7 +731,7 @@ Notes:
 #### `precompute/daily_access_runtime.py` + `precompute/daily_access_publish.py` (v4 runtime and publish)
 
 - `DailyAccessSurfaceRuntime`: inspect reads the 50 m cell from the score shard; with `zoom` it also returns the visible cell of the profile's ladder (`resolution_for_zoom(..., profile=)`) as land-weighted means of the stored values (total, components, penalties and access averaged independently; no curve/top-3 reapplied; no-network land counts as zero; water excluded; status = `ok`/`partial`/`no_walking_network` + `network_coverage_share`). Without zoom `visible` is null. PNG tiles aggregate only the requested `channel` (`?channel=` on `/tiles/surface/...png`). Byte-bounded caches: shell 64 MiB, score 128 MiB, aggregates 64 MiB. (Confirmed)
-- `publish_daily_access`: complete tiers only (`check_publishable`), transport re-checked from the reach ledger; coarse grid values and fine vector/PNG values come from v4 score shards. `display_layers.prepare_display_layers` prepares POI, transport, service deserts and summary from current inputs without any published v3 build or `_STATE`. Build identity includes `DISPLAY_LAYERS_VERSION` (2: pinned verifier identity) and the selected noise artifact hash; `point_layers_prepared` replaces the old copied-layer report, and summary records `display_layers` provenance/counts plus graph/tier paths and OSM/GTFS/Overture fingerprints. Rows (including noise) are staged under `<config_hash>~daily-access-v4-staging`; archives are baked and stamped before the existing DB/file switch. Active identical build rows are reused on rerun, and reselected after a successful rebake; failed candidates only clean up staging rows. (Confirmed, 2026-10-27)
+- `publish_daily_access`: complete tiers only (`check_publishable`), transport re-checked from the reach ledger; coarse grid values and fine vector/PNG values come from v4 score shards. `display_layers.prepare_display_layers` prepares POI, transport stops, route patterns/hubs/assets, service deserts and summary from current inputs without any published v3 build or `_STATE`. Build identity includes `DISPLAY_LAYERS_VERSION` (3: route network + pinned verifier identity) and the selected noise artifact hash; `point_layers_prepared` replaces the old copied-layer report, and summary records `display_layers` provenance/counts plus graph/tier paths and OSM/GTFS/Overture fingerprints. Rows (including noise) are staged under `<config_hash>~daily-access-v4-staging`; archives are baked and stamped before the existing DB/file switch. Active identical build rows are reused on rerun, and reselected after a successful rebake; failed candidates only clean up staging rows. (Confirmed, 2026-11-26)
 - `display_layers`: preserves current display categories/tiers via source loading, OSM/Overture merge and `annotate_amenity_row`, without v3 scoring/clustering. `BuildContext` retains transit state/date/windows. `service_deserts.compute_service_desert_rows` is shared with the v3 wrapper: nearest-node walk access at `WALK_RADIUS_M`, baseline GTFS-direct stops >0 and public departures over 7 days ==0. v4 uses its own graph/coarse cells and excludes national stops outside the regional reach area before snapping. Landuse, road/rail metadata and Overture metadata are read from current inputs; errors propagate. Empty POI/landuse/deserts are valid. (Confirmed)
 - Noise at v4 publish is reuse-only: select a completed mode-matching resolved artifact via SQL; `full` always requires accurate, dev/test may disable a missing artifact with a warning. Common DB copy/summary helpers materialize `noise_polygons`, then `bake_noise_pmtiles` creates the separate stamped archive. No raw noise reads or ingest; no score changes. (Confirmed)
 - Runtime (`serve_from_db.RuntimeService`): `summary_json.scoring_model == "daily-access-v4"` → `/api/runtime` reports `scoring_model`, `legacy_fields_unavailable`, `daily_access`; `/api/inspect` comes from the shards and works in `dev`. `_daily_access_state` validates every shell/score shard, checksum and paired dimensions before setting `inspect_ready`; this occurs on state load/build change, not per tile. Profiles with fine resolutions get fine vector cells and fine PNGs from the v4 shards. Noise remains a separate display-only archive. (Confirmed)
@@ -773,6 +783,13 @@ Notes:
 - Why it matters: GTFS shapes are the service-backed geometry source; the module hashes, dissolves, caches, validates the corridor manifest against the railway proximity hash, and scores the corridor layer without changing the public overlay surface. (Confirmed)
 - Main functions: `railway_proximity_hash_for_state()`, `build_railway_corridor_materialization()`, `compute_railway_proximity_penalties()`, `railway_proximity_penalty_for_distance()`
 
+#### `transit/translink_geometry.py`, `transit/route_network.py`, `transit/route_assets.py`
+
+- Purpose: display-only static GTFS bus/rail/tram network. Active non-school trips are deduplicated into feed-scoped directed patterns; geometry provenance includes `gtfs_shape`, `translink_route_gis`, `translink_rail_network`, `valhalla_auto`, or dashed `stop_sequence_approximate`. (Confirmed)
+- `translink_geometry.py` lazily reads OpenDataNI `PtLinks` MIF/MID, filters internal `LineDIVA` duplicates, selects route candidates by stop coverage within 250 m, nodes the EPSG:29902 NIR rail network, and degrades non-fatally when a source/GDAL is unavailable. Its hashes enter render/display invalidation only. (Confirmed, 2026-11-26)
+- Route visibility is classified per route: rail/tram, buses ≥40 km, or buses near two distinct rail/tram nodes are `backbone`/z6; remaining buses ≥15 km are `regional`/z8; other buses are `local`/z10. Transfer hubs use `parent_station` first, then normalized-name connected components within 120 m. (Confirmed)
+- `route_assets.py` atomically writes a build-keyed index and hashed per-route GeoJSON detail files used for search and all-zoom focus. These files are immutable display artifacts, not score inputs. (Confirmed)
+
 #### Other transit modules
 
 - `transit/classification.py` — service classification (school-only handling etc.). (Confirmed)
@@ -805,8 +822,9 @@ Notes:
 - Current schema facts:
   - `amenities` has `category`, `tier`, `geom`, `source`, `source_ref`, `name`, `conflict_class`
   - `grid_walk` has `counts_json`, `cluster_counts_json`, `effective_units_json`, `scores_json`, `total_score`, clipped-area fields
-  - `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, `transit_derived.railway_corridor_manifest`, `transit_derived.railway_corridors`, and public `transport_reality` carry bus mask/subtier/daytime/headway/frequency/score-unit fields, unscheduled + exception-only flags, `route_modes_json`, commute/off-peak/weekend/Friday-evening averages
-  - public output tables are `grid_walk`, `amenities`, `transport_reality`, `service_deserts`, `build_manifest`
+  - `transit_derived.gtfs_stop_service_summary`, `transit_derived.gtfs_stop_reality`, `transit_derived.railway_corridor_manifest`, `transit_derived.railway_corridors`, and public `transport_reality` carry bus mask/subtier/daytime/headway/frequency/score-unit fields, unscheduled + exception-only flags, `route_modes_json`, `route_keys_json`, commute/off-peak/weekend/Friday-evening averages
+  - route display materialization lives in `transit_derived.route_network_manifest`, `route_patterns`, `route_pattern_stops`, and `transfer_hubs`; published build rows are `transport_route_patterns` and `transport_transfer_hubs`
+  - public output tables are `grid_walk`, `amenities`, `transport_reality`, `transport_route_patterns`, `transport_transfer_hubs`, `service_deserts`, `build_manifest`
   - public `noise_polygons` stores build-scoped overlay geometry; in artifact mode this is Phase E transport/industry output (`source_type IN ('road','rail','airport','industry')`, `metric IN ('Lden','Lnight')`) exported as `noise_proxy` layer properties
 
 #### `db_postgis/schema.py`
@@ -836,7 +854,7 @@ Notes:
 
 #### `db_postgis/migrations/versions/`
 
-- Canonical schema history; 23 migrations. Latest: `20260708_000023_transport_mode_tiering.py`. (Confirmed)
+- Canonical schema history; 24 migrations. Latest: `20261124_000024_transit_route_network.py`. (Confirmed)
 
 #### `db_postgis/amenity_merge.py`
 
@@ -880,7 +898,7 @@ Notes:
 - `dissolve.py` — two-pass chunked dissolve. (Confirmed)
 - `resolve.py` — round priority resolution into `noise_resolved_display`. Per run it builds two UNLOGGED helper tables: `_noise_domain_parts_<hash>` (island subdivided to 256-vertex parts, GiST) for clipping, and `_noise_newer_pieces_<hash>` (GiST-only mirror of the current group's resolved pieces) for masking older rounds. All round CTEs are `MATERIALIZED`, because inlined CTEs made PostgreSQL recompute intersections per filter. Do not reintroduce a whole-island `ST_Intersection` or a whole-group `ST_UnaryUnion` per row; that is what made resolve take hours per group. Overlays go through session-local `pg_temp.noise_safe_intersection` / `pg_temp.noise_safe_difference` (fixed-precision `ST_Difference(a, b, grid)` first), which fall back instead of raising GEOS TopologyExceptions and log `resolve GEOS fallbacks ...` counts per round. (Confirmed)
 - Retry checkpoints: the builder marks the source artifact `complete` right after ingest (ingest reuses rows only for a complete manifest with a matching `row_count`), and on failure keeps the finished `_noise_round_staging_<hash>` table. `dissolve.round_staging_complete_rows` treats an indexed, non-empty round table as a finished dissolve and skips both passes. (Confirmed)
-- `dev_fast.py` — deterministic dev-fast road/rail grid proxy; cache key derives from source hash, grid size, latest-round metadata, and grid algorithm version (`NOISE_REBUILD_DEV_FAST_GRID=1` escape hatch). (Confirmed)
+- `dev_fast.py` — deterministic dev-fast road/rail grid proxy; cache key derives from source hash, grid size, latest-round metadata, and grid algorithm version (`NOISE_REBUILD_DEV_FAST_GRID=1` escape hatch). Grid-cell intersection prepares each detailed source geometry once so GEOS reuses its spatial index across candidate cells; source specs run in a bounded thread pool (`NOISE_DEV_FAST_MAX_WORKERS`, default 2), and each ROI spec grids its geometries in a spawn process pool (`NOISE_DEV_FAST_GEOM_WORKERS`, default `cpu_count`) merged in row order so the result matches the serial path; this takes the Round 4 road GDB (462 polygons, ~140M vertices) from ~25 min on one core to ~2 min on 96. (Confirmed)
 - `manifest.py` — hash functions (`source→domain→resolved→tiles`), artifact CRUD over `noise_artifact_manifest` / `_lineage` / `_active_artifact`. (Confirmed)
 - `bake.py` — standalone noise PMTiles bake from published `noise_polygons`. (Confirmed)
   - Writes `noise[(-dev|-test)].pmtiles` with only the `noise` vector layer, removes stale archives when no rows exist, streams tile specs, and reuses the lightweight `noise_proxy` SQL helper in `pmtiles_bake_worker.py`. (Confirmed)
@@ -897,7 +915,7 @@ Notes:
 - Why it matters: owns `GRID_AMENITY_CATEGORIES`, `_pmtiles_metadata()`, the z15 source-zoom cap, and the sparse fine-grid tile-spec planner stitching coarse SQL tiles with fine vector tiles. Noise is not declared or baked into the main archive. Bounds parallel in-flight work, clamps fine-grid bakes to 4 workers, retries once at half workers after `BrokenProcessPool`, and only replaces the final archive after a successful temp-file finalize. (Confirmed)
 - Windows failure mode: `could not load library "postgis-3.dll": The paging file is too small…` when too many parallel bake workers hit PostGIS — an OS memory/pagefile limit, not a missing DLL. (Confirmed)
 - Amenities layer metadata declares `category`, `tier`, `name`, `conflict_class`. (Confirmed)
-- Transport layer metadata declares weekly bus subtier/mask fields, bus daytime frequency fields, `transport_mode_tier`, comma-separated `route_modes`, numeric `0/1` transport flags, commute/off-peak/weekend/Friday-evening averages, and `transport_score_units`. (Confirmed)
+- Transport stop metadata declares weekly bus subtier/mask fields, bus daytime frequency fields, `transport_mode_tier`, comma-separated `route_modes`, serialized `route_keys_json`, numeric `0/1` flags, commute/off-peak/weekend/Friday-evening averages, and `transport_score_units`. Route overview metadata adds `transport_routes` and `transport_transfer_hubs`; the overview is baked z6–z11 and selected routes use separate GeoJSON at any zoom. (Confirmed)
 - The `grid` source-layer carries both coarse and fine features, with fine rows padded with zero-valued popup numerics so metadata stays schema-stable. (Confirmed)
 
 #### `pmtiles_bake_worker.py`
@@ -905,7 +923,7 @@ Notes:
 - Purpose: minimal subprocess worker running PMTiles tile SQL inside spawned processes. (Confirmed)
 - Why it matters: import isolation is a hard constraint on Windows spawn; heavy imports here blow memory for parallel workers. (Confirmed)
 - Main functions: `_bake_chunk_worker()`, `_tile_mvt_bytes_by_flags()`, `_resolution_for_zoom()` (coarse tiers `5000`/`10000`/`20000` only — **not** `config.resolution_for_zoom()`).
-- Layer bitmask lives here (`_LAYER_GRID` … `_LAYER_LANDUSE_CONTEXT`, `_LAYER_NOISE = 1 << 5`); also exposes the SQL-backed `noise_proxy` MVT helper. Keep GIS readers out of this file. (Confirmed)
+- Layer bitmask lives here (`_LAYER_GRID` … `_LAYER_TRANSPORT_ROUTES` / `_LAYER_TRANSPORT_TRANSFER_HUBS`, `_LAYER_NOISE = 1 << 5`); also exposes the SQL-backed `noise_proxy` MVT helper. Keep GIS readers out of this file. (Confirmed)
 
 #### `fine_vector_pmtiles_worker.py`
 
@@ -919,7 +937,7 @@ Notes:
 
 - Purpose: runtime HTTP server for static assets, PMTiles range reads, fine-surface PNG tiles, runtime JSON, inspect API, and transport-reality export download. (Confirmed)
 - Route matching/dispatch lives in `serve_routes.py`; this file keeps HTTP mechanics, response writing, and client-disconnect handling. (Confirmed)
-- `RuntimeState` is the server-side truth for `/api/runtime`, including: `build_key`, `build_profile`, `coarse_vector_resolutions`, `fine_resolutions`, `surface_zoom_breaks`, `amenity_counts`, `amenity_tier_counts`, `transport_subtier_counts`, `transport_bus_frequency_counts`, `transport_flag_counts`, `transport_mode_counts`, `noise_enabled`, `noise_counts`, `noise_source_counts`, `noise_metric_counts`, `noise_band_counts`, `noise_pmtiles_url`, `fine_surface_enabled`, `surface_shell_dir`, `surface_score_dir`, `surface_tile_dir`, `transport_reality_enabled`, `service_deserts_enabled`, `transport_reality_download_url`, `transit_analysis_date`, `transit_analysis_window_days`, `transit_service_desert_window_days`, `overture_dataset`. (Confirmed)
+- `RuntimeState` is the server-side truth for `/api/runtime`, including: `build_key`, `build_profile`, grid/surface fields, amenity and transport-stop counts, `transport_network_enabled`, `transport_route_index_url`, `transport_route_counts`, `transport_route_min_zooms`, noise fields, `transport_reality_enabled`, `service_deserts_enabled`, transit dates/windows, and `overture_dataset`. A missing build-keyed route index disables only the network controls; old builds keep serving stop points. (Confirmed)
 - `/api/runtime` still reports `surface_zoom_breaks`, `fine_resolutions_m`, `fine_surface_enabled`, `inspect_url`, and `max_zoom=19`, but no longer advertises `surface_tile_url_template`; the main render path is vector-only. Runtime state reloads when the latest completed `build_key` changes; PMTiles URLs carry `?v=<build_key>`; PMTiles/export responses emit strong ETags with `If-None-Match`. Expected client aborts on `/api/inspect` are suppressed from logs; `/` and `/static/*` ship `Cache-Control: no-store`; static/export responses stream in bounded chunks. (Confirmed)
 - PMTiles range serving rejects malformed, suffix/negative, multiple, reversed, and out-of-bounds ranges with `416` + `Content-Range: bytes */<size>`, preserving valid closed/open-ended ranges. (Confirmed)
 - `/api/inspect` and `/tiles/surface/{resolution}/{z}/{x}/{y}.png` reject non-finite or out-of-range inputs before rendering; surface tiles validate resolution, integer zoom, and tile bounds against `2^z - 1`. (Confirmed)
@@ -928,15 +946,16 @@ Notes:
 
 #### `serve_routes.py`
 
-- Purpose: pure route matching and dispatch priority (root, export, pmtiles, surface_tile, static, api_runtime, api_inspect), testable without HTTP. (Confirmed)
+- Purpose: pure route matching and dispatch priority (root, export, pmtiles, surface_tile, static, safe hashed `route_asset`, api_runtime, api_inspect), testable without HTTP. (Confirmed)
 
 #### `frontend/src/` modules
 
 - `main.js` — bootstrap and MapLibre orchestration (large; read in sections). (Confirmed)
 - `runtime_contract.js` — parses `/api/runtime`, maps score-layer labels/expressions, defines active fill/outline grid layers, lifecycle rebuild decisions, visibility plans, transport styling priority. (Confirmed)
+- `route_network.js` — route-index normalization/search, route-key parsing, overview/focus filters, GeoJSON merging with exact geometry+stop-pattern deduplication, and terminal grouping for direction controls. `main.js` owns overview → stop/hub → route → direction state, grouped variant dropdown rendering, and immutable asset loading. (Confirmed, 2026-11-26)
 - `api_client.js` — fetch wrappers with cold-start timeout + retry. (Confirmed)
 - `amenity_filters.js`, `transport_filters.js`, `transport_reality_popup.js`, `noise_filters.js`, `landuse_filters.js` — filter/option logic per layer, each with a matching `*.test.js`. (Confirmed)
-- `click_priority.js` — popup/action priority resolver (transport → amenity → service desert → noise → fine inspect → coarse grid). (Confirmed)
+- `click_priority.js` — popup/action priority resolver (transport stop → transfer hub → route line → amenity → service desert → noise → fine inspect → coarse grid). (Confirmed)
 - `grid_debug.js` — the `/?debug-grid=1` diagnostics card. (Confirmed)
 - `map_source_guard.js` — avoids asking MapLibre about `livability` load state before the source exists and delays source feature queries until loaded. (Confirmed)
 - `static/index.html` — cache-busted asset loading. (Confirmed)
@@ -1145,6 +1164,10 @@ tests/test_basemap.py
 | `NOISE_DEV_FAST_ARROW_BATCH_SIZE` | Arrow streaming batch size for dev-fast reads | `16384` |
 | `NOISE_DEV_FAST_PARALLEL_SPECS` | Parallel dev-fast road/rail processing | `"1"` |
 | `NOISE_DEV_FAST_MAX_WORKERS` | Worker cap for dev-fast parallel specs | `2` |
+| `NOISE_DEV_FAST_GEOM_WORKERS` | Process count for gridding ROI geometries inside one spec (`1` = serial) | `cpu_count` |
+| `NOISE_OGR2OGR_SOURCE_WORKERS` | Accurate ingest: non-chunked sources imported+normalized concurrently, one connection each (`1` = serial on the shared connection) | `1` |
+| `NOISE_DISSOLVE_WORKERS` | Accurate dissolve: simplify / pass 1 (by tile) / pass 2 (by group) split into hashed buckets over N connections (`1` = original single statement) | `1` |
+| `NOISE_RESOLVE_WORKERS` | Accurate resolve: (jurisdiction, source, metric) groups in parallel, each with its own newer-pieces table; rounds stay sequential | `1` |
 | `NOISE_ROAD_NORMALIZE_BATCH_SIZE` | Road raw-stage normalization batch (`source_fid`) | `5000` |
 | `NOISE_OGR2OGR_TIMEOUT_SECONDS` | Hard timeout per `ogr2ogr` subprocess | `300` |
 | `NOISE_SQL_STATEMENT_TIMEOUT_SECONDS` | Per-normalize statement timeout | `900` |
@@ -1207,6 +1230,7 @@ tests/test_basemap.py
 - **Scoring area normalization is grid geometry, not accessibility.** All four categories divide by the clipped cell's land fraction (floor `0.25`), potentially quadrupling identical reachable units near the coast. Fine-surface scoring mirrors this behaviour; do not change only `score_cell`.
 - **The walk bound is still a hard cutoff.** Category decay is smooth within 500 m, but positive contributions at the bound disappear beyond it. The common half-distance table is also reused for bike comparisons despite their 5 km search bound.
 - **Transport scoring is strictly GTFS-only.** `TAGS["transport"] = {"source": "gtfs_direct"}`, `_AMENITY_CATEGORY_VALUES` excludes transport, and OSM stop helpers were removed (`load_osm_transport_features`, `clear_normalized_network_rows`, `transit/chained_reach.py` do not exist — do not import or "restore" them without an explicit task).
+- **The GTFS route network is display-only.** `TRANSIT_ROUTE_NETWORK_ALGO_VERSION` and official Translink geometry fingerprints enter render/display invalidation only; do not add them to `SCORING_MODEL_VERSION`, reach hashes, or scoring caches. Missing official sources are non-fatal. Shared route PMTiles are an overview at z6–z11; the selected build-keyed GeoJSON focus layer is the route line at z12+.
 - `pmtiles_bake_worker.py` import isolation is real, and `fine_vector_pmtiles_worker.py` exists specifically so Windows bake workers do not import `precompute/__init__.py`. Do not collapse them back together casually.
 - `static/dist/` is a checked-in build artifact. Editing `frontend/src/*` without rebuilding leaves runtime stale; CI fails on a dirty bundle.
 - `schema.sql` is a snapshot, not schema truth. Treat Alembic as canonical.
@@ -1216,7 +1240,7 @@ tests/test_basemap.py
 - `_STATE = _BuildState.bootstrap()` also runs at import time and is invalid until activation.
 - `transit_derived.service_desert_cells` has a foreign key to `build_manifest`; desert rows are written after `publish_precomputed_artifacts()` inserts the manifest row for the same `build_key`. v4 computes deserts directly into its staged public `service_deserts` rows through the shared helper; it does not read a v3 desert build.
 - v4 publish requires explicit transit state matching the score fingerprint and derives display rows even on cached runs. Full requires a prepared accurate noise artifact; `daily-access` never invokes raw noise ingest or v3 precompute.
-- The v4 shard verifier now targets a published build, not whatever inputs are current today. Publications from before `DISPLAY_LAYERS_VERSION=2` lack pinned verification identity and must be republished before `daily_access_verify_shards.py` will accept them.
+- The v4 shard verifier now targets a published build, not whatever inputs are current today. Publications from before the current `DISPLAY_LAYERS_VERSION=3` lack current display identity and must be republished before `daily_access_verify_shards.py` will accept them.
 - `DAILY_ACCESS_REACH_CACHE_VERSION=3` adds a mandatory reach file inventory. Existing v2 reach and dependent score directories are intentionally rebuilt once, while the geometry-only shell remains reusable; copying a manifest forward without rebuilding is invalid.
 - `extract_fingerprint()` caches the `.osm.pbf` content hash in `.livability_cache/osm_extract_fingerprint_cache.json`, keyed by resolved path + size + `mtime_ns`. Deleting/corrupting it only costs startup time.
 - `COASTAL_CLEANUP_SKIP_MAINLAND_AREA_M2` has a non-zero live default even though the nearby comment still says "default 0 = disabled". Trust the constant.
@@ -1224,7 +1248,7 @@ tests/test_basemap.py
 - Overture rows carry zero park/footprint areas (`park_area_m2 = 0.0`) because no area fetch path exists; park scoring depends on OSM area fields.
 - OSM import reuse is manifest/scope-aware: raw rows count as ready only with a complete import manifest whose `normalization_scope_hash` matches the active profile; otherwise rows are dropped and rebuilt.
 - Both Python and Rust GTFS parsers accept `calendar.txt`-only and `calendar_dates.txt`-only feeds, but require at least one service calendar file.
-- Frontend click priority is transport → amenity → service desert → noise → fine inspect → coarse grid (`frontend/src/click_priority.js`).
+- Frontend click priority is transport stop → transfer hub → route line → amenity → service desert → noise → fine inspect → coarse grid (`frontend/src/click_priority.js`).
 - MapLibre rejects `filter: null`, so the land-use style omits `filter` entirely when all classes are selected.
 - NI Round 1 noise shapefiles are class-coded (`GRIDCODE` 1..7 with `Noise_Cl` labels), not threshold-coded; threshold arithmetic on Round 1 produces invalid labels like `2-6`.
 - Transport reality is intentionally sparse at low zoom in some NI tiles: the Belfast z9 tile carries only a handful of hub-like features, so a sparse screenshot there is not proof of missing data.
@@ -1262,6 +1286,7 @@ tests/test_basemap.py
 | `tests/test_local_osm_rules.py` | Lua/importer rule mapping |
 | `tests/test_road_proximity.py` | maxspeed parsing, class calibration, distance decay, strongest-road selection, empty/invalid geometry |
 | `tests/test_transit_phase1.py` | GTFS reality rows, weekly bus subtiers, headway buckets, frequency windows, score units, snapshot stop regressions (skipped unless the local zip covers 2026-04-23), school-only classification, `gtfs-refresh` artifacts |
+| `tests/test_transit_route_network.py` | feed-scoped route keys, active/school filtering, directed pattern dedupe, GTFS shape → Valhalla → approximate fallback, colors, route visibility thresholds, rail connections, transfer clustering, route-asset filenames/endpoints, manifest reuse |
 | `tests/test_transit_refresh_runner.py` | lightweight transit CLI path behavior |
 | `tests/test_gtfs_download.py` | conditional requests, atomic replacement, manifest/freshness validation |
 | `tests/test_network_loader.py` | walkgraph graph index loading |
@@ -1271,7 +1296,7 @@ tests/test_basemap.py
 | `tests/test_daily_access_display.py` | stateless source preparation, selected GTFS snapshot/date, repeatable cached preparation, valid empty layers, missing GTFS/source failures, strict full accurate noise gate, regional stop filtering, shared service-desert cases |
 | `tests/test_daily_access_publish_db.py` | opt-in `DAILY_ACCESS_PUBLISH_DB_TESTS=1`: creates and drops a uniquely named disposable DB (requires CREATEDB), applies Alembic, uses fixture inputs with profile test; real CLI/cache publication, SQL/MVT/PMTiles, no v3 build, stale v3 isolation/reselection, noise artifact copy+bake, API/inspect, unchanged scores, repeat/failure safety. Never modifies the configured source DB. |
 | `tests/test_daily_access_native.py` | Python reference vs `walkgraph daily-access-*` on a synthetic format-4 graph (long edges, footprints, in-park edge, bay, cell penalties, green roots): statuses, reach codes/ids, losses, access, components, penalties and totals within `PARITY_LIMITS` (observed: exact); skipped when the binary lacks the subcommands |
-| `tests/test_pmtiles_bake.py` | tile field lists, layer metadata, amenity `tier`, road/rail score fields, bounded parallel scheduling, retry, temp-output cleanup, archive preservation, streamed noise tile specs |
+| `tests/test_pmtiles_bake.py` | tile field lists, route/transfer metadata and z6–z11 overview bits, amenity `tier`, road/rail score fields, bounded parallel scheduling, retry, temp-output cleanup, archive preservation, streamed noise tile specs |
 | `tests/test_fine_vector_pmtiles_worker.py` | fine-grid shard aggregation, degenerate-ring rejection, per-zoom resolutions, mixed z15, invalid-land skipping, buffered continuity, bounded LRU caches |
 | `tests/test_surface_runtime.py` | fine-surface runtime behavior and atomic PNG cache writes |
 | `tests/test_server_behavior.py` | runtime API shape/reload, transport + noise counts, PMTiles cache tokens/ETags, inspect/surface input validation, streaming, range serving |
@@ -1297,6 +1322,7 @@ tests/test_basemap.py
 | `frontend/src/grid_debug.test.js`, `grid_popup.test.js` | debug card + score popup rendering |
 | `frontend/src/map_source_guard.test.js` | source guard behavior (no `isSourceLoaded()` errors) |
 | `frontend/src/transport_filters.test.js`, `transport_reality_popup.test.js` | weekly bus tiers, exact rail/tram matching, exception-only logic, multi-row popups |
+| `frontend/src/route_network.test.js` | route-key parsing, route index normalization, terminus search, mode/focus filters, GeoJSON merge |
 | `frontend/src/noise_filters.test.js`, `noise_proxy_controls.test.js` | noise options/filters, control wiring, synced opacity |
 | `frontend/src/amenity_filters.test.js`, `landuse_filters.test.js`, `landuse_context_controls.test.js` | amenity/land-use filter and control logic |
 | `frontend/src/click_priority.test.js` | popup/action priority resolution |
@@ -1345,6 +1371,7 @@ Local disk hotspots:
 | Cluster count | Count of reachable scoring clusters after collapsing near-duplicate amenities within a category |
 | Effective units | Distance-decayed float scoring input derived from reachable cluster representatives |
 | Transit reality | GTFS-only stop-reality layer with status, departure counts, public frequency windows, weekday daytime bus tiers, and transport score units; unavailable GTFS means no transport signal |
+| Route network | Display-only active public GTFS bus/rail/tram patterns, route-stop memberships, transfer hubs, PMTiles overview, and build-keyed focus/search assets; it never changes livability scoring |
 | Publish gate | Precompute refusal to publish a build whose transport category is empty (bypass: `--allow-missing-transport`) |
 | Bus frequency tier | Headway-derived bus tier (`BUS_FREQUENCY_TIER_UNITS`) feeding transport score units |
 | Service desert | Cell with at least one reachable baseline GTFS stop but zero public departures in the desert window |

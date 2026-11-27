@@ -118,8 +118,27 @@ def _osm2pgsql_number_processes() -> int | None:
 
 OSM2PGSQL_NUMBER_PROCESSES = _osm2pgsql_number_processes()
 GTFS_DIR = BASE_DIR / "gtfs"
+GTFS_TRANSLINK_ULSTERBUS_ROUTES_PATH = Path(
+    os.getenv(
+        "GTFS_TRANSLINK_ULSTERBUS_ROUTES_PATH",
+        GTFS_DIR / "translink_ulsterbus_routes_20250923.zip",
+    )
+)
+GTFS_TRANSLINK_METRO_ROUTES_PATH = Path(
+    os.getenv(
+        "GTFS_TRANSLINK_METRO_ROUTES_PATH",
+        GTFS_DIR / "translink_metro_glider_routes_20250923.zip",
+    )
+)
+GTFS_TRANSLINK_RAIL_NETWORK_PATH = Path(
+    os.getenv(
+        "GTFS_TRANSLINK_RAIL_NETWORK_PATH",
+        GTFS_DIR / "translink_rail_network.geojson",
+    )
+)
 GTFS_ANALYSIS_TIMEZONE = "Europe/Dublin"
 TRANSIT_REALITY_ALGO_VERSION = 10
+TRANSIT_ROUTE_NETWORK_ALGO_VERSION = 3
 AMENITY_MERGE_ALGO_VERSION = 4
 LANDUSE_CONTEXT_ALGO_VERSION = 1
 LANDUSE_CONTEXT_MIN_ZOOM = 5
@@ -834,7 +853,7 @@ BASEMAP_FONT_STACKS = (
     "Noto Sans Devanagari Regular v1",
 )
 BASEMAP_CACHE_DIR = CACHE_DIR / "basemap"
-PMTILES_SCHEMA_VERSION = 13
+PMTILES_SCHEMA_VERSION = 14
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 14
 FORCE_RECOMPUTE = False
@@ -1064,6 +1083,14 @@ def _content_hash(path: Path) -> str:
         return digest.hexdigest()[:16]
     except OSError:
         return "missing"
+
+
+def translink_geometry_source_fingerprints() -> dict[str, str]:
+    return {
+        "ulsterbus": _content_hash(GTFS_TRANSLINK_ULSTERBUS_ROUTES_PATH),
+        "metro_glider": _content_hash(GTFS_TRANSLINK_METRO_ROUTES_PATH),
+        "rail": _content_hash(GTFS_TRANSLINK_RAIL_NETWORK_PATH),
+    }
 
 
 def hash_dict(payload: dict[str, Any]) -> str:
@@ -1506,6 +1533,8 @@ def build_config_hashes(profile: str | None = None) -> ConfigHashes:
         "output_html": OUTPUT_HTML,
         "category_colors": CATEGORY_COLORS,
         "pmtiles_schema_version": PMTILES_SCHEMA_VERSION,
+        "transit_route_network_algo_version": TRANSIT_ROUTE_NETWORK_ALGO_VERSION,
+        "translink_geometry_sources": translink_geometry_source_fingerprints(),
         "noise_mode": NOISE_MODE,
     }
     if NOISE_MODE == "legacy":

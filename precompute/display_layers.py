@@ -15,6 +15,7 @@ from config import (
 from db_postgis import (
     load_landuse_context_rows, load_merged_source_amenity_rows, load_railway_corridor_rows,
     load_road_rows, load_source_amenity_rows, load_transport_reality_points,
+    load_transit_route_network_rows,
     load_transit_railway_corridor_manifest,
 )
 from network import load_walk_graph_index
@@ -26,15 +27,19 @@ from . import publish
 from .amenity_tiers import annotate_amenity_row
 from .road_proximity import road_proximity_summary
 from .service_deserts import compute_service_desert_rows
+from transit.route_assets import publish_route_assets
 
 
-DISPLAY_LAYERS_VERSION = 2
+DISPLAY_LAYERS_VERSION = 3
 
 
 @dataclass
 class DisplayLayers:
     amenities: list[dict[str, Any]] = field(default_factory=list)
     transport: list[dict[str, Any]] = field(default_factory=list)
+    route_patterns: list[dict[str, Any]] = field(default_factory=list)
+    route_stops: list[dict[str, Any]] = field(default_factory=list)
+    transfer_hubs: list[dict[str, Any]] = field(default_factory=list)
     deserts: list[dict[str, Any]] = field(default_factory=list)
     summary: dict[str, Any] = field(default_factory=dict)
     noise_artifact: Any = None
@@ -42,6 +47,8 @@ class DisplayLayers:
 
     def counts(self):
         return {"amenities": len(self.amenities), "transport_reality": len(self.transport),
+                "transport_route_patterns": len(self.route_patterns),
+                "transport_transfer_hubs": len(self.transfer_hubs),
                 "service_deserts": len(self.deserts)}
 
 
@@ -125,6 +132,46 @@ def prepare_display_layers(context, cells_by_resolution, *, hashes, created_at, 
     if not reality_rows and not allow_missing_transport:
         raise DailyAccessBuildError("No GTFS transport display rows for the v4 snapshot; refusing to publish.")
     transport = publish.transport_rows_impl(reality_rows, created_at, hashes=hashes)
+    derived_patterns, route_stops, derived_hubs = load_transit_route_network_rows(
+        engine, context.reality_fingerprint
+    )
+    route_patterns = [
+        {
+            "build_key": hashes.build_key,
+            "config_hash": hashes.config_hash,
+            "import_fingerprint": hashes.import_fingerprint,
+            **{
+                key: value
+                for key, value in row.items()
+                if key not in {"route_network_hash", "stop_ids_json", "created_at"}
+            },
+            "created_at": created_at,
+        }
+        for row in derived_patterns
+    ]
+    transfer_hubs = [
+        {
+            "build_key": hashes.build_key,
+            "config_hash": hashes.config_hash,
+            "import_fingerprint": hashes.import_fingerprint,
+            **{
+                key: value
+                for key, value in row.items()
+                if key not in {"stop_refs_json", "created_at"}
+            },
+            "created_at": created_at,
+        }
+        for row in derived_hubs
+    ]
+    route_index = None
+    if derived_patterns:
+        route_index = publish_route_assets(
+            build_key=hashes.build_key,
+            reality_fingerprint=context.reality_fingerprint,
+            patterns=derived_patterns,
+            stops=route_stops,
+            transfer_hubs=derived_hubs,
+        )
     # The test graph is regional. Do not snap distant national stops to its boundary.
     reach_area = context.study_area_metric.envelope.buffer(WALK_RADIUS_M).envelope
     reach_area = transform(lambda x, y, z=None: TO_WGS84(x, y), reach_area)
@@ -164,6 +211,12 @@ def prepare_display_layers(context, cells_by_resolution, *, hashes, created_at, 
     summary.update({
         "mode_aware_scoring_enabled": False, "mode_aware_score_weights": {},
         "transport_reality_enabled": bool(transport),
+        "transport_network_enabled": bool(route_patterns),
+        "transport_route_index_url": (
+            f"/transit/routes/{hashes.build_key}/index.json" if route_index else None
+        ),
+        "transport_route_counts": dict((route_index or {}).get("counts") or {}),
+        "transport_route_min_zooms": {"backbone": 6, "regional": 8, "local": 10},
         "landuse_context_enabled": bool(landuse_counts), "landuse_context_counts": landuse_counts,
         "landuse_context_classes": sorted(landuse_counts),
         "landuse_context_min_zoom": LANDUSE_CONTEXT_MIN_ZOOM, "landuse_context_max_zoom": LANDUSE_CONTEXT_MAX_ZOOM,
@@ -175,7 +228,20 @@ def prepare_display_layers(context, cells_by_resolution, *, hashes, created_at, 
             "transit_reality_fingerprint": context.reality_fingerprint,
             "noise_artifact_hash": artifact.artifact_hash if artifact else None,
             "warnings": warnings,
-            "counts": {"amenities": len(amenities), "transport_reality": len(transport), "service_deserts": len(deserts)},
+            "counts": {"amenities": len(amenities), "transport_reality": len(transport),
+                       "transport_route_patterns": len(route_patterns),
+                       "transport_transfer_hubs": len(transfer_hubs),
+                       "service_deserts": len(deserts)},
         },
     })
-    return DisplayLayers(amenities, transport, deserts, summary, artifact, warnings)
+    return DisplayLayers(
+        amenities=amenities,
+        transport=transport,
+        route_patterns=route_patterns,
+        route_stops=route_stops,
+        transfer_hubs=transfer_hubs,
+        deserts=deserts,
+        summary=summary,
+        noise_artifact=artifact,
+        warnings=warnings,
+    )

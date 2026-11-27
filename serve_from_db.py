@@ -47,6 +47,7 @@ from db_postgis import (
 from precompute import surface as _surface
 from serve_routes import resolve_get_route, resolve_head_route
 from transit.export import EXPORTS_DIR, ZIP_FILENAME
+from transit.route_assets import ROUTE_ASSETS_DIR
 
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -230,6 +231,10 @@ class RuntimeState:
     surface_score_dir: Path | None
     surface_tile_dir: Path | None
     transport_reality_enabled: bool
+    transport_network_enabled: bool
+    transport_route_index_url: str | None
+    transport_route_counts: dict[str, int]
+    transport_route_min_zooms: dict[str, int]
     service_deserts_enabled: bool
     transport_reality_download_url: str | None
     transit_analysis_date: str | None
@@ -772,6 +777,16 @@ class RuntimeService:
                 expected_score_hash=str(manifest["score_hash"]),
             )
 
+        route_index_path = ROUTE_ASSETS_DIR / str(manifest["build_key"]) / "index.json"
+        transport_network_enabled = bool(
+            summary_json.get("transport_network_enabled") and route_index_path.is_file()
+        )
+        route_index_url = (
+            f"/transit/routes/{manifest['build_key']}/index.json"
+            if transport_network_enabled
+            else None
+        )
+
         return RuntimeState(
             build_key=str(manifest["build_key"]),
             build_profile=profile_name,
@@ -804,6 +819,19 @@ class RuntimeService:
             surface_score_dir=surface_score_dir,
             surface_tile_dir=surface_tile_dir,
             transport_reality_enabled=bool(summary_json.get("transport_reality_enabled")),
+            transport_network_enabled=transport_network_enabled,
+            transport_route_index_url=route_index_url,
+            transport_route_counts={
+                str(key): int(value)
+                for key, value in dict(summary_json.get("transport_route_counts") or {}).items()
+            },
+            transport_route_min_zooms={
+                str(key): int(value)
+                for key, value in dict(
+                    summary_json.get("transport_route_min_zooms")
+                    or {"backbone": 6, "regional": 8, "local": 10}
+                ).items()
+            },
             service_deserts_enabled=bool(summary_json.get("service_deserts_enabled")),
             transport_reality_download_url=(
                 str(summary_json["transport_reality_download_url"])
@@ -908,6 +936,12 @@ class RuntimeService:
                 basemap_token,
             ),
             "transport_reality_enabled": state.transport_reality_enabled,
+            "transport_network_enabled": state.transport_network_enabled,
+            "transport_route_index_url": _cache_busted_url(
+                state.transport_route_index_url, state.build_key
+            ),
+            "transport_route_counts": state.transport_route_counts,
+            "transport_route_min_zooms": state.transport_route_min_zooms,
             "service_deserts_enabled": state.service_deserts_enabled,
             "transport_reality_download_url": state.transport_reality_download_url,
             "transit_analysis_date": state.transit_analysis_date,
@@ -1074,6 +1108,7 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             parsed.path,
             static_dir=self.livability_server.static_dir,
             export_path=EXPORTS_DIR / ZIP_FILENAME,
+            route_assets_dir=ROUTE_ASSETS_DIR,
             pmtiles_path_for_url=self.livability_server.pmtiles_path_for_url,
             noise_pmtiles_url_path=self.livability_server.noise_pmtiles_url_path,
             noise_pmtiles_path=self.livability_server.noise_pmtiles_path,
@@ -1142,6 +1177,9 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             return
         if route.kind == "export":
             self._serve_export(route.target_path)
+            return
+        if route.kind == "route_asset":
+            self._serve_route_asset(route.target_path)
             return
         if route.kind == "pmtiles":
             self._serve_pmtiles(route.target_path)
@@ -1294,6 +1332,19 @@ class LivabilityRequestHandler(BaseHTTPRequestHandler):
             resolved,
             content_type=content_type,
             extra_headers={"Cache-Control": "no-store"},
+        )
+
+    def _serve_route_asset(self, target_path: Path) -> None:
+        safe_root = ROUTE_ASSETS_DIR.resolve()
+        resolved = target_path.resolve()
+        if safe_root not in resolved.parents:
+            raise FileNotFoundError
+        content_type = "application/geo+json" if resolved.suffix == ".geojson" else "application/json"
+        _stream_file_response(
+            self,
+            resolved,
+            content_type=content_type,
+            extra_headers={"Cache-Control": "public, max-age=3600"},
         )
 
     def _serve_export(self, export_path: Path) -> None:

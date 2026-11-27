@@ -543,6 +543,7 @@ def transport_rows_impl(rows, created_at, *, hashes):
             "has_any_bus_service": bool(row.get("has_any_bus_service", False)),
             "has_daily_bus_service": bool(row.get("has_daily_bus_service", False)),
             "route_modes_json": row["route_modes_json"],
+            "route_keys_json": list(row.get("route_keys_json") or []),
             "source_reason_codes_json": row["source_reason_codes_json"],
             "reality_reason_codes_json": row["reality_reason_codes_json"],
             "geom": row["geom"],

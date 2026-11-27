@@ -13,12 +13,14 @@ from config import (
 from db_postgis.manifests import (
     has_complete_transit_feed_manifest,
     has_complete_transit_railway_corridor_manifest,
+    has_complete_transit_route_network_manifest,
     has_complete_transit_reality_manifest,
 )
 from db_postgis.reads import load_transport_reality_points
 from db_postgis.writes import (
     replace_gtfs_feed_rows_from_artifacts,
     replace_transit_railway_corridors,
+    replace_transit_route_network,
     replace_transit_reality_rows_from_artifacts,
 )
 
@@ -28,6 +30,7 @@ from .railway_corridors import (
     build_railway_corridor_materialization,
     railway_proximity_hash_for_state,
 )
+from .route_network import build_route_network_materialization, route_network_hash_for_state
 from .rust_gtfs import load_gtfs_stop_reality_models, run_walkgraph_gtfs_refresh
 from .sources import ensure_feed_zip
 
@@ -75,6 +78,33 @@ def _ensure_railway_track_proximity(
         progress_cb=progress_cb,
     )
     replace_transit_railway_corridors(
+        engine,
+        materialization=materialization,
+        progress_cb=progress_cb,
+    )
+
+
+def _ensure_route_network(
+    engine,
+    *,
+    reality_state: TransitRealityState,
+    progress_cb: ProgressFn = None,
+) -> None:
+    network_hash = route_network_hash_for_state(reality_state.reality_fingerprint)
+    if has_complete_transit_route_network_manifest(
+        engine,
+        reality_state.reality_fingerprint,
+        route_network_hash=network_hash,
+    ):
+        _emit(progress_cb, f"[gtfs] route network unchanged; reusing {network_hash}")
+        return
+    _emit(progress_cb, f"materializing public route network for {reality_state.reality_fingerprint}")
+    materialization = build_route_network_materialization(
+        engine,
+        reality_state=reality_state,
+        progress_cb=progress_cb,
+    )
+    replace_transit_route_network(
         engine,
         materialization=materialization,
         progress_cb=progress_cb,
@@ -163,6 +193,11 @@ def ensure_transit_reality(
         _ensure_railway_track_proximity(
             engine,
             import_fingerprint=import_fingerprint,
+            reality_state=reality_state,
+            progress_cb=progress_cb,
+        )
+        _ensure_route_network(
+            engine,
             reality_state=reality_state,
             progress_cb=progress_cb,
         )
@@ -260,6 +295,11 @@ def ensure_transit_reality(
         _ensure_railway_track_proximity(
             engine,
             import_fingerprint=import_fingerprint,
+            reality_state=reality_state,
+            progress_cb=progress_cb,
+        )
+        _ensure_route_network(
+            engine,
             reality_state=reality_state,
             progress_cb=progress_cb,
         )

@@ -559,13 +559,16 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
             if !entries.has_network() {
                 return (NETWORK_NO_WALKING_NETWORK, scorer.score([0.0; 6], railway, road));
             }
+            // Rows do not depend on the kind: look each node up once per cell.
+            let rows: Vec<(usize, f64)> = entries
+                .node_costs
+                .iter()
+                .filter_map(|&(node, cost)| row_of(node).map(|row| (row, cost)))
+                .collect();
             let mut best: Vec<Vec<(u32, f64)>> = vec![Vec::new(); kinds.len()];
             for (position, kind) in kinds.iter().enumerate() {
                 let list = &mut best[position];
-                for &(node, cost) in &entries.node_costs {
-                    let Some(row) = row_of(node) else {
-                        continue;
-                    };
+                for &(row, cost) in &rows {
                     for column in 0..kind.k {
                         let label = kind.labels[row * kind.k + column];
                         if label == u32::MAX {

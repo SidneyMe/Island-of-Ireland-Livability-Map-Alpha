@@ -8,6 +8,9 @@ from urllib.parse import unquote
 
 
 SURFACE_TILE_RE = re.compile(r"^/tiles/surface/([^/]+)/([^/]+)/([^/]+)/([^/]+)\.png$")
+TRANSIT_ROUTE_ASSET_RE = re.compile(
+    r"^/transit/routes/([A-Za-z0-9][A-Za-z0-9._-]*)/(index\.json|[0-9a-f]{24}\.geojson)$"
+)
 
 
 @dataclass(frozen=True)
@@ -18,6 +21,7 @@ class RouteMatch:
         "pmtiles",
         "surface_tile",
         "static",
+        "route_asset",
         "api_runtime",
         "api_inspect",
     ]
@@ -30,6 +34,7 @@ def resolve_get_route(
     *,
     static_dir: Path,
     export_path: Path,
+    route_assets_dir: Path | None = None,
     pmtiles_path_for_url: Callable[[str], Path | None],
     noise_pmtiles_url_path: str | None,
     noise_pmtiles_path: Path | None,
@@ -38,6 +43,13 @@ def resolve_get_route(
         return RouteMatch("root", target_path=static_dir / "index.html")
     if path == "/exports/transport-reality.zip":
         return RouteMatch("export", target_path=export_path)
+    route_asset_match = TRANSIT_ROUTE_ASSET_RE.match(path)
+    if route_asset_match and route_assets_dir is not None:
+        build_key, asset_name = route_asset_match.groups()
+        return RouteMatch(
+            "route_asset",
+            target_path=route_assets_dir / build_key / asset_name,
+        )
 
     pmtiles_path = pmtiles_path_for_url(path)
     if pmtiles_path is not None:

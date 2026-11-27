@@ -284,9 +284,11 @@ def _clone_grid_shells(cells: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return clone_scoring_grid_shells(cells)
 
 
-_DENSITY_NORMALIZED_CATEGORIES = ("shops", "transport", "healthcare")
-_MIN_DENSITY_AREA_RATIO = 0.25
-_WEIGHTED_UNIT_CATEGORIES = frozenset({"shops", "healthcare", "parks"})
+# v3 scoring constants shared with precompute/surface.py. They are not part of
+# the config hashes: bump SCORING_MODEL_VERSION when changing one.
+CATEGORY_SCORE_MAX_POINTS = 25.0
+DENSITY_NORMALIZED_CATEGORIES = ("shops", "transport", "healthcare")
+MIN_DENSITY_AREA_RATIO = 0.25
 
 
 def _normalized_area_ratio(effective_area_ratio: Any) -> float:
@@ -297,7 +299,7 @@ def _normalized_area_ratio(effective_area_ratio: Any) -> float:
     if not math.isfinite(ratio):
         ratio = 1.0
     ratio = min(max(ratio, 0.0), 1.0)
-    return max(ratio, _MIN_DENSITY_AREA_RATIO)
+    return max(ratio, MIN_DENSITY_AREA_RATIO)
 
 
 def score_cell(
@@ -305,7 +307,7 @@ def score_cell(
     *,
     cluster_counts: dict[str, int] | None = None,
     effective_area_ratio: float = 1.0,
-    density_normalized_categories: tuple[str, ...] = _DENSITY_NORMALIZED_CATEGORIES,
+    density_normalized_categories: tuple[str, ...] = DENSITY_NORMALIZED_CATEGORIES,
     effective_units: dict[str, float] | None = None,
     railway_proximity_penalty: float = 0.0,
     road_proximity_penalty: float = 0.0,
@@ -325,7 +327,7 @@ def score_cell(
             effective_count = raw_count / normalized_ratio
             if effective_units is not None:
                 effective_count = float(effective_units.get(category, 0.0)) / normalized_ratio
-        per_category[category] = min(effective_count / cap, 1.0) * 25.0
+        per_category[category] = min(effective_count / cap, 1.0) * CATEGORY_SCORE_MAX_POINTS
     deduction = max(float(railway_proximity_penalty), 0.0)
     per_category["railway_proximity"] = -deduction
     per_category["road_proximity"] = -max(float(road_proximity_penalty), 0.0)

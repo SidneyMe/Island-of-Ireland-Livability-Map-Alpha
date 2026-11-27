@@ -143,6 +143,12 @@ class PmtilesBakeContractTests(TestCase):
         desert_layer = next(
             layer for layer in metadata["vector_layers"] if layer["id"] == "service_deserts"
         )
+        route_layer = next(
+            layer for layer in metadata["vector_layers"] if layer["id"] == "transport_routes"
+        )
+        hub_layer = next(
+            layer for layer in metadata["vector_layers"] if layer["id"] == "transport_transfer_hubs"
+        )
 
         self.assertEqual(transport_layer["fields"]["reality_status"], "String")
         self.assertEqual(transport_layer["fields"]["public_departures_30d"], "Number")
@@ -160,10 +166,16 @@ class PmtilesBakeContractTests(TestCase):
         self.assertEqual(transport_layer["fields"]["bus_active_days_mask_7d"], "String")
         self.assertEqual(transport_layer["fields"]["bus_service_subtier"], "String")
         self.assertEqual(transport_layer["fields"]["route_modes"], "String")
+        self.assertEqual(transport_layer["fields"]["route_keys_json"], "String")
         self.assertEqual(transport_layer["fields"]["is_unscheduled_stop"], "Number")
         self.assertEqual(transport_layer["fields"]["has_exception_only_service"], "Number")
         self.assertEqual(desert_layer["fields"]["baseline_reachable_stop_count"], "Number")
         self.assertEqual(desert_layer["fields"]["reachable_public_departures_7d"], "Number")
+        self.assertEqual(route_layer["minzoom"], 6)
+        self.assertEqual(route_layer["maxzoom"], bake_pmtiles.TRANSPORT_NETWORK_MAX_ZOOM)
+        self.assertEqual(route_layer["fields"]["geometry_source"], "String")
+        self.assertEqual(route_layer["fields"]["min_zoom"], "Number")
+        self.assertEqual(hub_layer["fields"]["route_keys_json"], "String")
 
     def test_pmtiles_metadata_declares_landuse_context_layer(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
@@ -258,6 +270,7 @@ class PmtilesBakeContractTests(TestCase):
         self.assertIn("t.bus_active_days_mask_7d", sql)
         self.assertIn("t.bus_service_subtier", sql)
         self.assertIn("jsonb_array_elements_text(t.route_modes_json)", sql)
+        self.assertIn("t.route_keys_json::text", sql)
         self.assertIn("CASE WHEN t.is_unscheduled_stop THEN 1 ELSE 0 END", sql)
         self.assertNotIn("STRING_AGG", sql)
         self.assertNotIn("SUM(t.school_only_departures_30d)", sql)
@@ -444,6 +457,8 @@ class PmtilesTileSpecIteratorTests(TestCase):
             self.assertTrue(layers & bake_pmtiles._LAYER_GRID)
             self.assertTrue(layers & bake_pmtiles._LAYER_AMENITIES)
             self.assertTrue(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY)
+            self.assertTrue(layers & bake_pmtiles._LAYER_TRANSPORT_ROUTES)
+            self.assertTrue(layers & bake_pmtiles._LAYER_TRANSPORT_TRANSFER_HUBS)
             self.assertTrue(layers & bake_pmtiles._LAYER_SERVICE_DESERTS)
 
         # z12 > coarse_grid_max_zoom → only amenities + transport_reality.
@@ -458,6 +473,7 @@ class PmtilesTileSpecIteratorTests(TestCase):
         self.assertTrue(
             any(layers & bake_pmtiles._LAYER_TRANSPORT_REALITY for _, _, _, layers in z12_specs)
         )
+        self.assertFalse(any(layers & bake_pmtiles._LAYER_TRANSPORT_ROUTES for _, _, _, layers in z12_specs))
 
     def test_main_tile_specs_do_not_include_noise_only_tiles(self) -> None:
         specs = list(

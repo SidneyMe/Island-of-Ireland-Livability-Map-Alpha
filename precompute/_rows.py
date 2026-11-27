@@ -26,6 +26,7 @@ from db_postgis import (
     load_road_rows,
     load_service_desert_rows,
     load_transport_reality_points,
+    load_transit_route_network_rows,
     load_transit_railway_corridor_manifest,
 )
 import noise.loader as _noise_loader
@@ -36,6 +37,7 @@ from . import grid as _grid
 from . import publish as _publish
 from .road_proximity import road_proximity_summary
 from ._state import _STATE
+from transit.route_assets import publish_route_assets
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +211,57 @@ def _transport_reality_rows(engine, created_at, *, progress_cb=None):
     if progress_cb is not None and result:
         progress_cb("detail", detail=f"loaded {len(result):,} transport_reality rows", force_log=True)
     return result
+
+
+def _transport_route_rows(engine, created_at, *, progress_cb=None):
+    if _STATE.transit_reality_state is None:
+        return {"patterns": [], "stops": [], "hubs": [], "index": None}
+    reality_fingerprint = _STATE.transit_reality_state.reality_fingerprint
+    patterns, stops, hubs = load_transit_route_network_rows(engine, reality_fingerprint)
+    public_patterns = [
+        {
+            "build_key": _STATE.hashes.build_key,
+            "config_hash": _STATE.hashes.config_hash,
+            "import_fingerprint": _STATE.hashes.import_fingerprint,
+            **{
+                key: value
+                for key, value in row.items()
+                if key not in {"route_network_hash", "stop_ids_json", "created_at"}
+            },
+            "created_at": created_at,
+        }
+        for row in patterns
+    ]
+    public_hubs = [
+        {
+            "build_key": _STATE.hashes.build_key,
+            "config_hash": _STATE.hashes.config_hash,
+            "import_fingerprint": _STATE.hashes.import_fingerprint,
+            **{
+                key: value
+                for key, value in row.items()
+                if key not in {"stop_refs_json", "created_at"}
+            },
+            "created_at": created_at,
+        }
+        for row in hubs
+    ]
+    index = None
+    if patterns:
+        index = publish_route_assets(
+            build_key=_STATE.hashes.build_key,
+            reality_fingerprint=reality_fingerprint,
+            patterns=patterns,
+            stops=stops,
+            transfer_hubs=hubs,
+        )
+    if progress_cb is not None and public_patterns:
+        progress_cb(
+            "detail",
+            detail=f"loaded {len(public_patterns):,} transport route patterns",
+            force_log=True,
+        )
+    return {"patterns": public_patterns, "stops": stops, "hubs": public_hubs, "index": index}
 
 def _service_desert_rows(engine, created_at, *, progress_cb=None):
     rows = load_service_desert_rows(engine, _STATE.hashes.build_key)

@@ -19,6 +19,8 @@ from .tables import (
     noise_polygons,
     service_deserts,
     transport_reality,
+    transport_route_patterns,
+    transport_transfer_hubs,
     transit_calendar_dates,
     transit_calendar_services,
     transit_feed_manifest,
@@ -65,6 +67,7 @@ from .write_transit import (
     replace_service_desert_rows,
     replace_transit_reality_rows,
     replace_transit_railway_corridors,
+    replace_transit_route_network,
 )
 
 
@@ -421,6 +424,8 @@ def publish_precomputed_artifacts(
     packages_json: dict[str, Any],
     summary_json: dict[str, Any],
     transport_reality_rows: Iterable[dict[str, Any]] = (),
+    transport_route_pattern_rows: Iterable[dict[str, Any]] = (),
+    transport_transfer_hub_rows: Iterable[dict[str, Any]] = (),
     service_desert_rows: Iterable[dict[str, Any]] = (),
     noise_rows: Iterable[dict[str, Any]] = (),
     study_area_wgs84=None,
@@ -445,6 +450,8 @@ def publish_precomputed_artifacts(
             grid_walk,
             amenities,
             transport_reality,
+            transport_route_patterns,
+            transport_transfer_hubs,
             service_deserts,
             noise_polygons,
             build_manifest,
@@ -483,6 +490,18 @@ def publish_precomputed_artifacts(
             connection,
             transport_reality,
             transport_reality_rows,
+            progress_cb=progress_cb,
+        )
+        _bulk_insert(
+            connection,
+            transport_route_patterns,
+            transport_route_pattern_rows,
+            progress_cb=progress_cb,
+        )
+        _bulk_insert(
+            connection,
+            transport_transfer_hubs,
+            transport_transfer_hub_rows,
             progress_cb=progress_cb,
         )
         _bulk_insert(

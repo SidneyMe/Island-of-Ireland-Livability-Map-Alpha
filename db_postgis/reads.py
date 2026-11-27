@@ -13,7 +13,10 @@ from .tables import (
     roads,
     transit_gtfs_stop_reality,
     transit_railway_corridors,
+    transit_route_pattern_stops,
+    transit_route_patterns,
     transit_service_desert_cells,
+    transit_transfer_hubs,
 )
 
 
@@ -176,6 +179,20 @@ def load_transport_reality_points(
             .where(transit_gtfs_stop_reality.c.reality_fingerprint == reality_fingerprint)
             .order_by(transit_gtfs_stop_reality.c.source_ref)
         ).mappings().all()
+        membership_rows = connection.execute(
+            select(
+                transit_route_pattern_stops.c.feed_id,
+                transit_route_pattern_stops.c.stop_id,
+                transit_route_pattern_stops.c.route_key,
+            )
+            .where(transit_route_pattern_stops.c.reality_fingerprint == reality_fingerprint)
+            .distinct()
+        ).mappings().all()
+
+    route_keys_by_stop: dict[tuple[str, str], set[str]] = {}
+    for membership in membership_rows:
+        key = (str(membership["feed_id"]), str(membership["stop_id"]))
+        route_keys_by_stop.setdefault(key, set()).add(str(membership["route_key"]))
 
     root = root_module()
     payload: list[dict[str, Any]] = []
@@ -217,12 +234,53 @@ def load_transport_reality_points(
                 "has_any_bus_service": bool(row.get("has_any_bus_service", False)),
                 "has_daily_bus_service": bool(row.get("has_daily_bus_service", False)),
                 "route_modes_json": list(row.get("route_modes_json") or []),
+                "route_keys_json": sorted(
+                    route_keys_by_stop.get((str(row["feed_id"]), str(row["stop_id"])), set())
+                ),
                 "source_reason_codes_json": list(row.get("source_reason_codes_json") or []),
                 "reality_reason_codes_json": list(row.get("reality_reason_codes_json") or []),
                 "geom": root.to_shape(row["geom"]),
             }
         )
     return payload
+
+
+def load_transit_route_network_rows(
+    engine: Engine,
+    reality_fingerprint: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    root = root_module()
+    with engine.connect() as connection:
+        pattern_rows = connection.execute(
+            select(transit_route_patterns)
+            .where(transit_route_patterns.c.reality_fingerprint == reality_fingerprint)
+            .order_by(transit_route_patterns.c.route_key, transit_route_patterns.c.pattern_id)
+        ).mappings().all()
+        stop_rows = connection.execute(
+            select(transit_route_pattern_stops)
+            .where(transit_route_pattern_stops.c.reality_fingerprint == reality_fingerprint)
+            .order_by(
+                transit_route_pattern_stops.c.route_key,
+                transit_route_pattern_stops.c.pattern_id,
+                transit_route_pattern_stops.c.stop_sequence,
+            )
+        ).mappings().all()
+        hub_rows = connection.execute(
+            select(transit_transfer_hubs)
+            .where(transit_transfer_hubs.c.reality_fingerprint == reality_fingerprint)
+            .order_by(transit_transfer_hubs.c.hub_id)
+        ).mappings().all()
+
+    def _converted(rows, geometry_name="geom"):
+        result = []
+        for row in rows:
+            payload = dict(row)
+            if payload.get(geometry_name) is not None:
+                payload[geometry_name] = root.to_shape(payload[geometry_name])
+            result.append(payload)
+        return result
+
+    return _converted(pattern_rows), _converted(stop_rows), _converted(hub_rows)
 
 
 def load_railway_corridor_rows(

@@ -340,7 +340,7 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 - Migration `20260423_000010_transport_frequency_scoring.py` persists the frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
 - Migration `20260424_000011_bus_frequency_tiers.py` persists weekday daytime bus frequency fields on `gtfs_stop_service_summary`, `gtfs_stop_reality`, and public `transport_reality`.
 - `transport_score_units` plus bus frequency metadata now flows through DB reads, scoring amenity rows, PMTiles metadata, runtime summaries, frontend filters, the standalone export bundle, and transport popups.
-- `TRANSIT_REALITY_ALGO_VERSION = 10`, `CACHE_SCHEMA_VERSION = 14`, `FINE_SURFACE_SCHEMA_VERSION = 2`, and `PMTILES_SCHEMA_VERSION = 13` invalidate stale transport, cache, surface, and tile outputs.
+- `TRANSIT_REALITY_ALGO_VERSION = 10`, display-only `TRANSIT_ROUTE_NETWORK_ALGO_VERSION = 3`, `CACHE_SCHEMA_VERSION = 14`, `FINE_SURFACE_SCHEMA_VERSION = 2`, and `PMTILES_SCHEMA_VERSION = 14` invalidate their respective transport, route-render, cache, surface, and tile outputs. The route-network version and official Translink geometry fingerprints must not invalidate scoring caches.
 
 ### ~~Mode tiering~~
 
@@ -615,7 +615,7 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - The frontend now opens a click popup using coarse tile properties when that is enough and falls back to `/api/inspect` for exact fine-surface details.
 - This item is functionally done even though the UI is currently a popup rather than a dedicated side panel, and it does not yet list individual top amenity drivers.
 
-### ~~Operational overlay controls~~
+### ~~Operational overlay controls and route network visualization~~
 
 **What:** Let users turn on transport reality, service deserts, and the official-derived noise overlay independently from the base score grid.
 
@@ -624,13 +624,18 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 **How:**
 
 - Keep the main livability grid as the default layer.
-- Add independent toggles for transport reality, service deserts, and noise.
+- Add independent toggles for the transport network, service deserts, and noise.
 - Use runtime summary counts to disable or hide controls when a build does not contain the backing data.
 - Keep filters local to the MapLibre layer so toggles do not require server round trips.
+- Keep the shared route overview in PMTiles, then load immutable build-keyed GeoJSON only for stop/route/direction focus.
 
 **Done so far:**
 
-- Transport reality controls live inside the `Amenities` -> `Transport` card, with nested schedule, frequency, and mode controls.
+- Transport has its own `Transport network` card. Its main switch controls static GTFS route lines, transfer hubs, and stop points; schedule/frequency filters affect stops only, while bus/rail/tram filters affect the whole network.
+- The route state machine supports overview → routes serving a clicked stop or hub → one route → one direction/variant. Search matches route number, name, and termini; `Clear selection` returns to the overview.
+- Active public route patterns are grouped by feed-scoped route id, direction, shape, and stop sequence. Selected routes use a wide halo, direction arrows, endpoint labels, transfer links, and dashed styling when geometry is only a stop-sequence approximation.
+- Missing Translink GTFS shapes can use official OpenDataNI `PtLinks` bus linework or the EPSG:29902 NIR rail network before falling back to Valhalla/stop sequences. Matching is route-number plus stop-coverage based, source-hashed, non-fatal, and display-only.
+- Overview classes are `backbone` from z6, `regional` from z8, and `local` from z10 through z11. Selected build-keyed GeoJSON routes remain visible at every zoom. Missing route artifacts degrade to the existing stop layer without breaking runtime startup.
 - Service deserts have a dedicated overlay toggle.
 - Noise has a hidden-by-default overlay toggle, metric/source controls, mapped-count labels, and an opacity slider that updates fill and outline visibility.
 - Transport popups render colocated stop rows together instead of only showing the first rendered feature.

@@ -34,4 +34,76 @@
     box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45);
 }
 
+.transport-route-browser {
+    display: grid;
+    gap: 7px;
+    margin: 10px 0;
+}
+
+.transport-route-search {
+    width: 100%;
+    min-width: 0;
+    padding: 9px 10px;
+    border: 1px solid rgba(24, 33, 38, 0.2);
+    border-radius: 8px;
+    color: var(--ink);
+    background: rgba(255, 255, 255, 0.9);
+}
+
+.transport-route-result,
+.transport-direction-button,
+.transport-direction-select,
+.transport-route-clear {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 9px;
+    border: 1px solid rgba(24, 33, 38, 0.14);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.74);
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+}
+
+.transport-direction-select {
+    appearance: auto;
+}
+
+.transport-route-result:hover,
+.transport-direction-button:hover,
+.transport-direction-select:hover,
+.transport-route-clear:hover {
+    border-color: var(--accent);
+}
+
+.transport-route-result:disabled,
+.transport-direction-button:disabled {
+    cursor: default;
+    border-color: var(--accent);
+    background: rgba(48, 109, 79, 0.1);
+}
+
+.transport-route-swatch {
+    width: 18px;
+    height: 6px;
+    flex: 0 0 18px;
+    border-radius: 999px;
+    box-shadow: 0 0 0 1px rgba(24, 33, 38, 0.24);
+}
+
+.transport-route-selection-title,
+.transport-route-meta {
+    display: block;
+    margin-top: 4px;
+}
+
+.transport-route-meta {
+    color: var(--muted);
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
 /* MapLibre styles are imported from JS in main.js. */

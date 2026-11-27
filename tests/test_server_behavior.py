@@ -934,6 +934,10 @@ class RenderAndCliTests(TestCase):
                 "landuse_context_min_zoom": 5,
                 "landuse_context_max_zoom": 11,
                 "transport_reality_enabled": True,
+                "transport_network_enabled": True,
+                "transport_route_index_url": "/transit/routes/build-123/index.json",
+                "transport_route_counts": {"total": 8, "bus": 6, "rail": 2, "backbone": 3},
+                "transport_route_min_zooms": {"backbone": 6, "regional": 8, "local": 10},
                 "service_deserts_enabled": True,
                 "transport_reality_download_url": "/exports/transport-reality.zip",
                 "noise_enabled": True,
@@ -978,11 +982,15 @@ class RenderAndCliTests(TestCase):
         with TemporaryDirectory() as tmp_name:
             noise_pmtiles_path = Path(tmp_name) / "noise.pmtiles"
             noise_pmtiles_path.write_bytes(b"noise")
+            route_assets_dir = Path(tmp_name) / "routes"
+            (route_assets_dir / "build-123").mkdir(parents=True)
+            (route_assets_dir / "build-123" / "index.json").write_text("{}", encoding="utf-8")
             with (
                 mock.patch.object(serve_from_db, "load_runtime_manifest", return_value=manifest),
                 mock.patch.object(serve_from_db, "load_available_resolutions", return_value=[20000, 10000, 5000]),
                 mock.patch.object(serve_from_db, "profile_fine_surface_enabled", return_value=True),
                 mock.patch.object(serve_from_db, "noise_pmtiles_output_path", return_value=noise_pmtiles_path),
+                mock.patch.object(serve_from_db, "ROUTE_ASSETS_DIR", route_assets_dir),
                 mock.patch.object(serve_from_db._surface, "build_surface_shell_hash", return_value="shell-hash-123"),
                 mock.patch.object(serve_from_db._surface, "surface_shell_dir", return_value=Path("surface-shell")),
                 mock.patch.object(serve_from_db._surface, "surface_score_dir", return_value=Path("surface-scores")),
@@ -1004,6 +1012,13 @@ class RenderAndCliTests(TestCase):
         self.assertNotIn("surface_tile_url_template", payload)
         self.assertEqual(payload["inspect_url"], "/api/inspect")
         self.assertTrue(payload["transport_reality_enabled"])
+        self.assertTrue(payload["transport_network_enabled"])
+        self.assertEqual(
+            payload["transport_route_index_url"],
+            "/transit/routes/build-123/index.json?v=build-123",
+        )
+        self.assertEqual(payload["transport_route_counts"]["bus"], 6)
+        self.assertEqual(payload["transport_route_min_zooms"]["local"], 10)
         self.assertTrue(payload["service_deserts_enabled"])
         self.assertEqual(payload["transport_reality_download_url"], "/exports/transport-reality.zip")
         self.assertEqual(payload["transit_analysis_date"], "2026-04-14")

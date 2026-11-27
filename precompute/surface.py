@@ -33,7 +33,13 @@ from config import (
     resolution_for_zoom,
     surface_shell_hash_for_geo,
 )
-from .grid import build_cell_id, score_cell
+from .grid import (
+    CATEGORY_SCORE_MAX_POINTS,
+    DENSITY_NORMALIZED_CATEGORIES,
+    MIN_DENSITY_AREA_RATIO,
+    build_cell_id,
+    score_cell,
+)
 from .mode_aware import MODE_AWARE_KEY, build_mode_aware_payload
 from .reachability_arrays import ReachabilityMatrix
 
@@ -48,8 +54,6 @@ SURFACE_TILE_SCHEMA_VERSION = 1
 _CATEGORY_ORDER = tuple(CAPS)
 _SCORE_COMPONENT_ORDER = _CATEGORY_ORDER + ("railway_proximity", "road_proximity")
 _CATEGORY_TO_INDEX = {category: index for index, category in enumerate(_CATEGORY_ORDER)}
-_DENSITY_NORMALIZED_CATEGORIES = {"shops", "transport", "healthcare"}
-_MIN_DENSITY_AREA_RATIO = 0.25
 
 
 @dataclass(frozen=True)
@@ -334,7 +338,7 @@ def iter_shard_entries(
 
 def _normalized_area_ratio_array(effective_area_ratio: np.ndarray) -> np.ndarray:
     clipped = np.clip(np.asarray(effective_area_ratio, dtype=np.float32), 0.0, 1.0)
-    return np.maximum(clipped, _MIN_DENSITY_AREA_RATIO)
+    return np.maximum(clipped, MIN_DENSITY_AREA_RATIO)
 
 
 def component_scores_for_nodes(
@@ -351,9 +355,11 @@ def component_scores_for_nodes(
     for category_index, category in enumerate(_CATEGORY_ORDER):
         cap_value = float(CAPS[category])
         effective_count = effective_units_matrix[:row_count, category_index].astype(np.float32)
-        if category == "parks" or category in _DENSITY_NORMALIZED_CATEGORIES:
+        if category == "parks" or category in DENSITY_NORMALIZED_CATEGORIES:
             effective_count = effective_count / ratios
-        scores[:, category_index] = np.minimum(effective_count / cap_value, 1.0) * 25.0
+        scores[:, category_index] = (
+            np.minimum(effective_count / cap_value, 1.0) * CATEGORY_SCORE_MAX_POINTS
+        )
     if railway_proximity_penalties is not None:
         penalty_values = np.asarray(railway_proximity_penalties, dtype=np.float32)
         if penalty_values.shape[0] != row_count:

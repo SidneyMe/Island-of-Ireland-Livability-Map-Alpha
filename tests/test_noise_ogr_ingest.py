@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import queue
 import tempfile
+import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -883,6 +884,48 @@ class NoiseOgrIngestTests(TestCase):
                                                     ingest_noise_normalized_ogr2ogr(engine, "h1", tmp, None)
         self.assertEqual(len(import_calls), 1)
         self.assertIsNotNone(import_calls[0].get("timeout_seconds"))
+
+    def test_parallel_source_workers_import_every_source_and_sum_rows(self) -> None:
+        from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr
+
+        roi_specs = [
+            SimpleNamespace(
+                zip_name="Rd4-2022.zip",
+                member=f"Noise_R4_{name}.shp",
+                file_format="shp",
+                source_type=name.lower(),
+                round_number=4,
+            )
+            for name in ("Airport", "Industry", "Rail")
+        ]
+        fields = ["Time", "Db_Low", "Db_High", "DbValue", "ReportPeri", "OBJECTID"]
+        with tempfile.TemporaryDirectory() as tmp_name:
+            tmp = Path(tmp_name)
+            for spec in roi_specs:
+                (tmp / spec.member).write_text("stub", encoding="utf-8")
+            engine = _FakeIngestEngine(_FakeIngestConn())
+            imported: list[str] = []
+            lock = threading.Lock()
+
+            def _record_import(**kwargs):  # noqa: ANN001
+                with lock:
+                    imported.append(Path(kwargs["source_path"]).name)
+
+            with patch.dict(os.environ, {"NOISE_OGR2OGR_SOURCE_WORKERS": "3"}, clear=False):
+                with patch("noise.loader.ROI_SOURCE_SPECS", roi_specs):
+                    with patch("noise.loader.NI_ZIP_BY_ROUND", {}):
+                        with patch("noise_artifacts.ogr_ingest.extract_source_archive_if_needed", return_value=tmp):
+                            with patch("noise_artifacts.ogr_ingest._available_ogr_fields", return_value=fields):
+                                with patch("noise_artifacts.ogr_ingest._noise_ogr_candidate_fields", return_value=fields):
+                                    with patch("noise_artifacts.ogr_ingest._select_existing_noise_fields", return_value=fields):
+                                        with patch("noise_artifacts.ogr_ingest._run_ogr2ogr_import", side_effect=_record_import):
+                                            with patch("noise_artifacts.ogr_ingest._imported_stage_row_count_or_fail", return_value=43):
+                                                with patch("noise_artifacts.ogr_ingest._normalize_roi_stage", return_value=2):
+                                                    with patch("noise_artifacts.ogr_ingest._prepare_stage_table", return_value=None):
+                                                        total = ingest_noise_normalized_ogr2ogr(engine, "h1", tmp, None)
+
+        self.assertEqual(total, 6)
+        self.assertEqual(sorted(imported), sorted(spec.member for spec in roi_specs))
 
     def test_stage_drop_committed_before_external_ogr_import(self) -> None:
         from noise_artifacts.ogr_ingest import ingest_noise_normalized_ogr2ogr

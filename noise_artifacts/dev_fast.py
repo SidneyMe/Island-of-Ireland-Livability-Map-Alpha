@@ -5,7 +5,9 @@ import os
 import hashlib
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -208,6 +210,28 @@ def _dev_fast_parallel_max_workers() -> int:
     if value <= 0:
         raise NoiseIngestError(
             f"NOISE_DEV_FAST_MAX_WORKERS must be a positive integer, got {raw!r}"
+        )
+    return value
+
+
+def _dev_fast_geom_workers() -> int:
+    """Process count for gridding ROI source geometries.
+
+    One ROI layer (Round 4 road GDB) holds a few hundred polygons with millions
+    of vertices each, so spec-level threads leave it on a single core.
+    """
+    raw = os.getenv("NOISE_DEV_FAST_GEOM_WORKERS")
+    if raw is None or not raw.strip():
+        return max(1, os.cpu_count() or 1)
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_GEOM_WORKERS must be a positive integer, got {raw!r}"
+        ) from exc
+    if value <= 0:
+        raise NoiseIngestError(
+            f"NOISE_DEV_FAST_GEOM_WORKERS must be a positive integer, got {raw!r}"
         )
     return value
 
@@ -513,6 +537,7 @@ def _add_geom_cells(
     grid_size_m: int,
 ) -> int:
     from shapely.geometry import box
+    from shapely.prepared import prep
 
     if geom is None or geom.is_empty:
         return 0
@@ -543,6 +568,11 @@ def _add_geom_cells(
             f"at grid_size_m={grid_size_m}, limit={limit:,}. "
             "Increase NOISE_GRID_SIZE_M or use --noise-accurate."
         )
+    # Road noise polygons have very detailed boundaries and are tested against
+    # thousands of grid cells each.  Building the GEOS spatial index once per
+    # source geometry avoids repeating the same expensive topology work for
+    # every candidate cell.
+    prepared_geom = prep(geom)
     rank = _band_rank(db_low, db_high, db_value)
     touched = 0
     for cell_x in range(min_cell_x, max_cell_x + 1):
@@ -552,7 +582,7 @@ def _add_geom_cells(
             cell_miny = cell_y * grid_size_m
             cell_maxy = cell_miny + grid_size_m
             cell_poly = box(cell_minx, cell_miny, cell_maxx, cell_maxy)
-            if not geom.intersects(cell_poly):
+            if not prepared_geom.intersects(cell_poly):
                 continue
             key = (jurisdiction, source_type, metric, cell_x, cell_y)
             existing = accumulator.get(key)
@@ -570,6 +600,14 @@ def _add_geom_cells(
                 )
             touched += 1
     return touched
+
+
+def _geom_cells_worker(
+    kwargs: dict[str, Any],
+) -> tuple[dict[tuple[str, str, str, int, int], _GridRow], int]:
+    acc: dict[tuple[str, str, str, int, int], _GridRow] = {}
+    touched = _add_geom_cells(acc, **kwargs)
+    return acc, touched
 
 
 _ROI_REQUESTED_FIELDS = ["Time", "Db_Low", "Db_High", "DbValue", "ReportPeriod", "ReportPeri"]
@@ -670,47 +708,70 @@ def _process_roi_spec_grid(
 
     source_label = f"{spec.zip_name}:{spec.member}"
     row_touched = 0
-    for frame, chunk_index, chunk_count in _iter_noise_frames(
-        source_path_or_uri=source_path_or_uri,
-        layer_name=layer_name,
-        columns=columns,
-        chunk_size=chunk_size,
-        source_label=source_label,
-        progress_cb=progress_cb,
-    ):
-        chunk_touched = 0
-        for row in frame.itertuples(index=False):
-            metric = _metric_from_time(_lookup_ci(row, "Time", "TIME"))
-            if metric is None:
-                continue
-            db_low, db_high, db_value = _normalize_roi_band(row)
-            if db_value is None:
-                continue
-            geom = getattr(row, "geometry", None)
-            chunk_touched += _add_geom_cells(
-                local_acc,
-                jurisdiction="roi",
-                source_type=str(spec.source_type),
-                metric=metric,
-                round_number=int(spec.round_number),
-                report_period=f"Round {int(spec.round_number)}",
-                db_low=db_low,
-                db_high=db_high,
-                db_value=str(db_value),
-                geom=geom,
-                grid_size_m=int(grid_size_m),
+    geom_workers = _dev_fast_geom_workers()
+    pools = ExitStack()
+    geom_pool: ProcessPoolExecutor | None = None
+    with pools:
+        for frame, chunk_index, chunk_count in _iter_noise_frames(
+            source_path_or_uri=source_path_or_uri,
+            layer_name=layer_name,
+            columns=columns,
+            chunk_size=chunk_size,
+            source_label=source_label,
+            progress_cb=progress_cb,
+        ):
+            chunk_touched = 0
+            cell_jobs: list[dict[str, Any]] = []
+            for row in frame.itertuples(index=False):
+                metric = _metric_from_time(_lookup_ci(row, "Time", "TIME"))
+                if metric is None:
+                    continue
+                db_low, db_high, db_value = _normalize_roi_band(row)
+                if db_value is None:
+                    continue
+                cell_jobs.append(
+                    dict(
+                        jurisdiction="roi",
+                        source_type=str(spec.source_type),
+                        metric=metric,
+                        round_number=int(spec.round_number),
+                        report_period=f"Round {int(spec.round_number)}",
+                        db_low=db_low,
+                        db_high=db_high,
+                        db_value=str(db_value),
+                        geom=getattr(row, "geometry", None),
+                        grid_size_m=int(grid_size_m),
+                    )
+                )
+            if geom_workers > 1 and len(cell_jobs) > 1:
+                if geom_pool is None:
+                    # spawn, not fork: the caller may already be running spec threads.
+                    geom_pool = pools.enter_context(
+                        ProcessPoolExecutor(
+                            max_workers=geom_workers,
+                            mp_context=multiprocessing.get_context("spawn"),
+                        )
+                    )
+                # map() yields in row order, so merging with the `>=` tie-break
+                # reproduces the serial accumulator exactly.
+                for row_acc, touched in geom_pool.map(_geom_cells_worker, cell_jobs):
+                    _merge_grid_acc(local_acc, row_acc)
+                    chunk_touched += touched
+            else:
+                for job in cell_jobs:
+                    chunk_touched += _add_geom_cells(local_acc, **job)
+            local_rows += len(cell_jobs)
+            del cell_jobs
+            row_touched += chunk_touched
+            chunk_pos = (
+                f"{chunk_index}/{chunk_count}" if chunk_count is not None else str(chunk_index)
             )
-            local_rows += 1
-        row_touched += chunk_touched
-        chunk_pos = (
-            f"{chunk_index}/{chunk_count}" if chunk_count is not None else str(chunk_index)
-        )
-        _progress(
-            progress_cb,
-            f"[noise:progress] phase=dev_fast_grid_roi_chunk source={source_label} "
-            f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
-        )
-        del frame
+            _progress(
+                progress_cb,
+                f"[noise:progress] phase=dev_fast_grid_roi_chunk source={source_label} "
+                f"chunk={chunk_pos} rows={len(frame)} touched={chunk_touched}",
+            )
+            del frame
     _progress_event(
         progress_cb,
         phase="dev_fast_grid_roi",

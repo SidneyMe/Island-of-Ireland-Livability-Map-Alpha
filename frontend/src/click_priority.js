@@ -1,5 +1,7 @@
 export const CLICK_ACTIONS = {
   TRANSPORT: "transport",
+  TRANSPORT_HUB: "transport_hub",
+  TRANSPORT_ROUTE: "transport_route",
   AMENITY: "amenity",
   SERVICE_DESERT: "service_desert",
   NOISE: "noise",
@@ -25,6 +27,23 @@ export function resolveMapClickAction({
   const transportFeatures = queryLayer(map, point, "transport-reality-circle");
   if (transportFeatures.length > 0) {
     return { type: CLICK_ACTIONS.TRANSPORT, features: transportFeatures };
+  }
+
+  const transferFeatures = queryLayer(map, point, "transport-focus-transfers")
+    .concat(queryLayer(map, point, "transport-transfer-hubs"));
+  if (transferFeatures.length > 0) {
+    return { type: CLICK_ACTIONS.TRANSPORT_HUB, features: transferFeatures };
+  }
+
+  const focusRouteFeatures = queryLayer(map, point, "transport-focus-line")
+    .concat(queryLayer(map, point, "transport-focus-approximate"));
+  if (focusRouteFeatures.length > 0) {
+    return { type: CLICK_ACTIONS.TRANSPORT_ROUTE, features: focusRouteFeatures };
+  }
+  const routeFeatures = queryLayer(map, point, "transport-routes-line")
+    .concat(queryLayer(map, point, "transport-routes-approximate"));
+  if (routeFeatures.length > 0) {
+    return { type: CLICK_ACTIONS.TRANSPORT_ROUTE, features: routeFeatures };
   }
 
   const amenityFeatures = queryLayer(map, point, "amenities-circle");
