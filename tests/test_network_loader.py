@@ -88,12 +88,13 @@ class NetworkLoaderTests(TestCase):
         process = _FakeProcess(["pass 1/2\n", "pass 2/2\n"])
 
         with (
+            TemporaryDirectory() as temp,
             mock.patch.object(loader, "ensure_walkgraph_subcommand_available"),
             mock.patch.object(loader.subprocess, "Popen", return_value=process) as popen_mock,
         ):
             loader.run_walkgraph_build(
                 Path("ireland.osm.pbf"),
-                Path("cache/walk_graph"),
+                Path(temp) / "walk_graph",
                 walkgraph_bin="walkgraph-dev",
                 bbox=(51.4, -10.5, 55.4, -5.3),
                 bbox_padding_m=500.0,
@@ -108,6 +109,9 @@ class NetworkLoaderTests(TestCase):
         self.assertIn("--bbox", command)
         self.assertIn("--bbox-padding-m", command)
         self.assertIn("--extract-fingerprint", command)
+        process_env = popen_mock.call_args.kwargs["env"]
+        self.assertEqual(process_env["TEMP"], str(Path(temp).resolve()))
+        self.assertEqual(process_env["TMP"], str(Path(temp).resolve()))
         self.assertEqual(
             _detail_messages(progress),
             ["walkgraph: pass 1/2", "walkgraph: pass 2/2"],

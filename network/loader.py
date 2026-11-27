@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Iterable
@@ -170,6 +171,16 @@ def run_walkgraph_build(
     if extract_fingerprint:
         command += ["--extract-fingerprint", extract_fingerprint]
 
+    # Rust's tempfile crate defaults to the user TEMP directory. That path can
+    # be ACL-restricted in managed Windows terminals even though the project
+    # cache is writable, causing graph builds to die after the Python tiers
+    # have already completed. Keep build scratch beside the graph instead.
+    scratch_root = output_dir.parent.resolve()
+    scratch_root.mkdir(parents=True, exist_ok=True)
+    process_env = os.environ.copy()
+    process_env["TEMP"] = str(scratch_root)
+    process_env["TMP"] = str(scratch_root)
+
     try:
         process = subprocess.Popen(
             command,
@@ -177,6 +188,7 @@ def run_walkgraph_build(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=process_env,
         )
     except FileNotFoundError as exc:
         raise walkgraph_runtime_error(
