@@ -30,6 +30,7 @@ from config import (
     DAILY_ACCESS_DEFAULT_MODE,
     DAILY_ACCESS_MODES,
     DAILY_ACCESS_SCORE_MODEL,
+    PMTILES_SCHEMA_VERSION,
     OSM_EXTRACT_PATH,
     noise_pmtiles_output_path,
     resolve_noise_max_zoom,
@@ -58,6 +59,61 @@ from .grid import build_cell_id
 
 ProgressFn = Callable[[str], None]
 STAGING_SUFFIX = "~daily-access-v4-staging"
+
+
+def _iso_value(value: Any) -> str | None:
+    return value.isoformat() if value is not None and hasattr(value, "isoformat") else None
+
+
+def _data_provenance(context: BuildContext) -> dict[str, Any]:
+    reality = context.transit_reality_state
+    feed_states = tuple(getattr(reality, "feed_states", ()) or ())
+    versions = model_versions()
+    return {
+        "build": {"profile": context.profile},
+        "osm": {
+            "import_fingerprint": context.source_state.import_fingerprint,
+            "extract_fingerprint": str(getattr(context.source_state, "extract_fingerprint", "") or ""),
+            "imported_at": _iso_value(getattr(context, "import_completed_at", None)),
+        },
+        "gtfs": {
+            "analysis_date": _iso_value(getattr(reality, "analysis_date", None)),
+            "reality_fingerprint": context.reality_fingerprint,
+            "sources": [
+                {
+                    "id": str(feed.feed_id),
+                    "label": str(feed.label),
+                    "fingerprint": str(feed.feed_fingerprint),
+                }
+                for feed in feed_states
+            ],
+        },
+        "model": {
+            "name": DAILY_ACCESS_SCORE_MODEL,
+            "version": versions["score_model_version"],
+            "pmtiles_schema_version": PMTILES_SCHEMA_VERSION,
+        },
+    }
+
+
+def _validate_data_provenance(summary: dict[str, Any]) -> None:
+    provenance = summary.get("data_provenance")
+    osm = provenance.get("osm") if isinstance(provenance, dict) else None
+    gtfs = provenance.get("gtfs") if isinstance(provenance, dict) else None
+    model = provenance.get("model") if isinstance(provenance, dict) else None
+    missing = []
+    if not isinstance(osm, dict) or not osm.get("import_fingerprint"):
+        missing.append("OSM import fingerprint")
+    if not isinstance(osm, dict) or not osm.get("imported_at"):
+        missing.append("OSM import completion time")
+    if not isinstance(gtfs, dict) or not gtfs.get("analysis_date"):
+        missing.append("GTFS analysis date")
+    if not isinstance(gtfs, dict) or not gtfs.get("sources"):
+        missing.append("GTFS sources")
+    if not isinstance(model, dict) or not model.get("name") or model.get("version") is None:
+        missing.append("model name/version")
+    if missing:
+        raise DailyAccessBuildError("Refusing to publish v4 without provenance: " + ", ".join(missing))
 
 
 def feed_loss_warnings(losses: dict[str, Any]) -> list[str]:
@@ -334,7 +390,7 @@ def _delete_build(engine, build_key: str, staging_config_hash: str) -> None:
 
 def switch_active_build(engine, *, build_key: str, staging_config_hash: str, live_config_hash: str) -> None:
     """Make the staged build the one runtimes select (one transaction)."""
-    from sqlalchemy import update
+    from sqlalchemy import select, update
 
     from db_postgis.tables import (
         amenities, build_manifest, grid_walk, noise_polygons, service_deserts,
@@ -342,6 +398,15 @@ def switch_active_build(engine, *, build_key: str, staging_config_hash: str, liv
     )
 
     with engine.begin() as connection:
+        staged_manifest = connection.execute(
+            select(build_manifest).where(build_manifest.c.build_key == build_key)
+            .where(build_manifest.c.config_hash == staging_config_hash)
+        ).mappings().first()
+        if staged_manifest is None:
+            raise DailyAccessBuildError(f"staged build {build_key} disappeared before the switch")
+        staged_summary = dict(staged_manifest.get("summary_json") or {})
+        if staged_summary.get("scoring_model") == DAILY_ACCESS_SCORE_MODEL:
+            _validate_data_provenance(staged_summary)
         for table in (
             grid_walk, amenities, transport_reality, transport_route_patterns,
             transport_transfer_hubs, service_deserts, noise_polygons,
@@ -424,6 +489,7 @@ def publish_daily_access(
             "surface_zoom_breaks": [list(item) for item in build_profile_settings(context.profile).surface_zoom_breaks],
             "legacy_fields_unavailable": list(LEGACY_UNAVAILABLE_FIELDS),
             "scoring_model_version": model_versions()["score_model_version"],
+            "data_provenance": _data_provenance(context),
             "daily_access": {
                 **model_versions(),
                 "keys": dataclasses.asdict(context.keys),
@@ -463,6 +529,7 @@ def publish_daily_access(
             },
         }
     )
+    _validate_data_provenance(summary)
 
     archive = Path(pmtiles_output_path(context.profile))
     staging_archive = archive.with_name(archive.stem + ".v4-staging" + archive.suffix)

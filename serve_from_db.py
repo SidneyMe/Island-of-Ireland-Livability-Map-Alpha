@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -57,6 +58,9 @@ CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionAbortedError, ConnectionR
 RANGE_RE = re.compile(r"^bytes=(\d+)-(\d*)$")
 RUNTIME_STALE_FALLBACK_ENV = "LIVABILITY_RUNTIME_ALLOW_STALE_DEV_RUNTIME"
 FILE_STREAM_CHUNK_SIZE = 64 * 1024
+RUNTIME_OSM_STALE_AFTER_DAYS = 30
+RUNTIME_GTFS_STALE_AFTER_DAYS = 14
+RUNTIME_BUILD_STALE_AFTER_DAYS = 45
 
 
 def _cache_busted_url(url: str | None, version_token: str | None) -> str | None:
@@ -72,6 +76,119 @@ def _cache_busted_url(url: str | None, version_token: str | None) -> str | None:
 def _file_etag(path: Path) -> str:
     stat = path.stat()
     return f'"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+
+
+def _iso_value(value: Any) -> str | None:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    text = str(value or "").strip()
+    return text or None
+
+
+def _age_days(value: Any, *, now: datetime) -> float | None:
+    text = _iso_value(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = datetime.combine(date.fromisoformat(text), datetime.min.time(), tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - parsed.astimezone(timezone.utc)).total_seconds() / 86400.0)
+
+
+def _runtime_data_provenance(
+    manifest: dict[str, Any], summary_json: dict[str, Any], *, now: datetime | None = None,
+) -> dict[str, Any]:
+    """Return a public, path-free description of the active immutable build."""
+    now = now or datetime.now(timezone.utc)
+    declared = summary_json.get("data_provenance")
+    declared = dict(declared) if isinstance(declared, dict) else {}
+    declared_build = declared.get("build") if isinstance(declared.get("build"), dict) else {}
+    declared_osm = declared.get("osm") if isinstance(declared.get("osm"), dict) else {}
+    declared_gtfs = declared.get("gtfs") if isinstance(declared.get("gtfs"), dict) else {}
+    declared_model = declared.get("model") if isinstance(declared.get("model"), dict) else {}
+
+    build = {
+        "key": str(manifest.get("build_key") or declared_build.get("key") or ""),
+        "profile": str(summary_json.get("build_profile") or declared_build.get("profile") or "full"),
+        "created_at": _iso_value(manifest.get("created_at") or declared_build.get("created_at")),
+        "completed_at": _iso_value(manifest.get("completed_at") or declared_build.get("completed_at")),
+    }
+    osm = {
+        "import_fingerprint": str(manifest.get("import_fingerprint") or declared_osm.get("import_fingerprint") or ""),
+        "extract_fingerprint": str(declared_osm.get("extract_fingerprint") or ""),
+        "imported_at": _iso_value(declared_osm.get("imported_at")),
+    }
+    raw_sources = declared_gtfs.get("sources") if isinstance(declared_gtfs.get("sources"), list) else []
+    sources = []
+    for source in raw_sources:
+        if not isinstance(source, dict) or not str(source.get("id") or "").strip():
+            continue
+        sources.append({
+            "id": str(source["id"]),
+            "label": str(source.get("label") or source["id"]),
+            "fingerprint": str(source.get("fingerprint") or ""),
+        })
+    gtfs = {
+        "analysis_date": _iso_value(declared_gtfs.get("analysis_date") or summary_json.get("transit_analysis_date")),
+        "reality_fingerprint": str(declared_gtfs.get("reality_fingerprint") or ""),
+        "sources": sources,
+    }
+    model = {
+        "name": str(declared_model.get("name") or summary_json.get("scoring_model") or "v3"),
+        "version": declared_model.get("version", summary_json.get("scoring_model_version")),
+        "pmtiles_schema_version": declared_model.get("pmtiles_schema_version"),
+    }
+
+    warnings: list[str] = []
+    required = {
+        "build key": build["key"],
+        "build completion time": build["completed_at"],
+        "OSM import fingerprint": osm["import_fingerprint"],
+        "OSM import time": osm["imported_at"],
+        "model": model["name"],
+    }
+    if model["name"] == "daily-access-v4":
+        required.update({
+            "GTFS analysis date": gtfs["analysis_date"],
+            "GTFS sources": gtfs["sources"],
+            "model version": model["version"],
+        })
+    missing = [name for name, value in required.items() if value in (None, "", [])]
+    if missing:
+        warnings.append("Missing provenance: " + ", ".join(missing))
+
+    age_checks = (
+        ("Build", build["completed_at"], RUNTIME_BUILD_STALE_AFTER_DAYS),
+        ("OSM import", osm["imported_at"], RUNTIME_OSM_STALE_AFTER_DAYS),
+        ("GTFS snapshot", gtfs["analysis_date"], RUNTIME_GTFS_STALE_AFTER_DAYS),
+    )
+    for label, value, threshold in age_checks:
+        age = _age_days(value, now=now)
+        if age is not None and age > threshold:
+            warnings.append(f"{label} is {int(age)} days old (threshold {threshold})")
+    status = "incomplete" if missing else ("stale" if warnings else "current")
+    return {
+        "build": build,
+        "osm": osm,
+        "gtfs": gtfs,
+        "model": model,
+        "freshness": {
+            "status": status,
+            "checked_at": now.isoformat(),
+            "thresholds_days": {
+                "build": RUNTIME_BUILD_STALE_AFTER_DAYS,
+                "osm": RUNTIME_OSM_STALE_AFTER_DAYS,
+                "gtfs": RUNTIME_GTFS_STALE_AFTER_DAYS,
+            },
+            "warnings": warnings,
+        },
+    }
 
 
 def _request_etag_matches(header_value: str | None, etag: str) -> bool:
@@ -246,6 +363,7 @@ class RuntimeState:
     noise_proxy_metadata: dict[str, Any] | None
     railway_proximity: dict[str, Any] | None
     road_proximity: dict[str, Any] | None
+    data_provenance: dict[str, Any]
     # "v3" (node scores) or DAILY_ACCESS_SCORE_MODEL (score shards).
     scoring_model: str = "v3"
     daily_access: dict[str, Any] | None = None
@@ -806,6 +924,14 @@ class RuntimeService:
             if transport_network_enabled
             else None
         )
+        data_provenance = _runtime_data_provenance(manifest, summary_json)
+        if runtime_mode != "strict_manifest":
+            freshness = data_provenance["freshness"]
+            if freshness["status"] == "current":
+                freshness["status"] = "stale"
+            freshness["warnings"].append(
+                "Runtime config does not match the active build manifest"
+            )
 
         return RuntimeState(
             build_key=str(manifest["build_key"]),
@@ -883,6 +1009,7 @@ class RuntimeService:
             noise_proxy_metadata=noise_proxy_metadata,
             railway_proximity=railway_proximity,
             road_proximity=road_proximity,
+            data_provenance=data_provenance,
             scoring_model=scoring_model,
             daily_access=daily_access,
         )
@@ -973,6 +1100,7 @@ class RuntimeService:
             "noise_proxy_metadata": state.noise_proxy_metadata,
             "railway_proximity": state.railway_proximity,
             "road_proximity": state.road_proximity,
+            "data_provenance": state.data_provenance,
             "scoring_model": state.scoring_model,
             # v4 has no counts/clusters/effective units: say so instead of sending zeros.
             "legacy_fields_unavailable": (

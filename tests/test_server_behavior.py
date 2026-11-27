@@ -1002,6 +1002,8 @@ class RenderAndCliTests(TestCase):
 
         self.assertEqual(payload["grid_sizes_m"], [20000, 10000, 5000])
         self.assertEqual(payload["build_profile"], "full")
+        self.assertEqual(payload["data_provenance"]["freshness"]["status"], "incomplete")
+        self.assertEqual(payload["data_provenance"]["build"]["key"], "build-123")
         self.assertEqual(payload["pmtiles_url"], "/tiles/livability.pmtiles?v=build-123")
         self.assertEqual(payload["landuse_context_min_zoom"], 5)
         self.assertEqual(payload["landuse_context_max_zoom"], 11)

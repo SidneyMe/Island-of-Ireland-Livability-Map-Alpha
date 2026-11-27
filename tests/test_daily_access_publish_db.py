@@ -130,10 +130,18 @@ class StandalonePublicationDatabaseTests(unittest.TestCase):
             self.engine, "test", source, "fixture-gtfs", hashes, metric, wgs,
             LandMask(metric), "mask", (wgs.bounds[1], wgs.bounds[0], wgs.bounds[3], wgs.bounds[2]), 2250,
             build.TierKeys("g", "s", "r", "c"), graph_dir, shell_dir, reach_dir, score_dir,
-            SimpleNamespace(reality_fingerprint="fixture-gtfs", analysis_date=NOW.date()),
+            SimpleNamespace(
+                reality_fingerprint="fixture-gtfs",
+                analysis_date=NOW.date(),
+                feed_states=(SimpleNamespace(
+                    feed_id="fixture-feed", label="Fixture GTFS",
+                    feed_fingerprint="fixture-feed-fingerprint",
+                ),),
+            ),
             overture_dataset_signature="fixture-overture",
         )
         ctx.bike_graph_padding_m = 5250
+        ctx.import_completed_at = NOW
         ctx.bike_keys = build.TierKeys("bike-g", "s", "r", "c")
         ctx.bike_graph_dir = graph_dir
         ctx.bike_shell_dir = bike_shell_dir
@@ -141,6 +149,17 @@ class StandalonePublicationDatabaseTests(unittest.TestCase):
         ctx.bike_score_dir = bike_score_dir
         lon, lat = TO_WGS84(X0 + 25, Y0 + 25)
         with self.engine.begin() as connection:
+            connection.execute(insert(tables.import_manifest), [{
+                "import_fingerprint": hashes.import_fingerprint,
+                "extract_path": str(source.extract_path),
+                "extract_fingerprint": source.extract_fingerprint,
+                "importer_version": source.importer_version,
+                "importer_config_hash": source.importer_config_hash,
+                "normalization_scope_hash": "fixture-scope",
+                "status": "complete",
+                "created_at": NOW,
+                "completed_at": NOW,
+            }])
             _bulk_insert(connection, tables.features, [
                 {"import_fingerprint": hashes.import_fingerprint, "osm_type": "node", "osm_id": 1,
                  "category": "shops", "name": "Fixture supermarket", "tags_json": {"shop": "supermarket"},
@@ -286,6 +305,8 @@ class StandalonePublicationDatabaseTests(unittest.TestCase):
                     runtime = service.get_runtime()
                     self.assertEqual(runtime["build_key"], key)
                     self.assertEqual(runtime["scoring_model"], "daily-access-v4")
+                    self.assertEqual(runtime["data_provenance"]["freshness"]["status"], "stale")
+                    self.assertEqual(runtime["data_provenance"]["gtfs"]["sources"][0]["label"], "Fixture GTFS")
                     self.assertEqual(runtime["amenity_counts"]["shops"], 1)
                     self.assertTrue(runtime["noise_enabled"])
                     lon, lat = TO_WGS84(X0 + 25, Y0 + 25)

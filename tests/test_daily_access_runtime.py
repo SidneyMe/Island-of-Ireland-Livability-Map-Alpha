@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -253,6 +254,42 @@ class RuntimeTests(TestCase):
 
 
 class RuntimeServiceTests(TestCase):
+    def test_runtime_provenance_marks_current_stale_and_incomplete_builds(self) -> None:
+        now = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+        manifest = {
+            "build_key": "build-1",
+            "import_fingerprint": "import-1",
+            "created_at": "2026-11-27T10:00:00+00:00",
+            "completed_at": "2026-11-27T11:00:00+00:00",
+        }
+        summary = {
+            "scoring_model": "daily-access-v4",
+            "scoring_model_version": 3,
+            "build_profile": "test",
+            "data_provenance": {
+                "osm": {"imported_at": "2026-11-26T10:00:00+00:00", "extract_fingerprint": "extract-1"},
+                "gtfs": {"analysis_date": "2026-11-27", "sources": [{"id": "tfi", "label": "TFI", "fingerprint": "feed-1"}]},
+                "model": {"name": "daily-access-v4", "version": 3, "pmtiles_schema_version": 15},
+            },
+        }
+        current = serve_from_db._runtime_data_provenance(manifest, summary, now=now)
+        self.assertEqual(current["freshness"]["status"], "current")
+        self.assertEqual(current["build"]["key"], "build-1")
+        self.assertEqual(current["gtfs"]["sources"][0]["label"], "TFI")
+
+        stale_summary = {**summary, "data_provenance": {
+            **summary["data_provenance"],
+            "osm": {"imported_at": "2026-09-01T00:00:00+00:00"},
+        }}
+        stale = serve_from_db._runtime_data_provenance(manifest, stale_summary, now=now)
+        self.assertEqual(stale["freshness"]["status"], "stale")
+        self.assertTrue(any("OSM import" in item for item in stale["freshness"]["warnings"]))
+
+        incomplete = serve_from_db._runtime_data_provenance(
+            {"build_key": "old"}, {"scoring_model": "v3"}, now=now,
+        )
+        self.assertEqual(incomplete["freshness"]["status"], "incomplete")
+
     def test_dev_inspect_works_without_fine_tiles(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -327,6 +364,11 @@ class PublishTests(TestCase):
             study_area_wgs84=box(-8.6, 51.8, -8.3, 52.0),
             source_state=SimpleNamespace(extract_path="x.pbf", extract_fingerprint="extract", import_fingerprint="imp"),
             graph_dir=root / "graph", reality_fingerprint="gtfs", overture_dataset_signature="overture-test",
+            import_completed_at=datetime(2026, 11, 27, tzinfo=timezone.utc),
+            transit_reality_state=SimpleNamespace(
+                analysis_date=datetime(2026, 11, 27, tzinfo=timezone.utc).date(),
+                feed_states=(SimpleNamespace(feed_id="nta", label="TFI", feed_fingerprint="feed"),),
+            ),
             bike_graph_padding_m=5250.0, bike_keys=bike_keys, bike_graph_dir=root / "bike-graph",
             bike_shell_dir=bike_shell_dir, bike_reach_dir=bike_reach_dir, bike_score_dir=bike_score_dir,
         ), None
@@ -340,6 +382,15 @@ class PublishTests(TestCase):
             (context.score_dir / "shards" / f"{SHARD}.npz").write_bytes(b"broken")
             with self.assertRaisesRegex(build.DailyAccessBuildError, "not publishable"):
                 publish.check_publishable(context, allow_missing_transport=False)
+
+    def test_v4_publish_gate_requires_public_provenance(self) -> None:
+        with self.assertRaisesRegex(build.DailyAccessBuildError, "OSM import fingerprint"):
+            publish._validate_data_provenance({"data_provenance": {}})
+        publish._validate_data_provenance({"data_provenance": {
+            "osm": {"import_fingerprint": "import", "imported_at": "2026-11-27T00:00:00Z"},
+            "gtfs": {"analysis_date": "2026-11-27", "sources": [{"id": "tfi"}]},
+            "model": {"name": "daily-access-v4", "version": 3},
+        }})
 
     def test_zero_gtfs_blocks_publish_without_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

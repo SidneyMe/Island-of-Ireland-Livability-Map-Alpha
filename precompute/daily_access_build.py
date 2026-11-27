@@ -1370,6 +1370,7 @@ class BuildContext:
     transit_analysis_window_days: int = GTFS_ANALYSIS_WINDOW_DAYS
     transit_service_desert_window_days: int = GTFS_SERVICE_DESERT_WINDOW_DAYS
     overture_dataset_signature: str = ""
+    import_completed_at: Any = None
     bike_graph_padding_m: float | None = None
     bike_keys: TierKeys | None = None
     bike_graph_dir: Path | None = None
@@ -1462,6 +1463,7 @@ def resolve_build_context(profile: str | None, *, engine=None) -> BuildContext:
         score_dir=root / f"score_{keys.score}",
         transit_reality_state=reality,
         overture_dataset_signature=overture_signature,
+        import_completed_at=manifest.get("completed_at"),
         bike_graph_padding_m=bike_graph_padding_m,
         bike_keys=bike_keys,
         bike_graph_dir=root / f"graph_{bike_keys.graph}" / "bike_graph",
