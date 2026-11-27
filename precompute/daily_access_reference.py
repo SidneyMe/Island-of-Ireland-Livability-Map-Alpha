@@ -155,6 +155,7 @@ class TransportStop:
     tier: int
     x: float
     y: float
+    modes: tuple[str, ...] = ()
 
     @property
     def logical_key(self) -> str:
@@ -216,12 +217,16 @@ class ReferenceResult:
 
 
 def service_kind_need(service_kind: str) -> str:
+    if service_kind in ("rail_station", "tram_station"):
+        return "transport"
     if service_kind.startswith("transport_tier_"):
         return "transport"
     return DAILY_ACCESS_SERVICE_KINDS[service_kind][0]
 
 
 def service_kind_quality(service_kind: str) -> float:
+    if service_kind in ("rail_station", "tram_station"):
+        return 0.0  # auxiliary reach, never another transport contribution
     if service_kind.startswith("transport_tier_"):
         return float(DAILY_ACCESS_TRANSPORT_TIER_QUALITY[int(service_kind.rsplit("_", 1)[1])])
     return float(DAILY_ACCESS_SERVICE_KINDS[service_kind][1])
@@ -229,6 +234,13 @@ def service_kind_quality(service_kind: str) -> float:
 
 def service_kind_k(service_kind: str) -> int:
     return 1 if service_kind_need(service_kind) == "transport" else DAILY_ACCESS_TOP_K
+
+
+def service_kind_cutoff(kind: str, mode: str = "walk") -> float:
+    if kind in ("rail_station", "tram_station"):
+        from config import DAILY_ACCESS_CONTEXT_PARAMS
+        return float(DAILY_ACCESS_CONTEXT_PARAMS["station"][kind.split("_")[0]][3])
+    return float(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][service_kind_need(kind)])
 
 
 def _metric_xy(member: Mapping[str, Any]) -> tuple[float, float]:
@@ -334,6 +346,13 @@ def build_sources(
             objects.append(
                 ObjectSpec(kind, label, ("transport", f"transport_feed:{stop.feed}", f"kind:{kind}"), stop.x, stop.y)
             )
+
+    for mode in ("rail", "tram"):
+        kind = f"{mode}_station"
+        for label, stop in enumerate(sorted((s for s in stops if mode in s.modes and s.tier > 0), key=lambda s: s.logical_key)):
+            labels.add(kind, label, stop.logical_key, [stop.logical_key])
+            labels.by_kind[kind][-1].update(feed=stop.feed, quality=DAILY_ACCESS_TRANSPORT_TIER_QUALITY[stop.tier])
+            objects.append(ObjectSpec(kind, label, (f"kind:{kind}",), stop.x, stop.y))
 
     area_seeds: dict[str, list[Seed]] = defaultdict(list)
     area_intervals: dict[str, list[tuple[int, int, float, float]]] = defaultdict(list)
@@ -448,7 +467,7 @@ def run_reach(
             seeds_by_kind[kind],
             origin_nodes,
             k=service_kind_k(kind),
-            cutoff_m=DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need],
+            cutoff_m=service_kind_cutoff(kind, mode),
             keep_raw=keep_raw,
         )
     return results
@@ -533,6 +552,8 @@ def score_from_distances(
 ) -> CellScore:
     options: dict[str, list[tuple[object, float, float]]] = defaultdict(list)
     for kind, best in distances_by_kind.items():
+        if kind in ("rail_station", "tram_station"):
+            continue
         need = service_kind_need(kind)
         quality = service_kind_quality(kind)
         for label, distance in best.items():
@@ -572,6 +593,7 @@ def compute_reference(
     penalty_fn: PenaltyFn | None = None,
     use_raw_distances: bool = False,
     index: EdgeIndex | None = None,
+    context_field=None,
 ) -> ReferenceResult:
     index = graph.edge_index() if index is None else index
     sources = build_sources(
@@ -638,7 +660,7 @@ def compute_reference(
                         pieces_by_kind.get(kind, {}),
                         use_raw=use_raw_distances,
                         k=service_kind_k(kind),
-                        cutoff_m=DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][service_kind_need(kind)],
+                        cutoff_m=service_kind_cutoff(kind, mode),
                     )
                     for kind in kinds
                 }
@@ -655,6 +677,25 @@ def compute_reference(
                     for kind, best in distances.items()
                     if best
                 }
+        if context_field is not None and origin is not None:
+            from .daily_access_context import effects, station_bonus
+            metric, pitch, _ = context_field.at(*origin)
+            station = 0.0
+            corridor = float(context_field.corridors.distances(np.asarray([origin[0]]), np.asarray([origin[1]]))[0])
+            for station_mode in ("rail", "tram"):
+                kind = f"{station_mode}_station"
+                nearest = best_by_kind.get(kind, [])
+                if nearest and nearest[0][1] <= service_kind_cutoff(kind):
+                    label, distance = nearest[0]
+                    entry = sources.labels.by_kind[kind][label]
+                    if entry["feed"] in context_field.corridor_feeds:
+                        station = max(station, station_bonus(station_mode, distance, entry["quality"], corridor))
+            penalties, bonuses = effects(metric, pitch=pitch, walk_green=score.service_access.get("green", 0.0), station=station)
+            if status != "ok":
+                bonuses = {name: 0.0 for name in bonuses}
+            applied = {**score.penalties, **penalties}
+            total = min(max(sum(score.components.values()) + sum(bonuses.values()) - sum(applied.values()), 0.0), 100.0) if status == "ok" else 0.0
+            score = CellScore(total, score.components, score.service_access, applied, bonuses)
         results.append(
             CellResult(
                 x_min=x_min,

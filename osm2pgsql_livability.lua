@@ -105,6 +105,27 @@ local roads = osm2pgsql.define_table({
     },
 })
 
+-- Independent of feature_category: a venue can have both scoring roles.
+local nuisance = osm2pgsql.define_table({
+    name = 'nuisance', schema = schema_name,
+    ids = { type = 'any', id_column = 'osm_id', type_column = 'osm_type' },
+    columns = {
+        { column = 'import_fingerprint', type = 'text', not_null = true },
+        { column = 'name', type = 'text' },
+        { column = 'tags_json', type = 'jsonb', not_null = true },
+        { column = 'geom', type = 'geometry', projection = 4326, not_null = true },
+        { column = 'created_at', sql_type = 'timestamptz', not_null = true },
+    },
+})
+local function insert_nuisance(object, geom)
+    local t = object.tags
+    if geom and (t.shop or t.leisure == 'pitch' or t.amenity == 'pub' or
+        t.amenity == 'bar' or t.amenity == 'nightclub' or t.amenity == 'fast_food') then
+        nuisance:insert({ import_fingerprint = import_fingerprint, name = t.name,
+            tags_json = t, geom = geom, created_at = created_at })
+    end
+end
+
 local function insert_road(object)
     local highway = object.tags.highway
     if not road_values[highway] then
@@ -140,6 +161,7 @@ local function insert_feature(object, geom)
 end
 
 function osm2pgsql.process_node(object)
+    insert_nuisance(object, object:as_point())
     local category = feature_category(object.tags)
     if not category then
         return
@@ -148,6 +170,7 @@ function osm2pgsql.process_node(object)
 end
 
 function osm2pgsql.process_way(object)
+    insert_nuisance(object, object:as_polygon() or object:as_linestring())
     if road_values[object.tags.highway] then
         insert_road(object)
         return
@@ -170,6 +193,7 @@ function osm2pgsql.process_way(object)
 end
 
 function osm2pgsql.process_relation(object)
+    insert_nuisance(object, object:as_multipolygon())
     local category = feature_category(object.tags)
     if not category then
         return

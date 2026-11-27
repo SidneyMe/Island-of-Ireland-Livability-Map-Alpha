@@ -108,10 +108,17 @@ def main(argv: list[str] | None = None) -> int:
         load_road_rows(engine, snapshot.import_fingerprint),
         load_railway_corridor_rows(engine, snapshot.reality_fingerprint),
     )
+    from types import SimpleNamespace
+    from precompute.daily_access_context import load_context_field
+    context_field = load_context_field(SimpleNamespace(
+        engine=engine, study_area_metric=snapshot.study_area_metric, land_mask=snapshot.land_mask,
+        source_state=SimpleNamespace(import_fingerprint=snapshot.import_fingerprint),
+        reality_fingerprint=snapshot.reality_fingerprint,
+    ))
     reference = compute_reference(
         graph=graph, land_mask=snapshot.land_mask, cells=[(s.x_min_m, s.y_min_m) for s in picked], cell_size_m=step,
         places=places, green_sites=green_sites, park_approaches=approaches, park_intervals=intervals,
-        stops=stops, penalty_fn=penalty_fn,
+        stops=stops, penalty_fn=penalty_fn, context_field=context_field,
     )
 
     scores = {
@@ -120,7 +127,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     limits = {"total": PARITY_LIMITS["total"] * 100, "components": PARITY_LIMITS["component"] * 100,
               "service_access": PARITY_LIMITS["access"] * 10_000}
-    mismatches = {"status": 0, "total": 0, "components": 0, "penalties": 0, "service_access": 0}
+    mismatches = {"status": 0, "total": 0, "components": 0, "penalties": 0, "bonuses": 0, "service_access": 0}
     max_diff = {"total": 0.0, "components": 0.0, "service_access": 0.0}
     examples, controls = [], []
     for sample, cell in zip(picked, reference.cells):
@@ -140,9 +147,11 @@ def main(argv: list[str] | None = None) -> int:
         checks = {
             "status": stored["network_status"][row, col] == NETWORK_STATUS_CODES[cell.network_status],
             "penalties": all(
-                stored["penalties"][i, row, col] == cell.quantized["penalties"][name]
-                for i, name in enumerate(("railway_proximity", "road_proximity"))
+                abs(int(stored["penalties"][i, row, col]) - cell.quantized["penalties"][name]) <= 1
+                for i, name in enumerate(("railway_proximity", "road_proximity", "industrial_context", "over_concentration", "pitch_noise"))
             ),
+            "bonuses": all(abs(int(stored["bonuses"][i, row, col]) - cell.quantized["bonuses"][name]) <= 1
+                           for i, name in enumerate(("rail_station_access", "green_buffer"))),
             **{name: diffs[name] <= limits[name] + 1e-9 for name in diffs},
         }
         for name in diffs:

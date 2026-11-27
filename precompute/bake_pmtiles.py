@@ -143,10 +143,15 @@ def _grid_layer_fields() -> dict[str, str]:
         fields[f"score_{category}"] = "Number"
     fields["score_railway_proximity"] = "Number"
     fields["score_road_proximity"] = "Number"
+    from .daily_access_score import PENALTIES, BONUSES
+    for name in (*PENALTIES[2:], *BONUSES):
+        fields[f"score_{name}"] = "Number"
     for mode in ("bike", "mode_aware"):
         fields[f"{mode}_total_score"] = "Number"
         for category in GRID_AMENITY_CATEGORIES:
             fields[f"{mode}_score_{category}"] = "Number"
+        for name in (*PENALTIES, *BONUSES):
+            fields[f"{mode}_score_{name}"] = "Number"
     return fields
 
 

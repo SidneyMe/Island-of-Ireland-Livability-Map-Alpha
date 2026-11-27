@@ -36,7 +36,9 @@ pub struct CellScore {
     /// shops, transport, healthcare, parks
     pub components: [f64; 4],
     /// railway, road (positive)
-    pub penalties: [f64; 2],
+    pub penalties: [f64; 5],
+    pub bonuses: [f64; 2],
+    pub stations: [(u32, f64); 2],
     /// food, other_retail, primary_care, pharmacy, green, transport
     pub access: [f64; 6],
 }
@@ -46,7 +48,9 @@ impl CellScore {
         Self {
             total: 0.0,
             components: [0.0; 4],
-            penalties: [0.0; 2],
+            penalties: [0.0; 5],
+            bonuses: [0.0; 2],
+            stations: [(u32::MAX, f64::INFINITY); 2],
             access: [0.0; 6],
         }
     }
@@ -164,10 +168,36 @@ impl Scorer {
         CellScore {
             total: raw.max(0.0).min(100.0),
             components,
-            penalties: [railway, road],
+            penalties: [railway, road, 0.0, 0.0, 0.0],
+            bonuses: [0.0; 2],
+            stations: [(u32::MAX, f64::INFINITY); 2],
             access,
         }
     }
+}
+
+/// Shared finalisation: positive bonuses and capped applied context penalties.
+pub fn apply_context(score: &mut CellScore, penalties: [f64; 3], bonuses: [f64; 2], cap: f64, network: bool) {
+    let sum: f64 = penalties.iter().map(|p| p.max(0.0)).sum();
+    let scale = if sum > cap { cap / sum } else { 1.0 };
+    for (index, value) in penalties.iter().enumerate() {
+        score.penalties[index + 2] = value.max(0.0) * scale;
+    }
+    score.bonuses = if network { bonuses.map(|b| b.max(0.0)) } else { [0.0; 2] };
+    score.total = if network {
+        (score.components.iter().sum::<f64>() + score.bonuses.iter().sum::<f64>() - score.penalties.iter().sum::<f64>()).clamp(0.0, 100.0)
+    } else { 0.0 };
+}
+
+pub fn smooth(value: f64) -> f64 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+pub fn station_bonus(distance: f64, quality: f64, corridor: f64, curve: [f64; 5], corridor_curve: [f64; 2]) -> f64 {
+    curve[4] * quality * smooth((distance - curve[0]) / (curve[1] - curve[0]))
+        * (1.0 - smooth((distance - curve[2]) / (curve[3] - curve[2])))
+        * smooth((corridor - corridor_curve[0]) / (corridor_curve[1] - corridor_curve[0]))
 }
 
 fn round_half_up(value: f64, scale: f64) -> u16 {
@@ -225,6 +255,20 @@ mod tests {
         assert_eq!(score.components, [35.0, 30.0, 20.0, 15.0]);
         assert_eq!(score.total, 93.0);
         assert_eq!(scorer.score([0.01, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0, 4.0).total, 0.0);
+    }
+
+    #[test]
+    fn context_cap_bonuses_and_no_network() {
+        let scorer = Scorer::new(&params()).unwrap();
+        let mut cell = scorer.score([0.5; 6], 4.0, 3.0);
+        apply_context(&mut cell, [8.0, 12.0, 4.0], [3.0, 2.0], 20.0, true);
+        assert!((cell.penalties[2..].iter().sum::<f64>() - 20.0).abs() < 1e-12);
+        assert_eq!(cell.total, 28.0);
+        apply_context(&mut cell, [8.0, 12.0, 4.0], [3.0, 2.0], 20.0, false);
+        assert_eq!(cell.total, 0.0);
+        assert_eq!(cell.bonuses, [0.0; 2]);
+        assert_eq!(station_bonus(400.0, 1.0, 200.0, [100.0, 300.0, 500.0, 1200.0, 3.0], [50.0, 200.0]), 3.0);
+        assert_eq!(station_bonus(400.0, 1.0, 50.0, [100.0, 300.0, 500.0, 1200.0, 3.0], [50.0, 200.0]), 0.0);
     }
 
     #[test]

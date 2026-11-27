@@ -151,7 +151,14 @@ def run(
     xs = np.arange(np.floor(min_x / step) * step, max_x, step)
     ys = np.arange(np.floor(min_y / step) * step, max_y, step)
     cells = [(float(x), float(y)) for y in ys for x in xs]
+    from types import SimpleNamespace
+    from precompute.daily_access_context import load_context_field
+    context_field = load_context_field(SimpleNamespace(
+        engine=engine, source_state=SimpleNamespace(import_fingerprint=import_fingerprint),
+        study_area_metric=bbox_metric, land_mask=land_mask, reality_fingerprint=reality_fingerprint,
+    ))
     inputs = dict(
+        context_field=context_field,
         land_mask=land_mask,
         cells=cells,
         cell_size_m=step,

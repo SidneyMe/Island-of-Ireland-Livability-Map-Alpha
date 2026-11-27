@@ -15,8 +15,9 @@ same versions and with every shard present and matching its checksum):
 * ``reach_<key>/``  objects (native records), per service kind uint16 0.1 m
   distances + uint32 logical ids for every used node, the label table
   (``uint32 -> logical key -> source records``) and the loss ledger;
-* ``score_<key>/``  per shard: total, four components, two penalties (uint16,
-  0.01), six service access values (uint16, 0.0001), network status.
+* ``score_<key>/`` per shard: total, four components, five penalties and two
+  bonuses (uint16, 0.01), six access values, network status. Walk shards
+  additionally own the common context artifact and source diagnostics.
 
 Keys: geometry/reach algorithm, classification/dedupe and the score model
 are versioned separately; weights or curves only change the score key.
@@ -116,8 +117,10 @@ from .daily_access_reference import (
     service_kind_k,
     service_kind_need,
     service_kind_quality,
+    service_kind_cutoff,
 )
-from .daily_access_score import CATEGORIES
+from .daily_access_score import CATEGORIES, PENALTIES, BONUSES, SCORE_CHANNEL_SCHEMA
+from .daily_access_context import METRICS, load_context_field
 from .daily_access_snap import LandMask
 from .surface import ShardEntry, iter_shard_entries
 
@@ -128,7 +131,8 @@ SHELL_FIELDS = (
     "land_area_m2", "valid_land_mask", "origin_x", "origin_y", "origin_flags",
     "entry_flags", "used_nodes", "x_min_m", "y_min_m",
 )
-SCORE_FIELDS = ("total", "components", "penalties", "service_access", "network_status", "x_min_m", "y_min_m")
+SCORE_FIELDS = ("total", "components", "penalties", "bonuses", "service_access", "network_status", "x_min_m", "y_min_m")
+CONTEXT_FIELDS = ("context_values", "context_metrics", "pitch_ref", "pitch_reason", "pitch_distance", "station_labels", "station_distances")
 QUANTIZATION = {
     "distance_step_m": DAILY_ACCESS_DISTANCE_STEP_M,
     "score_step": DAILY_ACCESS_SCORE_STEP,
@@ -142,6 +146,13 @@ ProgressFn = Callable[[str], None]
 
 def _print_progress(message: str) -> None:
     print(message, flush=True)
+
+
+def _walkgraph_progress(progress: ProgressFn):
+    def emit(_event: str, *, detail: str, **_kwargs) -> None:
+        progress(detail)
+
+    return emit
 
 
 class DailyAccessBuildError(RuntimeError):
@@ -172,7 +183,10 @@ def model_versions() -> dict[str, Any]:
 
 def penalty_params() -> dict[str, Any]:
     """Penalty formulas (score key): they are read at the cell origin."""
+    from config import DAILY_ACCESS_CONTEXT_PARAMS
     return {
+        "context": DAILY_ACCESS_CONTEXT_PARAMS,
+        "channels": SCORE_CHANNEL_SCHEMA,
         "location": "cell_origin",
         "road_algorithm_version": ROAD_PROXIMITY_ALGORITHM_VERSION,
         "road_class_settings": ROAD_PROXIMITY_CLASS_SETTINGS,
@@ -293,7 +307,8 @@ def begin_tier(directory: Path, tier: str, key: str, extra: dict[str, Any]) -> N
     if directory.exists():
         shutil.rmtree(directory)
     directory.mkdir(parents=True)
-    _write_manifest(directory, {"status": "building", "tier": tier, "key": key, **model_versions(), **extra})
+    _write_manifest(directory, {"status": "building", "tier": tier, "key": key, **model_versions(),
+                                **({"channel_schema": SCORE_CHANNEL_SCHEMA, "context_source_score_key": key} if tier == "score" else {}), **extra})
 
 
 def complete_tier(
@@ -342,6 +357,8 @@ def tier_problems(
         problems.append(f"status {manifest.get('status')!r}")
     if key is not None and manifest.get("key") != key:
         problems.append("key mismatch")
+    if manifest.get("tier") == "score" and manifest.get("channel_schema") != SCORE_CHANNEL_SCHEMA:
+        problems.append("score channel schema mismatch")
     tier_version_fields = {
         "shell": ("model", "geometry_version", "shell_shard_version"),
         "reach": (
@@ -358,6 +375,8 @@ def tier_problems(
             problems.append(f"{name} {manifest.get(name)!r} != {value!r}")
     if shard_ids is None:
         return problems
+    if manifest.get("tier") == "score" and manifest.get("mode", "walk") == "walk" and set(SCORE_FIELDS).issubset(fields):
+        fields = (*fields, *CONTEXT_FIELDS)
     recorded = manifest.get("shard_files") or {}
     for shard_id in shard_ids:
         path = directory / "shards" / f"{shard_id}.npz"
@@ -463,6 +482,11 @@ def surface_tier_problems(
         except Exception as exc:  # noqa: BLE001 - corrupt data is a verification result
             problems.append(f"surface: unreadable paired shard {shard_id}: {exc}")
             continue
+        context_required = score_manifest.get("mode", "walk") == "walk"
+        missing_fields = set((*SCORE_FIELDS, *(CONTEXT_FIELDS if context_required else ()))) - set(score)
+        if missing_fields:
+            problems.append(f"score: shard {shard_id} lacks {sorted(missing_fields)}")
+            continue
         shape = shell["valid_land_mask"].shape
         resolution_m = int(shell_manifest.get("resolution_m") or 0)
         shard_size_m = int(shell_manifest.get("shard_size_m") or 0)
@@ -476,10 +500,17 @@ def surface_tier_problems(
         expected_score_shapes = {
             "total": shape,
             "components": (len(CATEGORIES), *shape),
-            "penalties": (2, *shape),
+            "penalties": (len(PENALTIES), *shape),
+            "bonuses": (len(BONUSES), *shape),
             "service_access": (len(DAILY_ACCESS_NEEDS), *shape),
             "network_status": shape,
+            "context_values": (*shape, 5),
+            "context_metrics": (*shape, len(METRICS)),
+            "pitch_ref": shape, "pitch_reason": shape, "pitch_distance": shape,
+            "station_labels": (2, *shape), "station_distances": (2, *shape),
         }
+        if not context_required:
+            expected_score_shapes = {key: value for key, value in expected_score_shapes.items() if key not in CONTEXT_FIELDS}
         if any(value != shape for value in shell_shapes.values()):
             problems.append(f"shell: shard {shard_id} has incompatible array dimensions")
         if any(score[field].shape != expected for field, expected in expected_score_shapes.items()):
@@ -497,6 +528,7 @@ def surface_tier_problems(
             "score.total": (score["total"].dtype, np.dtype("<u2")),
             "score.components": (score["components"].dtype, np.dtype("<u2")),
             "score.penalties": (score["penalties"].dtype, np.dtype("<u2")),
+            "score.bonuses": (score["bonuses"].dtype, np.dtype("<u2")),
             "score.service_access": (score["service_access"].dtype, np.dtype("<u2")),
             "score.network_status": (score["network_status"].dtype, np.dtype("u1")),
         }
@@ -588,7 +620,7 @@ def reach_tier_problems(
             need = service_kind_need(kind)
             expected_metadata = (
                 KIND_INDEX[kind], need, service_kind_quality(kind), service_kind_k(kind),
-                float(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need]),
+                service_kind_cutoff(kind, mode),
             )
             actual_metadata = (
                 int(item["kind_index"]), str(item["need"]), float(item["quality"]), k, float(item["cutoff_m"]),
@@ -901,12 +933,33 @@ def build_scores(
     progress: ProgressFn,
     mode: str = DAILY_ACCESS_DEFAULT_MODE,
     block_cells: int = DAILY_ACCESS_SCORE_BLOCK_CELLS,
+    context_field=None,
+    walk_score_dir: Path | None = None,
 ) -> dict[str, Any]:
     from .daily_access_native import penalties_for_records
 
     (score_dir / "shards").mkdir(parents=True, exist_ok=True)
     origins, kinds, rows = load_reach_cache(reach_dir)
     objects = reach_object_files(reach_dir)
+    labels = load_label_table(reach_dir)
+    # Runtime resolves selected station ids from the pinned reach label table.
+    manifest = _read_manifest(score_dir)
+    if manifest is not None:
+        _write_manifest(score_dir, {**manifest, "reach_dir": str(reach_dir), "channel_schema": SCORE_CHANNEL_SCHEMA,
+                                    "context_source_score_key": (_read_manifest(walk_score_dir) or {}).get("key") if walk_score_dir else manifest["key"]})
+    station_quality = {}
+    warnings = []
+    for kind in ("rail_station", "tram_station"):
+        entries_for_kind = labels.get(kind, [])
+        qualities = []
+        for item in entries_for_kind:
+            available = context_field is not None and item.get("feed") in context_field.corridor_feeds
+            qualities.append(float(item.get("quality", 0.0)) if available else 0.0)
+            if not available and mode == "walk":
+                warnings.append(f"Missing corridor geometry for {item.get('feed')}; station bonus disabled for that feed")
+        station_quality[kind] = qualities
+    for warning in sorted(set(warnings)):
+        progress(f"[daily-access context] warning: {warning}")
     status_counts = {name: 0 for name in NETWORK_STATUS_CODES}
     code_to_status = {code: name for name, code in NETWORK_STATUS_CODES.items()}
     total_sum = 0.0
@@ -922,6 +975,19 @@ def build_scores(
         if block_dir.exists():
             shutil.rmtree(block_dir)
         block_kinds = block_reach_files(kinds, origins, rows, block_nodes, block_dir / "reach")
+        shared_bonuses = None
+        if walk_score_dir is not None:
+            walk_scores = [load_score_shard(walk_score_dir, entry.shard_id) for entry, _ in shells]
+            context_data = {name: np.concatenate([s[name].reshape(-1, s[name].shape[-1]) if name in ("context_values", "context_metrics") else s[name].ravel() for s in walk_scores])
+                            for name in ("context_values", "context_metrics", "pitch_ref", "pitch_reason", "pitch_distance")}
+            shared_bonuses = np.concatenate([s["bonuses"].reshape(len(BONUSES), -1).T for s in walk_scores]).astype(np.float32) * DAILY_ACCESS_SCORE_STEP
+        elif context_field is not None:
+            context_data = context_field.records(records, progress=progress)
+        else:
+            context_data = {"context_values": np.zeros((len(records), 5), dtype=np.float32),
+                            "context_metrics": np.zeros((len(records), len(METRICS)), dtype=np.float32),
+                            "pitch_ref": np.full(len(records), "", dtype="U96"), "pitch_reason": np.full(len(records), "", dtype="U24"),
+                            "pitch_distance": np.full(len(records), np.nan, dtype=np.float32)}
         scored = native_score(
             graph_dir,
             mask_path,
@@ -932,7 +998,12 @@ def build_scores(
             mode=mode,
             objects=objects,
             penalties=penalties_for_records(records, penalty_fn),
+            context_values=context_data["context_values"], shared_bonuses=shared_bonuses,
+            station_quality=station_quality,
         )
+        if walk_score_dir is not None:
+            for name in ("station_labels", "station_distances"):
+                scored[name] = np.concatenate([s[name].reshape(2, -1).T for s in walk_scores])
         cursor = 0
         for entry, shell in shells:
             shape = (entry.rows, entry.cols)
@@ -947,7 +1018,15 @@ def build_scores(
                 _score_path(score_dir, entry.shard_id),
                 total=total.reshape(shape),
                 components=scored["components"][cells].T.reshape(len(CATEGORIES), *shape),
-                penalties=scored["penalties"][cells].T.reshape(2, *shape),
+                penalties=scored["penalties"][cells].T.reshape(len(PENALTIES), *shape),
+                bonuses=scored["bonuses"][cells].T.reshape(len(BONUSES), *shape),
+                **({"context_values": context_data["context_values"][cells].reshape(*shape, 5),
+                    "context_metrics": context_data["context_metrics"][cells].reshape(*shape, len(METRICS)),
+                    "pitch_ref": context_data["pitch_ref"][cells].reshape(shape),
+                    "pitch_reason": context_data["pitch_reason"][cells].reshape(shape),
+                    "pitch_distance": context_data["pitch_distance"][cells].reshape(shape),
+                    "station_labels": scored["station_labels"][cells].T.reshape(2, *shape),
+                    "station_distances": scored["station_distances"][cells].T.reshape(2, *shape)} if mode == "walk" else {}),
                 service_access=scored["service_access"][cells].T.reshape(len(DAILY_ACCESS_NEEDS), *shape),
                 network_status=status.reshape(shape),
                 x_min_m=np.asarray([entry.x_min_m], dtype=np.int32),
@@ -971,6 +1050,8 @@ def build_scores(
         "network_status_valid_cells": status_counts,
         "mean_total_ok_cells": round(total_sum / total_cells, 3) if total_cells else None,
         "peak_block_cells": peak_block_cells,
+        "context_warnings": sorted(set(warnings)),
+        "channel_schema": SCORE_CHANNEL_SCHEMA,
     }
 
 
@@ -1017,6 +1098,7 @@ def build_bike_tiers(
             bbox_padding_m=graph_padding_m,
             extract_fingerprint=context.source_state.extract_fingerprint,
             graph_profile="bike",
+            progress_cb=_walkgraph_progress(progress),
         )
 
     shard_ids = [entry.shard_id for entry in entries]
@@ -1170,6 +1252,7 @@ def build_bike_tiers(
             work_dir=work_dir / "bike_score",
             progress=progress,
             mode="bike",
+            walk_score_dir=context.score_dir,
         )
         complete_tier(score_dir, {"stats": score_stats})
 
@@ -1234,6 +1317,8 @@ def load_v4_objects(engine, *, import_fingerprint, reality_fingerprint, reach_ar
     ]
     stops: list[TransportStop] = []
     if reality_fingerprint and reality_fingerprint != "transit-unavailable":
+        from db_postgis.reads import load_public_station_modes
+        station_modes = load_public_station_modes(engine, reality_fingerprint)
         for row in load_transport_reality_rows_for_scoring(engine, reality_fingerprint, reach_area_wgs84):
             x, y = TO_TARGET(float(row["geom"].x), float(row["geom"].y))
             parts = str(row["source_ref"]).split("/")
@@ -1244,6 +1329,7 @@ def load_v4_objects(engine, *, import_fingerprint, reality_fingerprint, reach_ar
                     tier=int(row["transport_score_units"]),
                     x=float(x),
                     y=float(y),
+                    modes=tuple(station_modes.get(str(row["source_ref"]), ())),
                 )
             )
     return places, overture_only_green, stops, class_stats
@@ -1438,6 +1524,7 @@ def run_daily_access_build(
             bbox=graph_bbox,
             bbox_padding_m=graph_padding_m,
             extract_fingerprint=source_state.extract_fingerprint,
+            progress_cb=_walkgraph_progress(progress),
         )
     lap("graph")
 
@@ -1585,6 +1672,7 @@ def run_daily_access_build(
                 penalty_fn=penalty_fn,
                 work_dir=work_dir,
                 progress=progress,
+                context_field=load_context_field(context),
             )
             complete_tier(score_dir, {"stats": score_stats})
             lap("score")

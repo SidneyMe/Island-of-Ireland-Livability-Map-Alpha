@@ -52,7 +52,7 @@ from .daily_access_build import (
     transport_gate,
 )
 from .daily_access_runtime import LEGACY_UNAVAILABLE_FIELDS, DailyAccessSurfaceRuntime
-from .daily_access_score import CATEGORIES, PENALTIES
+from .daily_access_score import CATEGORIES, PENALTIES, BONUSES, SCORE_CHANNEL_SCHEMA
 from .display_layers import DISPLAY_LAYERS_VERSION, prepare_display_layers, select_noise_artifact
 from .grid import build_cell_id
 
@@ -124,11 +124,16 @@ def check_publishable(context: BuildContext, *, allow_missing_transport: bool) -
             + json.dumps({tier: found[:5] for tier, found in problems.items()})
         )
     reach = json.loads((context.reach_dir / "manifest.json").read_text(encoding="utf-8"))
+    for directory in (context.score_dir, context.bike_score_dir):
+        manifest = json.loads((directory / "manifest.json").read_text(encoding="utf-8"))
+        if manifest.get("context_source_score_key") != context.keys.score:
+            raise DailyAccessBuildError("walk/bike context artifacts do not reference the same walk score key")
     losses = reach.get("losses") or {}
     warnings = transport_gate(losses, allow_missing_transport=allow_missing_transport) + feed_loss_warnings(losses)
     bike_reach = json.loads((bike_reach_dir / "manifest.json").read_text(encoding="utf-8"))
     bike_losses = bike_reach.get("losses") or {}
     warnings += [f"bike: {warning}" for warning in feed_loss_warnings(bike_losses)]
+    warnings += json.loads((context.score_dir / "manifest.json").read_text(encoding="utf-8")).get("stats", {}).get("context_warnings", [])
     warnings += [
         f"bike: {warning}"
         for warning in transport_gate(
@@ -176,6 +181,7 @@ def coarse_cells(
             scores = {category: value(category) for category in CATEGORIES}
             # v3 tile convention: penalties are negative score contributions.
             scores.update({penalty: -value(penalty) for penalty in PENALTIES})
+            scores.update({name: value(name) for name in BONUSES})
             scores.update({f"access_{need}": value(f"access_{need}") for need in DAILY_ACCESS_NEEDS})
             scores["network_coverage_share"] = value("network_coverage")
             mode_scores: dict[str, Any] = {}
@@ -201,6 +207,10 @@ def coarse_cells(
                     "network_coverage_share": value(f"{mode}_network_coverage"),
                 }
             scores["modes"] = mode_scores
+            for mode, values in mode_scores.items():
+                prefix = "" if mode == "walk" else f"{mode}_"
+                values["penalties"] = {name: value(prefix + name) for name in PENALTIES}
+                values["bonuses"] = {name: value(prefix + name) for name in BONUSES}
             land_m2 = float(land[row, col])
             cells.append(
                 {
@@ -420,6 +430,8 @@ def publish_daily_access(
                 "available_modes": [*DAILY_ACCESS_MODES, "mode_aware"],
                 "default_mode": DAILY_ACCESS_DEFAULT_MODE,
                 "mode_aware": daily_access_mode_aware_params(),
+                "channel_schema": SCORE_CHANNEL_SCHEMA,
+                "context_warnings": json.loads((context.score_dir / "manifest.json").read_text(encoding="utf-8")).get("stats", {}).get("context_warnings", []),
                 "graph_dir": str(context.graph_dir),
                 "shell_dir": str(context.shell_dir),
                 "reach_dir": str(context.reach_dir),

@@ -393,7 +393,7 @@ class FineGridTileContext:
             with np.load(self.score_dir / entry.score_path, allow_pickle=False) as data:
                 raw = {
                     name: np.asarray(data[name])
-                    for name in ("total", "components", "penalties", "service_access")
+                    for name in ("total", "components", "penalties", "service_access", "bonuses") if name in data
                 }
             with np.load(self.shell_dir / entry.shell_path, allow_pickle=False) as data:
                 land = np.asarray(data["land_area_m2"], dtype=np.float32)
@@ -418,6 +418,12 @@ class FineGridTileContext:
             # v3 tile convention: penalties are negative score contributions.
             channels["score_railway_proximity"] = -decode_score(raw["penalties"][0])
             channels["score_road_proximity"] = -decode_score(raw["penalties"][1])
+            from daily_access_contract import PENALTIES, BONUSES
+            for index, name in enumerate(PENALTIES[2:], 2):
+                channels[f"score_{name}"] = -decode_score(raw["penalties"][index]) if raw["penalties"].shape[0] > index else np.zeros_like(channels["total_score"])
+            bonuses = decode_score(raw["bonuses"]) if "bonuses" in raw else np.zeros((len(BONUSES), *raw["total"].shape))
+            for index, name in enumerate(BONUSES):
+                channels[f"score_{name}"] = bonuses[index]
 
             if self.bike_score_dir is not None:
                 with np.load(
@@ -426,7 +432,7 @@ class FineGridTileContext:
                 ) as data:
                     bike = {
                         name: np.asarray(data[name])
-                        for name in ("total", "components", "service_access")
+                        for name in ("total", "components", "service_access", "penalties", "bonuses") if name in data
                     }
                 channels["bike_total_score"] = decode_score(bike["total"])
                 for index, category in enumerate(("shops", "transport", "healthcare", "parks")):
@@ -451,11 +457,9 @@ class FineGridTileContext:
                     + DAILY_ACCESS_HEALTHCARE_MIX["pharmacy"] * access[3]
                 )
                 components[3] = DAILY_ACCESS_CATEGORY_MAX["parks"] * access[4]
-                penalties = np.stack(
-                    [decode_score(raw["penalties"][0]), decode_score(raw["penalties"][1])]
-                )
+                penalties = decode_score(raw["penalties"])
                 mode_total = np.clip(
-                    components.sum(axis=0) - np.nan_to_num(penalties, nan=0.0).sum(axis=0),
+                    components.sum(axis=0) + np.nan_to_num(bonuses, nan=0.0).sum(axis=0) - np.nan_to_num(penalties, nan=0.0).sum(axis=0),
                     0.0,
                     100.0,
                 )
@@ -475,6 +479,12 @@ class FineGridTileContext:
                         np.nan,
                         quantize_score(components[index]),
                     )
+                for mode in ("bike", "mode_aware"):
+                    for name in (*PENALTIES, *BONUSES):
+                        channels[f"{mode}_score_{name}"] = channels[f"score_{name}"]
+                if "bonuses" in bike:
+                    for index, name in enumerate(BONUSES):
+                        channels[f"bike_score_{name}"] = decode_score(bike["bonuses"][index])
             weights = np.where(np.isfinite(channels["total_score"]), land, 0.0).astype(np.float32)
             cached = self._cache_put(self._score_cache, shard_id, {"channels": channels, "weights": weights},
                                      limit=_RAW_SCORE_CACHE_LIMIT)

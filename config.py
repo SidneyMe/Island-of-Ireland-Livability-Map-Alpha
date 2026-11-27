@@ -53,7 +53,7 @@ TRANSIT_RAW_SCHEMA = "transit_raw"
 TRANSIT_DERIVED_SCHEMA = "transit_derived"
 OSM_IMPORTER_BIN = os.getenv("OSM2PGSQL_BIN", "osm2pgsql")
 OSM_IMPORTER_CONFIG = BASE_DIR / "osm2pgsql_livability.lua"
-IMPORTER_CONFIG_VERSION = "2026-10-10-daily-access-v4-import-1"
+IMPORTER_CONFIG_VERSION = "2026-11-27-daily-access-v4-context-2"
 
 
 def _osm2pgsql_flat_nodes_path() -> str:
@@ -727,14 +727,27 @@ DAILY_ACCESS_EDGE_FLAG_RECREATION = 1
 DAILY_ACCESS_GEOMETRY_VERSION = 2
 # Score model: weights, curves and per-cell penalties (cell origin, not node).
 DAILY_ACCESS_SCORE_MODEL = "daily-access-v4"
-DAILY_ACCESS_SCORE_MODEL_VERSION = 2
+DAILY_ACCESS_SCORE_MODEL_VERSION = 3
+
+# Context model parameters are hashed independently of graph/reach geometry.
+DAILY_ACCESS_CONTEXT_PARAMS = {
+    "version": 1, "radius_m": 300.0, "green_radius_m": 200.0,
+    "landuse_priority": ["industrial", "retail", "commercial", "residential", "farmland", "forest"],
+    "coverage": [0.3, 0.6], "industrial": [0.1, 0.5, 8.0],
+    "residential_green": [0.2, 0.5, 0.2, 2.0],
+    "nightlife": [10.0, 40.0, 8.0], "retail": [100.0, 300.0, 4.0],
+    "pitch": [25.0, 150.0, 4.0, 2.0, 0.4], "penalty_cap": 20.0,
+    "station": {"rail": [100.0, 300.0, 500.0, 1200.0, 3.0],
+                "tram": [100.0, 300.0, 500.0, 1000.0, 2.0]},
+    "corridor": [50.0, 200.0],
+}
 # v4 build artifacts under .livability_cache/daily_access (precompute/daily_access_build.py).
 # shell 2: origins, entry flag and used nodes per shard (no attachments);
 # reach 2: real logical ids for every kind + label table; score 2: no
 # origin_node, penalties at the cell origin.
 DAILY_ACCESS_SHELL_SHARD_VERSION = 2
-DAILY_ACCESS_REACH_CACHE_VERSION = 3
-DAILY_ACCESS_SCORE_SHARD_VERSION = 2
+DAILY_ACCESS_REACH_CACHE_VERSION = 4
+DAILY_ACCESS_SCORE_SHARD_VERSION = 3
 # Golden-section iterations for the same-edge (cell and object on one edge) minimum.
 DAILY_ACCESS_SAME_EDGE_ITERATIONS = 64
 # Blocked connector intervals closer than this are one interval (float noise
@@ -812,6 +825,7 @@ def daily_access_score_params(mode: str = DAILY_ACCESS_DEFAULT_MODE) -> dict[str
     params = {
         "model": DAILY_ACCESS_SCORE_MODEL,
         "model_version": DAILY_ACCESS_SCORE_MODEL_VERSION,
+        "context": DAILY_ACCESS_CONTEXT_PARAMS,
         "need_thresholds_min": {need: list(value) for need, value in DAILY_ACCESS_NEED_THRESHOLDS_MIN.items()},
         "top3_weights": list(DAILY_ACCESS_TOP3_WEIGHTS),
         "category_max": DAILY_ACCESS_CATEGORY_MAX,
@@ -900,7 +914,7 @@ BASEMAP_FONT_STACKS = (
     "Noto Sans Devanagari Regular v1",
 )
 BASEMAP_CACHE_DIR = CACHE_DIR / "basemap"
-PMTILES_SCHEMA_VERSION = 14
+PMTILES_SCHEMA_VERSION = 15
 GRID_GEOMETRY_SCHEMA_VERSION = 4
 CACHE_SCHEMA_VERSION = 14
 FORCE_RECOMPUTE = False

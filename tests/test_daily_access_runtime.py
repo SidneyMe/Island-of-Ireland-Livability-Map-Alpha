@@ -13,7 +13,8 @@ from config import DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE, SURFACE_SHARD_SIZE_M, T
 from precompute import daily_access_build as build
 from precompute import daily_access_publish as publish
 from precompute.daily_access_native import ALL_KINDS, INTERVAL_DTYPE, OBJECT_DTYPE
-from precompute.daily_access_reference import service_kind_k, service_kind_need, service_kind_quality
+from precompute.daily_access_reference import service_kind_k, service_kind_need, service_kind_quality, service_kind_cutoff
+from precompute.daily_access_score import PENALTIES, BONUSES
 from precompute.daily_access_runtime import ByteLRU, DailyAccessSurfaceRuntime
 
 SIZE = SURFACE_SHARD_SIZE_M // 50  # 400 cells per side
@@ -54,7 +55,7 @@ def write_tiers(
     components[:, :, :201] = 0
     components[0, :, :180] = 3000
     components[1, :, :180] = 3000
-    penalties = np.full((2, SIZE, SIZE), 65535, dtype=np.uint16)
+    penalties = np.full((len(PENALTIES), SIZE, SIZE), 65535, dtype=np.uint16)
     penalties[:, :, :201] = 0
     penalties[1, :, :201] = 150
     access = np.full((6, SIZE, SIZE), 65535, dtype=np.uint16)
@@ -69,7 +70,13 @@ def write_tiers(
     )
     np.savez_compressed(
         score_dir / "shards" / f"{SHARD}.npz",
-        total=total, components=components, penalties=penalties, service_access=access, network_status=status,
+        total=total, components=components, penalties=penalties, bonuses=np.zeros((len(BONUSES), SIZE, SIZE), dtype=np.uint16), service_access=access, network_status=status,
+        context_values=np.zeros((SIZE, SIZE, 5), dtype=np.float32),
+        context_metrics=np.zeros((SIZE, SIZE, 7), dtype=np.float32),
+        pitch_ref=np.full((SIZE, SIZE), "", dtype="U1"), pitch_reason=np.full((SIZE, SIZE), "", dtype="U1"),
+        pitch_distance=np.full((SIZE, SIZE), np.nan, dtype=np.float32),
+        station_labels=np.full((2, SIZE, SIZE), 2**32-1, dtype=np.uint32),
+        station_distances=np.full((2, SIZE, SIZE), np.inf, dtype=np.float64),
         x_min_m=np.asarray([X0], dtype=np.int32), y_min_m=np.asarray([Y0], dtype=np.int32),
     )
     build.complete_tier(shell_dir, {"stats": {}})
@@ -113,7 +120,7 @@ def write_empty_reach_tier(
         need = service_kind_need(kind)
         kinds.append({
             "kind": kind, "kind_index": index, "need": need, "quality": service_kind_quality(kind),
-            "k": k, "cutoff_m": float(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need]),
+            "k": k, "cutoff_m": service_kind_cutoff(kind, mode),
             "out_distances": str(distances), "out_labels": str(labels),
         })
     build.save_reach_cache(reach_dir, np.zeros(0, dtype=np.uint32), kinds, {})
@@ -195,6 +202,24 @@ class RuntimeTests(TestCase):
         self.assertEqual(visible["network_status"], "partial")
         self.assertAlmostEqual(visible["network_coverage_share"], 180 * 2500.0 / land, places=6)
         self.assertAlmostEqual(visible["land_area_m2"], land * SIZE, places=0)
+
+    def test_mode_aware_applies_shared_bonuses_and_context_once(self):
+        bike_shell, bike_score = write_tiers(self.root / "with-context-bike")
+        base = DailyAccessSurfaceRuntime(self.shell_dir, self.score_dir, bike_shell_dir=bike_shell, bike_score_dir=bike_score)
+        before = int(base._score(SHARD, "mode_aware")["total"][0, 0])
+        for directory in (self.score_dir, bike_score):
+            path = directory / "shards" / f"{SHARD}.npz"
+            with np.load(path, allow_pickle=False) as data:
+                values = {name: np.asarray(data[name]) for name in data.files}
+            values["bonuses"][0, :, :180] = 300
+            values["bonuses"][1, :, :180] = 200
+            values["penalties"][2, :, :180] = 100
+            np.savez_compressed(path, **values)
+            build.complete_tier(directory, {})
+        runtime = DailyAccessSurfaceRuntime(self.shell_dir, self.score_dir, bike_shell_dir=bike_shell, bike_score_dir=bike_score)
+        after = runtime._score(SHARD, "mode_aware")
+        self.assertEqual(int(after["total"][0, 0]) - before, 400)
+        np.testing.assert_array_equal(after["bonuses"][:, 0, 0], [300, 200])
 
     def test_png_aggregates_only_the_requested_channel_and_caches_are_bounded(self) -> None:
         png = self.runtime.render_tile(resolution_m=1000, z=10, x=495, y=339, channel="access_food")
@@ -300,7 +325,7 @@ class PublishTests(TestCase):
             engine=mock.sentinel.engine, profile="dev", keys=keys, hashes=Hashes(), shell_dir=shell_dir,
             reach_dir=reach_dir, score_dir=score_dir, study_area_metric=box(X0, Y0, X0 + 20_000, Y0 + 20_000),
             study_area_wgs84=box(-8.6, 51.8, -8.3, 52.0),
-            source_state=SimpleNamespace(extract_path="x.pbf", import_fingerprint="imp"),
+            source_state=SimpleNamespace(extract_path="x.pbf", extract_fingerprint="extract", import_fingerprint="imp"),
             graph_dir=root / "graph", reality_fingerprint="gtfs", overture_dataset_signature="overture-test",
             bike_graph_padding_m=5250.0, bike_keys=bike_keys, bike_graph_dir=root / "bike-graph",
             bike_shell_dir=bike_shell_dir, bike_reach_dir=bike_reach_dir, bike_score_dir=bike_score_dir,

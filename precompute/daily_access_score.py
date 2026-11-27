@@ -9,7 +9,7 @@ object connector, the network path and the cell connector.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, Mapping
 
 from config import (
@@ -32,8 +32,7 @@ from config import (
 )
 
 
-CATEGORIES = ("shops", "transport", "healthcare", "parks")
-PENALTIES = ("railway_proximity", "road_proximity")
+from daily_access_contract import CATEGORIES, PENALTIES, BONUSES, SCORE_CHANNEL_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -42,6 +41,7 @@ class CellScore:
     components: dict[str, float]
     service_access: dict[str, float]
     penalties: dict[str, float]
+    bonuses: dict[str, float] = field(default_factory=lambda: {name: 0.0 for name in BONUSES})
 
 
 def need_thresholds_m(
@@ -267,7 +267,8 @@ def quantize_cell_score(score: CellScore) -> dict[str, object]:
     return {
         "total": quantize_score(score.total),
         "components": {category: quantize_score(score.components[category]) for category in CATEGORIES},
-        "penalties": {penalty: quantize_score(score.penalties[penalty]) for penalty in PENALTIES},
+        "penalties": {penalty: quantize_score(score.penalties.get(penalty, 0.0)) for penalty in PENALTIES},
+        "bonuses": {name: quantize_score(score.bonuses.get(name, 0.0)) for name in BONUSES},
         "service_access": {
             need: quantize_access(score.service_access[need]) for need in DAILY_ACCESS_NEEDS
         },

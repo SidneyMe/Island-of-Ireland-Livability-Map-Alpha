@@ -644,6 +644,8 @@ def raw_import_ready(engine: Engine, import_fingerprint: str) -> bool:
     root = root_module()
     if not root.osm2pgsql_properties_exists(engine):
         return False
+    if not root.table_exists(engine, "nuisance", schema=OSM_IMPORT_SCHEMA):
+        return False
     if not root.table_exists(engine, "features", schema=OSM_IMPORT_SCHEMA):
         return False
     with engine.connect() as connection:

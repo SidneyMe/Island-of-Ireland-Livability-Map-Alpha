@@ -987,6 +987,7 @@ class RuntimeService:
                         "model", "score_model_version", "geometry_version", "classification_version",
                         "channels", "inspect_ready", "fine_png_enabled", "warnings",
                         "available_modes", "default_mode", "mode_aware",
+                        "channel_schema", "context_warnings",
                     )
                 }
             ),

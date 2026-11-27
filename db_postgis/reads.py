@@ -124,6 +124,7 @@ def load_transport_reality_rows_for_scoring(
                 transit_gtfs_stop_reality.c.friday_evening_deps,
                 transit_gtfs_stop_reality.c.transport_score_units,
                 transit_gtfs_stop_reality.c.transport_mode_tier,
+                transit_gtfs_stop_reality.c.route_modes_json,
                 transit_gtfs_stop_reality.c.bus_daytime_deps,
                 transit_gtfs_stop_reality.c.bus_daytime_headway_min,
                 transit_gtfs_stop_reality.c.bus_frequency_tier,
@@ -156,6 +157,7 @@ def load_transport_reality_rows_for_scoring(
             "friday_evening_deps": float(row["friday_evening_deps"] or 0.0),
             "transport_score_units": int(row["transport_score_units"] or 0),
             "transport_mode_tier": row.get("transport_mode_tier"),
+            "route_modes": list(row.get("route_modes_json") or []),
             "bus_daytime_deps": float(row["bus_daytime_deps"] or 0.0),
             "bus_daytime_headway_min": (
                 None
@@ -490,6 +492,71 @@ def load_daily_access_source_rows(
         stats_out["input_osm_rows"] = input_rows
         stats_out["excluded_non_operational_osm_rows"] = excluded_non_operational
     return rows
+
+
+def load_public_station_modes(engine: Engine, reality_fingerprint: str) -> dict[str, tuple[str, ...]]:
+    """V4 station eligibility by PUBLIC ACTIVE service, not all-time stop modes.
+
+    A bus stop with an inactive/school-only rail trip must not become a
+    station merely because route_modes_json mentions rail.
+    """
+    from collections import defaultdict
+    from types import SimpleNamespace
+    from config import GTFS_ANALYSIS_WINDOW_DAYS, GTFS_LOOKAHEAD_DAYS, GTFS_SERVICE_DESERT_WINDOW_DAYS
+    from transit.models import CalendarService, CalendarDateException
+    from transit.service import expand_service_windows
+    from transit.gtfs_zip import route_mode
+    from transit.railway_corridors import _is_school_only_service
+    from .tables import (transit_calendar_services as cal, transit_calendar_dates as dates,
+                         transit_service_classification as classes, transit_trips as trips,
+                         transit_routes as routes, transit_stop_times as times, transit_reality_manifest as reality)
+    output = defaultdict(set)
+    with engine.connect() as connection:
+        manifest = connection.execute(select(reality.c.analysis_date, reality.c.feed_fingerprints_json).where(reality.c.reality_fingerprint == reality_fingerprint)).mappings().one()
+        analysis_date = manifest["analysis_date"]
+        fingerprints = manifest["feed_fingerprints_json"]
+        services = connection.execute(select(classes.c.feed_id, classes.c.service_id, classes.c.school_only_state).where(classes.c.reality_fingerprint == reality_fingerprint)).mappings().all()
+        calendars = connection.execute(select(cal).where(cal.c.feed_fingerprint.in_(list(fingerprints.values())))).mappings().all()
+        exceptions = connection.execute(select(dates).where(dates.c.feed_fingerprint.in_(list(fingerprints.values())))).mappings().all()
+        for feed in sorted({str(row["feed_id"]) for row in services}):
+            dataset = SimpleNamespace(
+                calendar_services={row["service_id"]: CalendarService(**{name: row[name] for name in CalendarService.__dataclass_fields__}) for row in calendars if row["feed_id"] == feed},
+                calendar_dates=[CalendarDateException(**{name: row[name] for name in CalendarDateException.__dataclass_fields__}) for row in exceptions if row["feed_id"] == feed],
+            )
+            windows = expand_service_windows(dataset, analysis_date=analysis_date, window_days=GTFS_ANALYSIS_WINDOW_DAYS,
+                                            desert_window_days=GTFS_SERVICE_DESERT_WINDOW_DAYS, lookahead_days=GTFS_LOOKAHEAD_DAYS)
+            eligible = [row["service_id"] for row in services if row["feed_id"] == feed
+                        and not _is_school_only_service(str(row["service_id"]), row["school_only_state"])
+                        and windows.get(row["service_id"], {}).get("dates_30d")]
+            if not eligible:
+                continue
+            rows = connection.execute(select(times.c.stop_id, routes.c.route_type).select_from(
+                times.join(trips, (times.c.feed_id == trips.c.feed_id) & (times.c.trip_id == trips.c.trip_id))
+                .join(routes, (trips.c.feed_id == routes.c.feed_id) & (trips.c.route_id == routes.c.route_id))
+            ).where(trips.c.feed_id == feed, trips.c.service_id.in_(eligible),
+                    trips.c.feed_fingerprint == fingerprints[feed],
+                    routes.c.feed_fingerprint == fingerprints[feed], times.c.feed_fingerprint == fingerprints[feed],
+                    routes.c.route_type.in_(tuple(value for value in range(1001) if route_mode(value) in ("rail", "tram")))).distinct()).mappings().all()
+            for row in rows:
+                mode = route_mode(row["route_type"])
+                if mode in ("rail", "tram"):
+                    output[f"gtfs/{feed}/{row['stop_id']}"].add(mode)
+    return {key: tuple(sorted(value)) for key, value in output.items()}
+
+
+def load_nuisance_rows(engine: Engine, import_fingerprint: str, study_area_wgs84) -> list[dict[str, Any]]:
+    from .tables import nuisance
+    root = root_module()
+    with engine.connect() as connection:
+        rows = connection.execute(select(nuisance).where(
+            nuisance.c.import_fingerprint == import_fingerprint,
+            func.ST_Intersects(nuisance.c.geom, root.from_shape(study_area_wgs84, srid=4326)),
+        ).order_by(nuisance.c.osm_type, nuisance.c.osm_id)).mappings().all()
+    from shapely.ops import transform
+    from config import TO_TARGET
+    return [{"source": "osm_local_pbf", "source_ref": f"{row['osm_type'].strip()}/{row['osm_id']}",
+             "name": row["name"], "tags_json": dict(row["tags_json"] or {}),
+             "geom": transform(TO_TARGET, root.to_shape(row["geom"]))} for row in rows]
 
 
 def load_landuse_context_rows(

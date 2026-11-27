@@ -594,6 +594,7 @@ class DbPostgisImportStateTests(TestCase):
             [
                 f'DROP TABLE IF EXISTS "{OSM_IMPORT_SCHEMA}"."features"',
                 f'DROP TABLE IF EXISTS "{OSM_IMPORT_SCHEMA}"."roads"',
+                f'DROP TABLE IF EXISTS "{OSM_IMPORT_SCHEMA}"."nuisance"',
             ],
         )
 
@@ -1058,6 +1059,7 @@ class DbReadTests(TestCase):
                     "friday_evening_deps": 9.0,
                     "transport_score_units": 3,
                     "transport_mode_tier": None,
+                    "route_modes": [],
                     "bus_daytime_deps": 28.0,
                     "bus_daytime_headway_min": 30.0,
                     "bus_frequency_tier": "moderate",

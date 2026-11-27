@@ -69,6 +69,11 @@ _GRID_TILE_SQL = text(
             COALESCE((g.scores_json ->> 'parks')::double precision, 0.0) AS score_parks,
             COALESCE((g.scores_json ->> 'railway_proximity')::double precision, 0.0) AS score_railway_proximity,
             COALESCE((g.scores_json ->> 'road_proximity')::double precision, 0.0) AS score_road_proximity,
+            COALESCE((g.scores_json ->> 'industrial_context')::double precision, 0.0) AS score_industrial_context,
+            COALESCE((g.scores_json ->> 'over_concentration')::double precision, 0.0) AS score_over_concentration,
+            COALESCE((g.scores_json ->> 'pitch_noise')::double precision, 0.0) AS score_pitch_noise,
+            COALESCE((g.scores_json ->> 'rail_station_access')::double precision, 0.0) AS score_rail_station_access,
+            COALESCE((g.scores_json ->> 'green_buffer')::double precision, 0.0) AS score_green_buffer,
             COALESCE((g.scores_json #>> '{modes,bike,total}')::double precision, 0.0) AS bike_total_score,
             COALESCE((g.scores_json #>> '{modes,bike,components,shops}')::double precision, 0.0) AS bike_score_shops,
             COALESCE((g.scores_json #>> '{modes,bike,components,transport}')::double precision, 0.0) AS bike_score_transport,
@@ -96,6 +101,18 @@ _GRID_TILE_SQL = text(
     """
 )
 
+
+# These names are internal schema constants, never request input.
+from daily_access_contract import PENALTIES as _V4_PENALTIES, BONUSES as _V4_BONUSES
+_mode_context_columns = []
+for _mode in ("bike", "mode_aware"):
+    for _name in (*_V4_PENALTIES, *_V4_BONUSES):
+        _group = "penalties" if _name in _V4_PENALTIES else "bonuses"
+        _sign = "-" if _group == "penalties" else ""
+        _mode_context_columns.append(
+            f"{_sign}COALESCE((g.scores_json #>> '{{modes,{_mode},{_group},{_name}}}')::double precision, 0.0) AS {_mode}_score_{_name},"
+        )
+_GRID_TILE_SQL = text(str(_GRID_TILE_SQL).replace("ST_AsMVTGeom(", "\n".join(_mode_context_columns) + "\nST_AsMVTGeom(", 1))
 
 _AMENITY_TILE_SQL = text(
     """

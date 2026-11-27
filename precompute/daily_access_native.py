@@ -25,6 +25,7 @@ import shapely
 
 from config import (
     DAILY_ACCESS_CATEGORY_MAX,
+    DAILY_ACCESS_CONTEXT_PARAMS,
     DAILY_ACCESS_HEALTHCARE_MIX,
     DAILY_ACCESS_INTERVAL_MERGE_M,
     DAILY_ACCESS_DEFAULT_MODE,
@@ -53,8 +54,9 @@ from .daily_access_reference import (
     service_kind_k,
     service_kind_need,
     service_kind_quality,
+    service_kind_cutoff,
 )
-from .daily_access_score import CATEGORIES, need_thresholds_m
+from .daily_access_score import CATEGORIES, PENALTIES, BONUSES, SCORE_CHANNEL_SCHEMA, need_thresholds_m
 from .daily_access_snap import (
     REASON_NO_EDGE_WITHIN_RADIUS,
     REASON_NO_LAND_CONNECTOR,
@@ -80,7 +82,7 @@ INTERVAL_DTYPE = np.dtype(
 # Every service kind, in the order of the kind index used by the native files.
 ALL_KINDS: tuple[str, ...] = tuple(sorted(DAILY_ACCESS_SERVICE_KINDS)) + tuple(
     f"transport_tier_{tier}" for tier in sorted(DAILY_ACCESS_TRANSPORT_TIER_QUALITY)
-)
+) + ("rail_station", "tram_station")
 KIND_INDEX = {kind: index for index, kind in enumerate(ALL_KINDS)}
 REASON_CODES = {
     0: None,
@@ -97,12 +99,13 @@ class NativeCells:
     network_status: np.ndarray  # uint8, see NETWORK_STATUS_CODES
     total: np.ndarray  # uint16, 0.01 points, 65535 = outside mask
     components: np.ndarray  # uint16 (n, 4): shops, transport, healthcare, parks
-    penalties: np.ndarray  # uint16 (n, 2): railway, road (positive)
+    penalties: np.ndarray  # uint16 (n, 5), positive, named in PENALTIES
     service_access: np.ndarray  # uint16 (n, 6) in DAILY_ACCESS_NEEDS order
     origins: np.ndarray
     reach_by_kind: dict[str, KindReach]
     labels: LabelTable
     losses: dict[str, Any]
+    bonuses: np.ndarray | None = None
 
 
 # Peak resident memory per walkgraph subcommand (bytes), for build reports.
@@ -421,7 +424,7 @@ def native_reach(
                 "quality": service_kind_quality(kind),
                 "seeds_bin": str(seeds_bin),
                 "k": service_kind_k(kind),
-                "cutoff_m": float(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need]),
+                "cutoff_m": service_kind_cutoff(kind, mode),
                 "out_distances": str(reach_dir / f"{kind}.distances.bin"),
                 "out_labels": str(reach_dir / f"{kind}.labels.bin"),
             }
@@ -452,6 +455,9 @@ def native_score(
     mode: str = DAILY_ACCESS_DEFAULT_MODE,
     objects: ObjectFiles | None,
     penalties: np.ndarray | None = None,
+    context_values: np.ndarray | None = None,
+    shared_bonuses: np.ndarray | None = None,
+    station_quality: dict[str, list[float]] | None = None,
     walkgraph_bin: str = WALKGRAPH_BIN,
 ) -> dict[str, np.ndarray]:
     """Score one block of cells.
@@ -486,16 +492,27 @@ def native_score(
                 "cutoff_m": kind["cutoff_m"],
                 "distances": kind.get("distances"),
                 "labels": kind.get("labels"),
+                "station": (0 if kind.get("kind") == "rail_station" else 1 if kind.get("kind") == "tram_station" else None),
+                "station_quality": (station_quality or {}).get(kind.get("kind"), []),
             }
             for kind in kinds
         ],
         "penalties_bin": None,
+        "context_bin": None,
+        "shared_bonuses_bin": None,
+        "context_params": DAILY_ACCESS_CONTEXT_PARAMS,
+        "channel_schema": SCORE_CHANNEL_SCHEMA,
         "out_dir": str(score_dir / "out"),
     }
     if penalties is not None:
         path = score_dir / "penalties.f32"
         np.asarray(penalties, dtype="<f4").reshape(-1, 2).tofile(path)
         config["penalties_bin"] = str(path)
+    for name, values, width in (("context", context_values, 5), ("shared_bonuses", shared_bonuses, len(BONUSES))):
+        if values is not None:
+            path = score_dir / f"{name}.f32"
+            np.asarray(values, dtype="<f4").reshape(len(records), width).tofile(path)
+            config[f"{name}_bin"] = str(path)
     config_path = score_dir / "score.json"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     _run(walkgraph_bin, ["daily-access-score", "--graph-dir", str(graph_dir), "--config-json", str(config_path)])
@@ -504,7 +521,10 @@ def native_score(
         "network_status": np.fromfile(out / "network_status.bin", dtype=np.uint8),
         "total": np.fromfile(out / "total.bin", dtype="<u2"),
         "components": np.fromfile(out / "components.bin", dtype="<u2").reshape(-1, len(CATEGORIES)),
-        "penalties": np.fromfile(out / "penalties.bin", dtype="<u2").reshape(-1, 2),
+        "penalties": np.fromfile(out / "penalties.bin", dtype="<u2").reshape(-1, len(PENALTIES)),
+        "bonuses": np.fromfile(out / "bonuses.bin", dtype="<u2").reshape(-1, len(BONUSES)),
+        "station_labels": np.fromfile(out / "station_labels.bin", dtype="<u4").reshape(-1, 2),
+        "station_distances": np.fromfile(out / "station_distances.bin", dtype="<f8").reshape(-1, 2),
         "service_access": np.fromfile(out / "service_access.bin", dtype="<u2").reshape(-1, len(DAILY_ACCESS_NEEDS)),
     }
 
@@ -559,6 +579,7 @@ def compute_native(
     penalty_fn=None,
     work_dir: Path | None = None,
     walkgraph_bin: str = WALKGRAPH_BIN,
+    context_field=None,
 ) -> NativeCells:
     """Same inputs as ``compute_reference``; native entries, reach and score."""
     graph_dir = Path(graph_dir)
@@ -588,6 +609,9 @@ def compute_native(
             walkgraph_bin=walkgraph_bin,
         )
         score_kinds = [{**kind, "distances": kind["out_distances"], "labels": kind["out_labels"]} for kind in kinds]
+        context_data = context_field.records(records) if context_field is not None else None
+        station_quality = {kind: [float(entry["quality"]) if entry["feed"] in context_field.corridor_feeds else 0.0 for entry in sources.labels.by_kind.get(kind, [])]
+                           for kind in ("rail_station", "tram_station")} if context_field is not None else {}
         scored = native_score(
             graph_dir,
             mask_path,
@@ -599,6 +623,8 @@ def compute_native(
             objects=objects,
             penalties=penalties_for_records(records, penalty_fn),
             walkgraph_bin=walkgraph_bin,
+            context_values=None if context_data is None else context_data["context_values"],
+            station_quality=station_quality,
         )
     return NativeCells(
         network_status=scored["network_status"],
@@ -610,6 +636,7 @@ def compute_native(
         reach_by_kind=reach_by_kind,
         labels=sources.labels,
         losses=losses,
+        bonuses=scored["bonuses"],
     )
 
 
@@ -638,10 +665,14 @@ def compare_with_reference(reference, native: NativeCells) -> dict[str, Any]:
         access_diffs.append(np.max(np.abs(ref_codes[valid] - native.service_access[valid, index].astype(np.int64)), initial=0))
     report["max_access_diff"] = float(max(access_diffs) / 10_000.0)
     penalty_diffs = []
-    for index, penalty in enumerate(("railway_proximity", "road_proximity")):
+    for index, penalty in enumerate(PENALTIES):
         ref_codes = np.asarray([cell.quantized["penalties"][penalty] for cell in reference.cells], dtype=np.int64)
         penalty_diffs.append(np.max(np.abs(ref_codes[valid] - native.penalties[valid, index].astype(np.int64)), initial=0))
     report["max_penalty_diff"] = float(max(penalty_diffs) / 100.0)
+    report["max_bonus_diff"] = max((float(np.max(np.abs(
+        np.asarray([cell.quantized["bonuses"][name] for cell in reference.cells], dtype=np.int64)[valid]
+        - native.bonuses[valid, index].astype(np.int64)), initial=0)) / 100.0)
+        for index, name in enumerate(BONUSES)) if native.bonuses is not None else 0.0
 
     reach_step_diff = 0
     reach_label_mismatches = 0
@@ -676,6 +707,7 @@ def compare_with_reference(reference, native: NativeCells) -> dict[str, Any]:
         and report["max_component_diff"] <= PARITY_LIMITS["component"]
         and report["max_total_diff"] <= PARITY_LIMITS["total"]
         and report["max_penalty_diff"] == 0.0
+        and report["max_bonus_diff"] <= 0.01
     )
     return report
 

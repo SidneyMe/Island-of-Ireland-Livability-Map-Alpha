@@ -388,6 +388,25 @@ struct ScoreKindConfig {
     cutoff_m: f64,
     distances: Option<PathBuf>,
     labels: Option<PathBuf>,
+    #[serde(default)]
+    station: Option<usize>,
+    #[serde(default)]
+    station_quality: Vec<f64>,
+}
+
+#[derive(Deserialize)]
+struct ContextParams {
+    station: HashMap<String, [f64; 5]>,
+    corridor: [f64; 2],
+    penalty_cap: f64,
+}
+
+#[derive(Deserialize)]
+struct ChannelSchema {
+    version: u32,
+    components: Vec<String>,
+    penalties: Vec<String>,
+    bonuses: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -406,6 +425,14 @@ struct ScoreConfig {
     kinds: Vec<ScoreKindConfig>,
     /// `f32 railway, f32 road` per cell.
     penalties_bin: Option<PathBuf>,
+    #[serde(default)]
+    context_bin: Option<PathBuf>,
+    #[serde(default)]
+    shared_bonuses_bin: Option<PathBuf>,
+    #[serde(default)]
+    context_params: Option<ContextParams>,
+    #[serde(default)]
+    channel_schema: Option<ChannelSchema>,
     out_dir: PathBuf,
 }
 
@@ -418,6 +445,8 @@ struct KindReachRows {
     cutoff_m: f64,
     distance_codes: Vec<u16>,
     labels: Vec<u32>,
+    station: Option<usize>,
+    station_quality: Vec<f64>,
 }
 
 type Target = (u16, u32, Piece, f64);
@@ -449,6 +478,13 @@ fn kth_distance(best: &[(u32, f64)], k: usize, cutoff: f64) -> f64 {
 
 pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
     let config: ScoreConfig = serde_json::from_str(&fs::read_to_string(config_json)?)?;
+    if let Some(schema) = &config.channel_schema {
+        if schema.version != 1 || schema.components != score::CATEGORIES
+            || schema.penalties != ["railway_proximity", "road_proximity", "industrial_context", "over_concentration", "pitch_noise"]
+            || schema.bonuses != ["rail_station_access", "green_buffer"] {
+            return Err("unsupported score channel schema".into());
+        }
+    }
     let scorer = Scorer::new(&config.params)?;
     let cells = read_cells(&config.cells_bin)?;
     let origins: Vec<u32> = read_values(&config.origins_bin, u32::from_le_bytes)?;
@@ -458,6 +494,15 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
     };
     if penalties.len() != cells.len() * 2 {
         return Err("penalties.bin must hold two f32 per cell".into());
+    }
+    let context_values: Vec<f32> = match &config.context_bin {
+        Some(path) => read_values(path, f32::from_le_bytes)?,
+        None => vec![0.0; cells.len() * 5],
+    };
+    let shared_bonuses: Option<Vec<f32>> = config.shared_bonuses_bin.as_ref()
+        .map(|path| read_values(path, f32::from_le_bytes)).transpose()?;
+    if context_values.len() != cells.len() * 5 || shared_bonuses.as_ref().is_some_and(|v| v.len() != cells.len() * 2) {
+        return Err("invalid context/bonus array dimensions".into());
     }
     let mut kinds = Vec::new();
     for kind in &config.kinds {
@@ -483,6 +528,8 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
             cutoff_m: kind.cutoff_m,
             distance_codes,
             labels,
+            station: kind.station,
+            station_quality: kind.station_quality.clone(),
         });
     }
     let position_of_kind: HashMap<u16, usize> =
@@ -557,7 +604,9 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
             }
             let (entries, _) = context.point(x, y, flags & CELL_FLAG_INTERIOR != 0);
             if !entries.has_network() {
-                return (NETWORK_NO_WALKING_NETWORK, scorer.score([0.0; 6], railway, road));
+                let mut result = scorer.score([0.0; 6], railway, road);
+                score::apply_context(&mut result, [f64::from(context_values[cell * 5]), f64::from(context_values[cell * 5 + 1]), f64::from(context_values[cell * 5 + 2])], [0.0; 2], 20.0, false);
+                return (NETWORK_NO_WALKING_NETWORK, result);
             }
             // Rows do not depend on the kind: look each node up once per cell.
             let rows: Vec<(usize, f64)> = entries
@@ -619,6 +668,7 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
             let views: Vec<KindDistances<'_>> = kinds
                 .iter()
                 .enumerate()
+                .filter(|(_, kind)| kind.station.is_none())
                 .map(|(position, kind)| KindDistances {
                     need_index: kind.need_index,
                     quality: kind.quality,
@@ -628,7 +678,28 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
                 })
                 .collect();
             let access = scorer.access_from_distances(&views);
-            (NETWORK_OK, scorer.score(access, railway, road))
+            let mut result = scorer.score(access, railway, road);
+            let mut station_value: f64 = 0.0;
+            for (position, kind) in kinds.iter().enumerate() {
+                if let Some(slot) = kind.station {
+                    if let Some(&(label, distance)) = best[position].iter().filter(|(_, d)| *d <= kind.cutoff_m)
+                        .min_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0))) {
+                        result.stations[slot] = (label, distance);
+                        if let Some(params) = &config.context_params {
+                            let quality = kind.station_quality.get(label as usize).copied().unwrap_or(0.0);
+                            let name = if slot == 0 { "rail" } else { "tram" };
+                            station_value = station_value.max(score::station_bonus(distance, quality, f64::from(context_values[cell * 5 + 4]), params.station[name], params.corridor));
+                        }
+                    }
+                }
+            }
+            let bonuses = match &shared_bonuses {
+                Some(values) => [f64::from(values[cell * 2]), f64::from(values[cell * 2 + 1])],
+                None => [station_value, f64::from(context_values[cell * 5 + 3]) * access[4]],
+            };
+            let cap = config.context_params.as_ref().map_or(20.0, |p| p.penalty_cap);
+            score::apply_context(&mut result, [f64::from(context_values[cell * 5]), f64::from(context_values[cell * 5 + 1]), f64::from(context_values[cell * 5 + 2])], bonuses, cap, true);
+            (NETWORK_OK, result)
         })
         .collect();
 
@@ -636,20 +707,27 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
     let mut status = Vec::with_capacity(cell_count);
     let mut total = Vec::with_capacity(cell_count);
     let mut component_codes = Vec::with_capacity(cell_count * 4);
-    let mut penalty_codes = Vec::with_capacity(cell_count * 2);
+    let mut penalty_codes = Vec::with_capacity(cell_count * 5);
+    let mut bonus_codes = Vec::with_capacity(cell_count * 2);
+    let mut station_labels = Vec::with_capacity(cell_count * 2);
+    let mut station_distances = Vec::with_capacity(cell_count * 2);
     let mut access_codes = Vec::with_capacity(cell_count * 6);
     for (cell_status, cell_score) in &results {
         status.push(*cell_status);
+        station_labels.extend(cell_score.stations.iter().map(|s| s.0));
+        station_distances.extend(cell_score.stations.iter().map(|s| s.1));
         if *cell_status == NETWORK_OUTSIDE_MASK {
             total.push(UINT16_MISSING);
             component_codes.extend([UINT16_MISSING; 4]);
-            penalty_codes.extend([UINT16_MISSING; 2]);
+            penalty_codes.extend([UINT16_MISSING; 5]);
+            bonus_codes.extend([UINT16_MISSING; 2]);
             access_codes.extend([UINT16_MISSING; 6]);
             continue;
         }
         total.push(quantize_score(cell_score.total));
         component_codes.extend(cell_score.components.iter().map(|value| quantize_score(*value)));
         penalty_codes.extend(cell_score.penalties.iter().map(|value| quantize_score(*value)));
+        bonus_codes.extend(cell_score.bonuses.iter().map(|value| quantize_score(*value)));
         access_codes.extend(cell_score.access.iter().map(|value| quantize_access(*value)));
     }
     fs::create_dir_all(&config.out_dir)?;
@@ -657,6 +735,9 @@ pub fn run_score(graph_dir: &Path, config_json: &Path) -> Result<(), AnyError> {
     write_values(&config.out_dir.join("total.bin"), &total, u16::to_le_bytes)?;
     write_values(&config.out_dir.join("components.bin"), &component_codes, u16::to_le_bytes)?;
     write_values(&config.out_dir.join("penalties.bin"), &penalty_codes, u16::to_le_bytes)?;
+    write_values(&config.out_dir.join("bonuses.bin"), &bonus_codes, u16::to_le_bytes)?;
+    write_values(&config.out_dir.join("station_labels.bin"), &station_labels, u32::to_le_bytes)?;
+    write_values(&config.out_dir.join("station_distances.bin"), &station_distances, f64::to_le_bytes)?;
     write_values(&config.out_dir.join("service_access.bin"), &access_codes, u16::to_le_bytes)?;
     eprintln!("daily-access-score: cells={cell_count} same_edge_edges={}", targets.len());
     Ok(())

@@ -1,7 +1,7 @@
 """Daily access score (v4) runtime: inspect, aggregation and PNG tiles.
 
 Everything is read from the v4 score shards (``total``, four components,
-two penalties, six service access values, network status) and the shell
+five penalties, two bonuses, six service access values, network status) and the shell
 shards (land area). Nothing is rescored here and no node-level score is
 consulted.
 
@@ -57,7 +57,7 @@ from config import (
 )
 
 from .daily_access_reference import NETWORK_STATUS_CODES
-from .daily_access_score import CATEGORIES, PENALTIES
+from .daily_access_score import CATEGORIES, PENALTIES, BONUSES
 
 LEGACY_UNAVAILABLE_FIELDS = ("counts", "cluster_counts", "effective_units")
 _STATUS_BY_CODE = {code: name for name, code in NETWORK_STATUS_CODES.items()}
@@ -75,6 +75,10 @@ def _base_channels() -> dict[str, tuple[str, int, float, float]]:
         channels[category] = ("components", index, DAILY_ACCESS_SCORE_STEP, float(DAILY_ACCESS_CATEGORY_MAX[category]))
     channels["railway_proximity"] = ("penalties", 0, DAILY_ACCESS_SCORE_STEP, float(RAILWAY_PROXIMITY_MAX_PENALTY))
     channels["road_proximity"] = ("penalties", 1, DAILY_ACCESS_SCORE_STEP, _ROAD_MAX)
+    for index, name in enumerate(PENALTIES[2:], 2):
+        channels[name] = ("penalties", index, DAILY_ACCESS_SCORE_STEP, {"industrial_context": 8.0, "over_concentration": 12.0, "pitch_noise": 4.0}[name])
+    for index, name in enumerate(BONUSES):
+        channels[name] = ("bonuses", index, DAILY_ACCESS_SCORE_STEP, 3.0 if index == 0 else 2.0)
     for index, need in enumerate(DAILY_ACCESS_NEEDS):
         channels[f"access_{need}"] = ("service_access", index, DAILY_ACCESS_ACCESS_STEP, 1.0)
     return channels
@@ -194,6 +198,10 @@ class DailyAccessSurfaceRuntime:
         if manifest.get("status") != "complete":
             raise RuntimeError(f"daily access score tier {self.score_dir} is not complete")
         self.manifest = manifest
+        import json
+        reach_dir = manifest.get("reach_dir")
+        labels_path = Path(reach_dir) / "labels.json" if reach_dir else None
+        self.station_labels = json.loads(labels_path.read_text(encoding="utf-8")) if labels_path and labels_path.exists() else {}
         self.shard_ids = frozenset(str(shard) for shard in manifest.get("shards") or ())
         self.available_modes = ["walk"]
         if (self.bike_shell_dir is None) != (self.bike_score_dir is None):
@@ -248,7 +256,13 @@ class DailyAccessSurfaceRuntime:
             if directory is None:
                 raise RuntimeError(f"daily access mode {mode!r} is unavailable")
             with np.load(directory / "shards" / f"{shard_id}.npz", allow_pickle=False) as data:
-                cached = self._scores.put(cache_key, {name: np.asarray(data[name]) for name in data.files})
+                cached = {name: np.asarray(data[name]) for name in ("total", "components", "penalties", "bonuses", "service_access", "network_status") if name in data}
+                # Read compatibility for already-published pre-context v4 builds.
+                if cached["penalties"].shape[0] < len(PENALTIES):
+                    cached["penalties"] = np.pad(cached["penalties"], ((0, len(PENALTIES) - cached["penalties"].shape[0]), (0, 0), (0, 0)))
+                if "bonuses" not in cached:
+                    cached["bonuses"] = np.zeros((len(BONUSES), *cached["total"].shape), dtype="<u2")
+                cached = self._scores.put(cache_key, cached)
         return cached
 
     @staticmethod
@@ -296,7 +310,8 @@ class DailyAccessSurfaceRuntime:
             0.0,
             walk["penalties"].astype(np.float64) * DAILY_ACCESS_SCORE_STEP,
         )
-        total = np.clip(components.sum(axis=0) - penalties.sum(axis=0), 0.0, 100.0)
+        bonuses = np.nan_to_num(decode(walk["bonuses"], DAILY_ACCESS_SCORE_STEP), nan=0.0)
+        total = np.clip(components.sum(axis=0) + bonuses.sum(axis=0) - penalties.sum(axis=0), 0.0, 100.0)
         ok = (
             (walk["network_status"] == NETWORK_STATUS_CODES["ok"])
             | (bike["network_status"] == NETWORK_STATUS_CODES["ok"])
@@ -310,6 +325,7 @@ class DailyAccessSurfaceRuntime:
             "total": self._quantize(total, DAILY_ACCESS_SCORE_STEP, missing=outside),
             "components": self._quantize(components, DAILY_ACCESS_SCORE_STEP, missing=outside[None, ...]),
             "penalties": self._quantize(penalties, DAILY_ACCESS_SCORE_STEP, missing=outside[None, ...]),
+            "bonuses": self._quantize(bonuses, DAILY_ACCESS_SCORE_STEP, missing=outside[None, ...]),
             "service_access": self._quantize(access, DAILY_ACCESS_ACCESS_STEP, missing=outside[None, ...]),
             "network_status": status,
         }
@@ -375,6 +391,7 @@ class DailyAccessSurfaceRuntime:
                 "penalties": {
                     penalty: float(score["penalties"][index, row, col]) * scale for index, penalty in enumerate(PENALTIES)
                 },
+                "bonuses": {name: float(score["bonuses"][index, row, col]) * scale for index, name in enumerate(BONUSES)},
                 "service_access": {
                     need: float(score["service_access"][index, row, col]) * DAILY_ACCESS_ACCESS_STEP
                     for index, need in enumerate(DAILY_ACCESS_NEEDS)
@@ -383,11 +400,37 @@ class DailyAccessSurfaceRuntime:
         )
         return payload
 
+    def _context_at(self, shard_id: str, row: int, col: int) -> dict[str, Any]:
+        with np.load(self.score_dir / "shards" / f"{shard_id}.npz", allow_pickle=False) as data:
+            walk = {name: np.asarray(data[name]) for name in ("context_metrics", "station_labels", "station_distances", "pitch_ref", "pitch_reason", "pitch_distance") if name in data}
+        payload = {}
+        if "context_metrics" in walk:
+            from .daily_access_context import METRICS
+            stations = {}
+            for index, name in enumerate(("rail", "tram")):
+                label = int(walk["station_labels"][index, row, col])
+                distance = float(walk["station_distances"][index, row, col])
+                entries = self.station_labels.get(f"{name}_station", [])
+                source = next((entry for entry in entries if entry["label"] == label), None)
+                stations[name] = {"source_ref": source.get("key") if source else None,
+                                  "distance_m": distance if math.isfinite(distance) else None}
+            payload["context"] = {
+                **dict(zip(METRICS, (float(v) for v in walk["context_metrics"][row, col]))),
+                "stations": stations,
+                "pitch": {"source_ref": str(walk["pitch_ref"][row, col]) or None,
+                          "reason": str(walk["pitch_reason"][row, col]) or None,
+                          "distance_m": float(walk["pitch_distance"][row, col]) if np.isfinite(walk["pitch_distance"][row, col]) else None},
+            }
+        return payload
+
     def _canonical(self, shard_id: str, row: int, col: int) -> dict[str, Any]:
         modes = {
             mode: self._canonical_mode(shard_id, row, col, mode)
             for mode in self.available_modes
         }
+        context = self._context_at(shard_id, row, col)
+        for payload in modes.values():
+            payload.update(context)
         return {
             **modes["walk"],
             "available_modes": list(self.available_modes),
@@ -438,6 +481,7 @@ class DailyAccessSurfaceRuntime:
                 "penalties": {
                     penalty: mean(self._mode_channel(mode, penalty)) for penalty in PENALTIES
                 },
+                "bonuses": {name: mean(self._mode_channel(mode, name)) for name in BONUSES},
                 "service_access": {
                     need: mean(self._mode_channel(mode, f"access_{need}"))
                     for need in DAILY_ACCESS_NEEDS
