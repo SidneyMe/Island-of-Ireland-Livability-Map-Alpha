@@ -1,6 +1,6 @@
 # Repo Map
 
-> Refreshed: **2026-09-25** on branch `beta`. Evidence grades used below: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from the repo alone.
+> Refreshed: **2026-11-27** on branch `beta` (v4 context model rows; older measurements retain their dates). Evidence grades used below: **Confirmed** = read directly from code; **Inference** = strongly suggested but not explicitly proven; **Unclear** = cannot be determined from the repo alone.
 > Line counts in §0.7 are non-blank line counts measured 2026-09-25. Line-number anchors elsewhere are dated hints, not contracts — prefer symbols + `rg`.
 
 ---
@@ -34,7 +34,7 @@ serve_routes.py            pure route matching / dispatch priority, unit-tested 
 frontend/src/              MapLibre app as small modules; static/dist/ is the built, checked-in bundle
 scripts/                   fetch_datasets (all inputs), sanity_check, db_integrity_check, refresh_osm, bench_valhalla, ci_local, win/*.cmd
 setup.sh / setup.cmd+ps1   one-command bootstrap (Linux / Windows): prereqs, DB, datasets, build, full pipeline
-tests/ (38 files)          Python unittest/pytest suite; frontend/src/*.test.js (12 files) is the Node suite
+tests/ (38 files)          Python unittest/pytest suite; frontend/src/*.test.js (20 files) is the Node suite
 docs/                      PHASES.md (design), notes.md (authority/methodology), BASEMAP.md
 AGENTS.md                  always-loaded agent instructions; repo_map.md (this file) is the deep map
 ```
@@ -62,9 +62,12 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | Daily access v4 walk/bike build (test/dev): per-mode graph/shell/reach/score tiers, gates, verifier | `precompute/daily_access_build.py` (`run_daily_access_build`, `build_bike_tiers`, `surface_tier_problems`, `reach_tier_problems`) → `precompute/daily_access_verify.py` (pinned published snapshot + bounded shard sampling) → `scripts/daily_access_verify_shards.py` → `tests/test_daily_access_{build,verify}.py` | v3 phases, PMTiles bake |
 | Daily access v4 mode-aware publish, runtime, inspect, PNG/PMTiles channels | `precompute/daily_access_publish.py` → `precompute/display_layers.py` → `precompute/daily_access_runtime.py` (`DailyAccessSurfaceRuntime`, lazy `mode_aware`) → `fine_vector_pmtiles_worker.py` / `pmtiles_bake_worker.py` → `serve_from_db.py` → `frontend/src/{runtime_contract,main,popups/grid_popup}.js` → `tests/test_daily_access_runtime.py` | v3 fine surface / published v3 builds |
 | Daily access v4 native path (Rust) and Python/Rust parity | `walkgraph/src/daily_access/{geometry,snap,reach,score,mod}.rs` → `precompute/daily_access_native.py` (`compute_native`, `compare_with_reference`, `ALL_KINDS`) → `scripts/daily_access_reference_run.py --native` → `tests/test_daily_access_native.py` | v3 reachability, noise |
+| Daily access v4 station sweet spot / land-use / concentration / pitch | `docs/DAILY_ACCESS_CONTEXT.md` → `config.py` (`DAILY_ACCESS_CONTEXT_PARAMS`) → `precompute/daily_access_context.py` (`ContextField`, `effects`, `load_context_field`) → `precompute/daily_access_build.py` (`build_scores`) → `tests/test_daily_access_context.py`; report: `scripts/daily_access_context_report.py` | v3 scoring; official noise is still display-only; context uses a prepared-land inland fast path and reports valid-cell progress |
 | Fine surface, `/api/inspect`, PNG tiles | `precompute/surface.py` (`FineSurfaceRuntime`) → `fine_vector_pmtiles_worker.py` → `serve_from_db.py` (`/api/inspect`) → `tests/test_surface_runtime.py`, `tests/test_fine_vector_pmtiles_worker.py` | noise |
 | PMTiles bake: new field / layer / zoom | `precompute/bake_pmtiles.py` (`_pmtiles_metadata`) → `pmtiles_bake_worker.py` → `tests/test_pmtiles_bake.py` (+ `fine_vector_pmtiles_worker.py` if fine grid) | runtime server |
-| Frontend layer, control, popup | `frontend/src/` (small modules; start `runtime_contract.js` or the matching `*.js`) → matching `*.test.js` → rebuild `static/dist/` | Python pipeline |
+| Frontend layer, control, cell-details drawer | `frontend/src/` (small modules; start `runtime_contract.js` or the matching `*.js`) → matching `*.test.js` → rebuild `static/dist/` | grid cells use the desktop-right/mobile-bottom drawer; POI/transport/noise keep compact map popups |
+| Data provenance / freshness / shareable map URL | `precompute/daily_access_publish.py` (`_data_provenance`, activation gate) → `serve_from_db.py` (`_runtime_data_provenance`) → `frontend/src/{build_metadata,url_state,main}.js` → matching frontend tests + `tests/test_daily_access_runtime.py` | local paths and cache keys are intentionally not public; hash keys are `v/m/c/b/cell/cmp`; `cell` camera/highlight works for both v3 and v4 and outlines the rendered grid feature |
+| Daily Access v4 shortlist / two-location compare | `frontend/src/shortlist.js` → `frontend/src/main.js` + `popups/grid_popup.js` → `frontend/src/{shortlist,url_state,grid_popup}.test.js` | localStorage schema v1, max 20; compare hash adds `cmp`; v3 intentionally unsupported |
 | Runtime HTTP API / routes / caching | `serve_from_db.py` (`RuntimeState`) → `serve_routes.py` → `frontend/src/runtime_contract.js` → `tests/test_server_behavior.py`, `tests/test_serve_routes.py` | precompute |
 | Schema change | §7 "Schema change" list → `db_postgis/migrations/versions/` (head `000024`) → `tests/test_db_constraint_migration.py`, `scripts/db_integrity_check.py` | frontend unless surfaced |
 | OSM raw import / importer rules | `local_osm_import/*` → `osm2pgsql_livability.lua` → `config.py` (`IMPORTER_CONFIG_VERSION`) → `db_postgis/{reads,writes}.py` (`legacy_v3_amenity_category`) → `tests/test_osm_import_handling.py`, `tests/test_local_osm_rules.py` | transit, frontend |
@@ -81,10 +84,10 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 |---|---|
 | `build_config_hashes`, `geo_hash`, `reach_hash`, `score_hash`, `render_hash`, `config_hash`, `build_key` | `config.py` |
 | `importer_config_hash`, `transit_config_hash`, `current_normalization_scope_hash`, `package_snapshot` | `config.py` |
-| `IMPORTER_CONFIG_VERSION` = `"2026-10-10-daily-access-v4-import-1"` (l.56), `SCORING_MODEL_VERSION` = `"v3-gtfs-only-transport-rail-proximity-2026-09-25"` (l.453) | `config.py` |
+| `IMPORTER_CONFIG_VERSION` = `"2026-11-27-daily-access-v4-context-2"`; `SCORING_MODEL_VERSION` stays v3; v4 `DAILY_ACCESS_SCORE_MODEL_VERSION` = 3 | `config.py` |
 | `TAGS`, `CAPS`, `WALK_RADIUS_M`, `TRANSIT_ACCESS_WALK_RADIUS_M`, `TRANSIT_EGRESS_WALK_RADIUS_M` | `config.py` |
 | `TRANSIT_REALITY_ALGO_VERSION` (10), `TRANSIT_ROUTE_NETWORK_ALGO_VERSION` (3), `AMENITY_MERGE_ALGO_VERSION` (4), `WALKGRAPH_FORMAT_VERSION` (4) | `config.py` |
-| `FINE_SURFACE_SCHEMA_VERSION` (2), `PMTILES_SCHEMA_VERSION` (14), `GRID_GEOMETRY_SCHEMA_VERSION` (4), `CACHE_SCHEMA_VERSION` (14) | `config.py` |
+| `FINE_SURFACE_SCHEMA_VERSION` (2), `PMTILES_SCHEMA_VERSION` (15), `GRID_GEOMETRY_SCHEMA_VERSION` (4), `CACHE_SCHEMA_VERSION` (14) | `config.py` |
 | `PROTOMAPS_BASEMAPS_COMMIT`, `PROTOMAPS_ASSETS_COMMIT`, `PROTOMAPS_TILE_SCHEMA_MAJOR`, `BASEMAP_FONT_STACKS`, `BASEMAP_CACHE_DIR` | `config.py` |
 | `OSM_EXTRACT_PATH`, `GTFS_DIR`, `BOUNDARIES_DIR`, `ROI_BOUNDARY_PATH`, `NI_BOUNDARY_PATH`, `MAIN_ISLAND_BOUNDARY_PATH`, `CACHE_DIR` | `config.py` |
 | `resolution_for_zoom`, `profile_fine_surface_enabled`, `normalize_build_profile`, `pmtiles_output_path` | `config.py` |
@@ -124,7 +127,9 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 | `BUS_FREQUENCY_TIER_UNITS` | `transit/service.py` |
 | `railway_proximity_hash_for_state`, `build_railway_corridor_materialization`, `compute_railway_proximity_penalties`, `railway_proximity_penalty_for_distance` | `transit/railway_corridors.py` |
 | `parse_maxspeed_kmh`, `road_penalty_for_distance`, `compute_road_proximity_penalties` | `precompute/road_proximity.py` |
-| `RuntimeState`, `LivabilityRequestHandler`, `serve_livability_app` | `serve_from_db.py` |
+| `RuntimeState`, `_runtime_data_provenance`, `LivabilityRequestHandler`, `serve_livability_app` | `serve_from_db.py` |
+| `parseMapUrlState`, `mapPermalink`, `linkedBuildUnavailable` / `buildMetadataView` | `frontend/src/url_state.js` / `frontend/src/build_metadata.js` |
+| `normalizeInspectSnapshot`, `refreshShortlistItems`, `comparisonRows`, `shortlistExport` | `frontend/src/shortlist.js` |
 | route kind table (`ROUTE_*`/kind names: root, export, pmtiles, surface_tile, static, route_asset, api_runtime, api_inspect) | `serve_routes.py` |
 | `ensure_database_ready`, `import_payload_ready`, `raw_import_ready` | `db_postgis/schema.py` |
 | `load_source_amenity_rows`, `load_transport_reality_rows_for_scoring`, `load_transport_reality_points`, `load_road_rows`, `load_landuse_context_rows`, `load_daily_access_source_rows`, `legacy_v3_amenity_category` | `db_postgis/reads.py` |
@@ -150,7 +155,7 @@ AGENTS.md                  always-loaded agent instructions; repo_map.md (this f
 python -m pytest -q tests/test_config.py            # Linux/mac; pytest.ini scopes to tests/
 python -m unittest tests.test_config -v             # unittest equivalent (what CI runs)
 cargo test --manifest-path walkgraph/Cargo.toml     # Rust
-npm test --prefix frontend                          # Node suite (12 files)
+npm test --prefix frontend                          # Node suite (20 files)
 python scripts/sanity_check.py --validate-only      # fixture structure only
 python scripts/sanity_check.py --profile full       # fixture vs live build
 python scripts/db_integrity_check.py                # read-only duplicate/NULL preflight
@@ -224,7 +229,7 @@ Local trap: the repo root contains an **empty directory** named `ireland-and-nor
 |---|---|---|
 | `tests/test_precompute_behavior.py` | 4061 | Reuse `_workflow_kwargs` (~l.227) and `_amenity_data_with_transport` (~l.180); read only the class around your change |
 | `noise_artifacts/ogr_ingest.py` | 2897 | Grep `^def ` or `NOISE_` env names; never read top-to-bottom |
-| `frontend/src/main.js` | 1700 | Bootstrap/map wiring only; UI logic lives in sibling modules |
+| `frontend/src/main.js` | 3011 | Bootstrap/map wiring plus panel/attribution/cell drawer/selection/route/shortlist/compare orchestration; reusable state logic lives in sibling modules |
 | `precompute/phases.py` | 1394 | Jump straight to `phase_*_impl` |
 | `config.py` | 1376 | Grep the symbol; constants only |
 | `serve_from_db.py` | 1310 | Grep `RuntimeState` / route names |
@@ -510,9 +515,10 @@ Also large: `precompute/__init__.py` 492, `precompute/_rows.py` 477, `noise_arti
    -> renders one active vector grid fill+outline pair with a client-side Combined/Shops/Transport/Healthcare/Parks color toggle, recreates layers when the zoom band changes, overzooms z15 source tiles to z19
    -> default-off noise proxy panel on the separate `noise` vector source / `noise_proxy` source-layer, with metric+kind filtering, opacity control, and an explicit grid-proxy caveat
    -> control panel scrolls internally when contents exceed viewport height
+   -> panel-header chevron leaves a 64 px recovery handle; MapLibre attribution tracks the panel edge and wraps source credits into licence chips
    -> separate Transport network card: overview lines/hubs + stops, route/terminus search, stop/hub focus, route selection, exact-pattern deduplication, terminal-grouped variant dropdowns, transfer links, point-only schedule/frequency filters, whole-network Bus/Rail/Tram filters
    -> /?debug-grid=1 reveals a persistent Grid debug card (live source-vs-rendered counts, diagnosis, copyable snapshot)
-   -> clicking transport rows renders all colocated stop rows in one popup; clicking the active grid opens the score breakdown popup via /api/inspect when available
+   -> clicking transport rows renders all colocated stop rows in one compact popup; clicking the active grid opens the desktop-right/mobile-bottom score drawer via /api/inspect when available
 ```
 
 Notes:
@@ -545,7 +551,7 @@ Notes:
 | Coastal cleanup observability | `study_area.py`, `precompute/_rows.py`, `precompute/publish.py` | `clean_coastal_artifacts()` → `summary_json` | `summary_json["coastal_cleanup"]` persists counts, fallback modes, thresholds, sample warnings |
 | PMTiles layer metadata | `precompute/bake_pmtiles.py`, `noise_artifacts/bake.py` | `pmtiles_bake_worker.py`, `fine_vector_pmtiles_worker.py` | None |
 | Basemap | `basemap.py`, `basemap/docker-compose.yml`, `config.PROTOMAPS_*` | `serve_from_db.py` basemap route + `--deployment` check | `static/basemap/` vendored assets, `.livability_cache/basemap/` manifest |
-| Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `render_from_db.py` |
+| Runtime API contract | `serve_from_db.RuntimeState` | `frontend/src/runtime_contract.js`, `frontend/src/main.js` | `data_provenance` is path-free and includes freshness; old manifests are served as `incomplete` |
 | Runtime request logging | `serve_from_db.py`, `serve_routes.py` | `do_GET()` / `do_HEAD()` | Route-aware log lines (method, path, route, status, duration, bytes, disconnect hints) |
 | Frontend source | `frontend/src/` | `static/dist/` after build | `static/dist/*` (checked in) |
 | Progress / ETA behavior | `progress_tracker.py` | `precompute/workflow.py`, `precompute/__init__.py` | `.livability_cache/precompute_timing_stats.json` |
@@ -678,6 +684,7 @@ Notes:
 #### `network/loader.py`
 
 - Purpose: loads a walkgraph graph index from disk (`load_walk_graph_index`, `WalkGraphIndex`). (Confirmed)
+- `run_walkgraph_build` pins Rust `TEMP`/`TMP` scratch to the writable graph-cache parent. This avoids Windows managed-terminal ACL failures in the user temp directory; stderr is streamed through the supplied progress callback. (Confirmed, 2026-11-27)
 - Test: `tests/test_network_loader.py`.
 
 #### `precompute/amenity_clusters.py`
@@ -716,16 +723,16 @@ Notes:
 - `daily-access-attach`: cells `(f64 x, f64 y, u8 flags)` + optional `u32` group → `entry_flags.bin` u8, `group_offsets.bin` u64, `group_nodes.bin` u32 (endpoint nodes each group/shard needs), `origins.bin`. Entries are never stored. (Confirmed)
 - `daily-access-objects`: 32-byte object records (`kind u16, flags u8, label u32, x, y, first_ring, ring_count`; rings in `ring_offsets.bin`/`ring_vertices.bin`) → `seeds_<kind index>.bin` (min offset per `(node,label)`) + `reasons.bin` (0 attached, 1 outside mask, 2 no edge within 250 m, 3 no land connector). Kind index = position in `daily_access_native.ALL_KINDS`. (Confirmed)
 - `daily-access-reach`: unchanged (JSON list of kinds, sequential). (Confirmed)
-- `daily-access-score`: one block of cells + reach rows of the block's nodes only + objects near the block (recomputed same-edge pieces) + `park_intervals.bin` + per-cell `f32` penalties → `network_status` u8, `total` u16, `components` u16×4, `penalties` u16×2, `service_access` u16×6 (65535 outside the mask). No `origin_node`. Same-edge pieces are skipped only when they cannot enter a kind's top-k (exact). (Confirmed)
+- `daily-access-score`: block + reach rows + same-edge objects + park intervals + road/rail and context inputs → status u8, total u16, components u16×4, penalties u16×5, bonuses u16×2, access u16×6, nearest rail/tram labels/distances. `daily_access_contract.py` defines dependency-free named channels; Rust validates their schema. Same-edge pruning stays exact. (Confirmed, 2026-11-27)
 - Parity (`tests/test_daily_access_native.py`, 2 304 synthetic cells with long edges, footprints, an in-park edge, a bay and penalties): zero differences in status, reach codes, ids, access, components, penalties and totals. Tolerances in `PARITY_LIMITS` (0.1 m step, 0.0005 access, 0.02 component, 0.03 total). Real data (`scripts/daily_access_verify_shards.py --profile test`, 2026-10-23): 207 Cork cells incl. 7 control points, zero mismatches, label table equal to the reference (~5 min; the reference uses the same exact same-edge top-k pruning as Rust, without it the run did not finish in 49 min). Since 2026-10-27 the script verifies one published build key and its pinned source identities without refreshing GTFS; sampling is deterministic per shard and O(shards + sample) memory instead of one tuple per national land cell. (Confirmed; the new verifier has not yet been rerun on national real data.)
 
 #### `precompute/daily_access_build.py` (v4 build driver)
 
 - `python main.py daily-access --profile X [--force] [--allow-missing-transport] [--publish]`. `resolve_build_context` is used by build/publish. Verification deliberately does **not** call it: `precompute.daily_access_verify.load_verification_snapshot` resolves an explicit/latest published v4 build and its pinned identities without rebuilding transit reality. (Confirmed)
-- The driver builds separate walk and bike graph/shell/reach/score tiers. Bike uses the Rust `bike` graph profile, 200 m/min and zero-contribution cutoffs of 4 km (ordinary needs), 5 km (green), and 2 km (transport). Bike tier failure is fatal and publish requires aligned complete walk/bike shards. Walk tier payloads and hashes retain their previous shape for cache reuse. (Confirmed, 2026-11-27)
+- The driver builds separate walk and bike tiers. Bike uses the Rust `bike` profile, 200 m/min and cutoffs 4 km (ordinary), 5 km (green), 2 km (transport). Context model v3 uses reach format v4 and score format v3; graph/shell geometry is reusable, old reach/score formats require rebuild. Walk score shards hold the shared context artifact and walking bonuses; bike reuses them. Publish requires complete aligned tiers. (Confirmed, 2026-11-27)
 - Keys: shell ← geo hash + graph + mask identity (sha of the mask WKB) + `daily_access_geometry_params` + shell version; reach ← shell + inputs (import, transit reality, Overture signature) + geometry + classification + reach version; score ← reach + `daily_access_score_params` (model name/version, weights, curves) + `penalty_params` + score version. `tier_problems` validates only the versions relevant to that tier, so a reach/score format bump does not invalidate geometry-only shell. Weights/curves change only the score key. (Confirmed)
-- Tiers (`manifest.json` `building` → `complete`, model/versions/profile/resolution/quantization/mask identity/bounds/losses): shell/score store per-shard sha256 `shard_files`; reach v3 stores recursive `artifact_files`. `shell_<key>/shards/<id>.npz` contains `land_area_m2`, `valid_land_mask`, `origin_x/y`, flags and `used_nodes`; `reach_<key>/` contains `origins.npy`, active-kind distance u16/label u32 arrays, `kinds.json`, `labels.json`, and `objects/*.bin`; `score_<key>/shards/<id>.npz` contains total/components/penalties/access/status. `surface_tier_problems` checks complete shell/score inventories, links/common identity, checksums, fields, dtypes, dimensions and origins. `reach_tier_problems` checks its exact recursive inventory/checksums, required files, active kinds, array dtype/shape/count contracts and binary record sizes. Build reuse, verifier and publish reject either kind of corruption. (Confirmed, 2026-10-27)
-- Scoring runs in blocks of `DAILY_ACCESS_SCORE_BLOCK_CELLS` (1 M) cells; reach arrays are memory-mapped and only the block's node rows are copied out. Penalties: `CellPenalties` (`RoadPenaltyField` / `RailwayPenaltyField`, unchanged formulas) at the cell origins, batched. Zero usable GTFS stops aborts unless `--allow-missing-transport` (`transport_gate`). (Confirmed)
+- Tiers use complete manifests and checksums. Reach format v4 stores origins, per-kind distances/labels, source label metadata and native objects. Score format v3 stores components, five penalties, two bonuses, access/status; walk shards additionally hold the shared context artifact and diagnostics. Bike references its walk score key instead of duplicating that artifact. Publish validates the common context source key, named schema, paired shapes, inventories and checksums. (Confirmed, 2026-11-27)
+- Scoring runs in blocks of `DAILY_ACCESS_SCORE_BLOCK_CELLS` (1 M) cells; reach arrays are memory-mapped and only the block's node rows are copied out. Context preparation reports valid-cell progress, prepares the national land mask, bypasses coastline overlay for fully inland windows, and reuses the 300 m window within a cell. Penalties: `CellPenalties` (`RoadPenaltyField` / `RailwayPenaltyField`, unchanged formulas) at the cell origins, batched. Zero usable GTFS stops aborts unless `--allow-missing-transport` (`transport_gate`). (Confirmed, 2026-11-27)
 - Geometry v2 runs (2026-10-23, 16 GB host): `test` (Cork, 1 shard, 25 968 land cells, 499 without network) ~70 s of compute after a 167 s transit rebuild, Python peak 2.2 GiB. National `dev`: 269 shards, 33.50 M land cells (24.58 M ok, 8.92 M no walking network), 10.09 M reach origins; shell 1 259 s, objects+green 278 s, reach 433 s, score 1 135 s (52 min total); peak Python 2.4 GiB, `daily-access-score` 2.55, `-attach` 2.06, `-reach` 1.74, `-objects` 1.38 GiB; caches reach 2.25 GB, score 63 MB, shell 24 MB; losses <1 % for shops, medical and GTFS (nta 0.42 %, translink 0.27 %), green 48 % (`unknown_access`: parks no walk edge enters). Cork control cells are identical in `test` and `dev` (bbox-independent). Islands (Achill, Cobh/Great Island) are outside the main-island mask. (Confirmed)
 - Park approaches subdivide polygons/outlines (`ST_Subdivide` 256) before joining edges: the un-subdivided national query ran >12 h, the subdivided one ~5 min. (Confirmed)
 - Switching profiles rebuilds transit reality (v3 behaviour: only the latest reality is kept), which changes the reach/score keys of the other profile. (Confirmed)
@@ -953,8 +960,11 @@ Notes:
 #### `frontend/src/` modules
 
 - `main.js` — bootstrap and MapLibre orchestration (large; read in sections). (Confirmed)
+- Grid-cell inspection is not a MapLibre popup: `main.js` renders `inspectPopupHtml` / `coarseGridPopupHtml` into `#inspect-drawer`, mutually exclusive with Compare. `cell_highlight.js` groups loaded source fragments by `cell_id` and takes their convex hull before the geometry is copied to `linked-cell-highlight`; this avoids tile-clipped half-cell outlines. The result keeps a white halo, magenta outline and fill until close/reselection. Desktop uses a right drawer; ≤820 px uses a bottom sheet. `ensureInspectDrawerElements` reconstructs the drawer when a stale HTML shell is paired with a new bundle. POI, transport, service-desert and noise details remain compact map popups. (Confirmed, 2026-11-27)
+- The main panel owns its chevron toggle. `ensurePanelHeaderActions()` also migrates the old external-button DOM held by an already-running server into the header at runtime. When collapsed, the translated panel becomes transparent and click-through so only its reachable chevron remains instead of a full-height white strip. `.maplibregl-ctrl-bottom-left` follows the chevron edge in both states (and sits above the collapsed mobile sheet); its closed info control is a compact 28 px button, the expanded button stays on the padded right edge, and attribution HTML uses `.map-attribution-item` spans for controlled wrapping. Linked-cell markers move from the raw permalink coordinate to the loaded cell geometry's bounds centre and render as a compact magenta diamond with a short pulse. (Confirmed, 2026-11-27)
 - `runtime_contract.js` — parses `/api/runtime`, maps score-layer labels/expressions, defines active fill/outline grid layers, lifecycle rebuild decisions, visibility plans, transport styling priority. (Confirmed)
 - `route_network.js` — route-index normalization/search, route-key parsing, overview/focus filters, GeoJSON merging with exact geometry+stop-pattern deduplication, and terminal grouping for direction controls. `main.js` owns overview → stop/hub → route → direction state, grouped variant dropdown rendering, and immutable asset loading. (Confirmed, 2026-11-26)
+- `shortlist.js` — versioned localStorage validation, exact-v4 snapshot normalization, build refresh/deltas, max-two selection, comparison rows and path-free JSON export. `url_state.js` owns the `v/m/c/b/cell/cmp` hash contract; `build_metadata.js` formats public provenance. (Confirmed, 2026-11-27)
 - `api_client.js` — fetch wrappers with cold-start timeout + retry. (Confirmed)
 - `amenity_filters.js`, `transport_filters.js`, `transport_reality_popup.js`, `noise_filters.js`, `landuse_filters.js` — filter/option logic per layer, each with a matching `*.test.js`. (Confirmed)
 - `click_priority.js` — popup/action priority resolver (transport stop → transfer hub → route line → amenity → service desert → noise → fine inspect → coarse grid). (Confirmed)
@@ -1223,6 +1233,8 @@ tests/test_basemap.py
 
 ## 9. Risky / Misleading Areas
 
+- **V4 context requires a fresh importer version with raw `nuisance`.** It is independent of amenity category; an empty nuisance table is valid, a missing table is not. Station auxiliary kinds have zero ordinary transport quality. Their nearest labels are chosen BEFORE applying the nonmonotonic sweet-spot curve. Bike and mode-aware reuse walking bonuses once. See `docs/DAILY_ACCESS_CONTEXT.md`.
+
 - **Two `network` modules.** Root `network/` is a package holding `load_walk_graph_index`; `precompute/network.py` holds reachability math. `from network import …` resolves to the package.
 - **Empty decoy directory** at the repo root named `ireland-and-northern-ireland-latest.osm.pbf/`. The real extract is `osm/ireland-and-northern-ireland-latest.osm.pbf`.
 - **`import` needs Docker** because `_handle_import` calls `basemap.build_if_stale()`. On a Docker-less host, use `precompute --auto-refresh-import` and run the pipeline without `import`.
@@ -1271,8 +1283,17 @@ tests/test_basemap.py
 
 ## 10. Tests and Validation Signals
 
+2026-11-27 context-model validation: targeted Python tests, Rust daily-access tests,
+frontend tests and frontend/release walkgraph builds passed. Real `test` profile
+walk context/score completed in 259.9 s for 25,968 land cells with valid-cell
+progress; bike tiers completed in 143.6 s. Publication completed in 320.4 s and
+switched active build `8f93661979b4`; runtime reports `daily-access-v4`, exact
+inspect and fine resolutions through 50 m. Real-data shard verification and the
+delta report remain pending.
+
 | Test file | What it covers |
 |---|---|
+| `tests/test_daily_access_context.py` | station/corridor curves, Python/Rust nearest-station parity, missing feed geometry, prepared-land/progress path, coverage/overlap/coast denominators, venue dedupe/lifecycle, pitch qualification and cap; real-data report: `scripts/daily_access_context_report.py` |
 | `tests/test_config.py` | config hash stability, env parsing, schema-version invalidation |
 | `tests/test_main_cli.py` | CLI dispatch for import/basemap/gtfs/transit/precompute/serve, profile forwarding, `--allow-missing-transport` |
 | `tests/test_precompute_behavior.py` | phase sequencing, cache/hash behavior, service-desert publish summaries, **zero-transport publish gate + allow flag** (4.0k lines; use its helpers) |
@@ -1322,7 +1343,12 @@ tests/test_basemap.py
 | `tests/test_fetch_datasets.py` | dataset source order (env → mirror → official, `--refresh` flips refreshable ones), reuse, zip validation fallback, main-island extraction, failure exit |
 | `tests/test_noise_accuracy_mode.py` | accuracy-mode precedence: CLI > env > profile default (`full` → accurate) |
 | `frontend/src/runtime_contract.test.js` | runtime parsing, score-layer mapping, noise source wiring, grid layer definitions, lifecycle rebuilds, transport styling priority |
-| `frontend/src/grid_debug.test.js`, `grid_popup.test.js` | debug card + score popup rendering |
+| `frontend/src/grid_debug.test.js`, `grid_popup.test.js` | debug card + score-breakdown HTML rendering |
+| `frontend/src/inspect_drawer.test.js` | cell-detail drawer DOM/wiring, selected-cell halo lifecycle, close behavior and desktop/mobile layout contract |
+| `frontend/src/cell_highlight.test.js` | complete-cell reconstruction from same-`cell_id` MVT fragments and convex-hull edge cleanup |
+| `frontend/src/panel_attribution.test.js` | in-panel toggle placement, recovery handle, moving attribution control and wrapped attribution-item markup |
+| `frontend/src/shortlist.test.js`, `url_state.test.js`, `build_metadata.test.js` | shortlist persistence/refresh/export/compare math, shared-pair hash parsing, provenance formatting |
+| `frontend/src/permalink_highlight.test.js` | v3/v4 linked-cell camera, rendered polygon outline, pulse animation and reduced-motion fallback |
 | `frontend/src/map_source_guard.test.js` | source guard behavior (no `isSourceLoaded()` errors) |
 | `frontend/src/transport_filters.test.js`, `transport_reality_popup.test.js` | weekly bus tiers, exact rail/tram matching, exception-only logic, multi-row popups |
 | `frontend/src/route_network.test.js` | route-key parsing, route index normalization, terminus search, mode/focus filters, GeoJSON merge |

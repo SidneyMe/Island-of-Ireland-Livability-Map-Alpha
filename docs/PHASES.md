@@ -284,7 +284,7 @@ The original v1 model counted features by presence. A corner shop scored the sam
 
 **Still open:** bike stress/slope/surface/quality and a GTFS-aware transit-chained model.
 
-### Land-use context layer [design-needed]
+### ~~Land-use context layer~~ [Daily Access v4]
 
 **What:** Residential / commercial / industrial classification driving concentration penalties and green-buffer bonuses.
 
@@ -304,7 +304,7 @@ The original v1 model counted features by presence. A corner shop scored the sam
 
 - OSM `landuse` polygons for `residential`, `commercial`, `industrial`, `retail`, `farmland`, and `forest` are now imported, exposed in runtime metadata, and baked as a separate `landuse_context` PMTiles layer from z5 through z11.
 - The frontend exposes a default-off contextual overlay with class filters, matched colour swatches, opacity control, and a note that the layer is contextual only.
-- The overlay is not yet used in livability scoring: concentration penalties, industrial penalties, and green-buffer bonuses remain future work pending the design note.
+- Daily Access v4 now uses land-use coverage for an industrial penalty (up to 8 points), a residential green-buffer bonus (up to 2), venue concentration, and conditional pitch noise. Unknown coverage is neutral for context-dependent effects. See [the implemented design](DAILY_ACCESS_CONTEXT.md). V3 scoring remains unchanged.
 
 ---
 
@@ -354,7 +354,7 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 - **Rail:** strong bonus for rail-bearing stops.
 - **High-frequency bus:** >=4 departures per hour during the day.
 
-### Rail proximity sweet spot
+### ~~Rail proximity sweet spot~~ [Daily Access v4]
 
 **What:** Reward walkable access to rail/tram stations, but suppress the "right beside the tracks" case.
 
@@ -375,7 +375,7 @@ Builds on Phase 1. Public GTFS departures are loaded, school-only service is exc
 **Done so far:**
 
 - The track-adjacent damping half of the curve is implemented through the Phase 4 GTFS-shapes-backed railway proximity penalty and is threaded through grid scoring, fine-surface inspection, PMTiles, and popup breakdowns.
-- The station-access plateau/bonus around a comfortable walking distance is not implemented yet, so this item remains partial.
+- Daily Access v4 adds the nearest reachable rail/tram station bonus using walking distance: up to 3/2 points, plateau at 300–500 m, damped within 200 m of active corridors. Bike and mode-aware reuse the walking bonus once. Missing feed corridor geometry disables its station bonus with a warning. See [the implemented design](DAILY_ACCESS_CONTEXT.md).
 
 ### ~~Rural bus minimal weight~~ Deferred
 
@@ -470,7 +470,9 @@ The implementation below is the earlier design note. The landed code now uses GT
 - Static penalty for cells within a radius of any active airport (`aeroway=aerodrome` with scheduled commercial service).
 - Flight-path overlay requires external data (IAA / NATS published approach paths). Start with airport-radius only; add flight paths when a data source is confirmed available under a compatible license.
 
-### Over-concentration penalty [design-needed]
+### ~~Over-concentration penalty~~ [Daily Access v4]
+
+Implemented with residential-aware nightlife/retail densities, operational-source filtering and evidence-based venue deduplication. Maximum 12 points; industrial/concentration/pitch penalties share a proportional 20-point cap. See [the implemented design](DAILY_ACCESS_CONTEXT.md).
 
 **What:** Too much nightlife, fast food, or retail relative to residential context becomes a penalty, not a bonus.
 
@@ -485,7 +487,9 @@ The implementation below is the earlier design note. The landed code now uses GT
 
 - Thresholds and neighbourhood window size. Over-concentration is context-dependent and the model needs a written design note before implementation — this is the single easiest place to produce nonsense scores.
 
-### Conditional pitch noise [design-needed]
+### ~~Conditional pitch noise~~ [Daily Access v4]
+
+Implemented for lit pitches or pitches in confidently mapped residential context. Full penalty within 25 m, fading to zero at 150 m; strongest pitch only, up to 4 points when lit or 2 for residential qualification. See [the implemented design](DAILY_ACCESS_CONTEXT.md).
 
 **What:** Sports pitches only count as a noise source when they are lit (floodlit = evening use) or embedded in a dense residential context.
 
@@ -612,8 +616,9 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 
 - Coarse `grid` tiles now carry per-category raw counts, cluster counts, effective units, component scores, and `total_score` for popup inspection.
 - `/api/inspect` returns the exact 50 m fine-surface breakdown for a clicked location, including component scores, raw counts, cluster counts, effective units, visible resolution, and land coverage.
-- The frontend now opens a click popup using coarse tile properties when that is enough and falls back to `/api/inspect` for exact fine-surface details.
-- This item is functionally done even though the UI is currently a popup rather than a dedicated side panel, and it does not yet list individual top amenity drivers.
+- The frontend opens cell details in a dedicated scrollable right drawer (mobile bottom sheet), using coarse tile properties when that is enough and `/api/inspect` for exact fine-surface details. Selection reconstructs the complete cell by `cell_id` from all loaded MVT fragments before drawing its white halo, magenta outline and light fill, so tile boundaries cannot produce half-cell rectangles. Long v4 breakdowns use compact two-column metric/access cards instead of a narrow map popup.
+- The main-panel toggle lives in the panel header and leaves a visible chevron handle when collapsed. Map attribution follows the animated panel edge (or rises above the mobile sheet) and expands as wrapped per-source licence chips instead of one long separator-delimited line.
+- The panel does not yet list individual top amenity drivers.
 
 ### ~~Operational overlay controls and route network visualization~~
 
@@ -668,24 +673,37 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - Client-side radio controls in the Grid section switch the active fill color between combined, shops, transport, healthcare, and parks.
 - The selected layer survives grid-resolution rebuilds and is stored session-locally for the current browser tab.
 
-### Data freshness indicator
+### ~~Data freshness indicator~~
 
 **What:** Visible label showing the OSM extract date currently in use.
 
 **How:**
 
-- Read from the precompute manifest written by the automated-refresh job in Phase 0.
-- Surface in the site footer and in the score breakdown panel.
+- Read from the immutable build/import/transit manifests written by the refresh and publish jobs.
+- Surface in the map footer and in score popups without exposing local paths or cache directories.
 
-### Shareable permalinks
+**Done:**
 
-**What:** URL encodes viewport and weight sliders so a specific view can be shared or bookmarked.
+- Daily Access v4 publication records OSM import/extract fingerprints and import completion, GTFS analysis date/feed fingerprints, model version, and PMTiles schema version. The activation gate rejects new v4 builds without that provenance.
+- `/api/runtime` exposes a path-free `data_provenance` payload with build timestamps and `current`, `stale`, or `incomplete` status. Current thresholds are 30 days for OSM import, 14 days for GTFS snapshot, and 45 days for the build.
+- The map footer shows OSM/GTFS dates, feed labels, model version, build key, and freshness warnings. Grid score popups identify the model/build used for the result.
+
+### ~~Shareable permalinks~~
+
+**What:** URL encodes the viewport, score view, immutable build, and optional inspected cell so a specific result can be shared or bookmarked. Future weight sliders can extend the same contract.
 
 **How:**
 
 - Hash fragment (not query string) so it never hits the server.
-- Encode lat/lon/zoom plus the active category layer plus, eventually, the weight vector.
+- Encode lat/lon/zoom, Walk/Bike/Mode-aware selection, active category, immutable build key, and optional inspect-cell coordinates.
 - Restore on page load.
+
+**Done:**
+
+- The frontend owns a validated hash contract (`v`, `m`, `c`, `b`, `cell`) and updates it with `history.replaceState` on map movement or score-view changes.
+- Loading a link restores the viewport, mode, category, and cell-details drawer. Invalid values fall back safely; unavailable build keys show an explicit current-build fallback instead of silently pretending the result is identical.
+- The cell-details drawer provides a copy-link action, and URL updates happen on `moveend` so dragging does not flood browser history.
+- Opening a single-cell link centres at least at z16 in both v3 and v4, runs a three-pulse high-contrast highlight, and outlines the exact rendered grid polygon until the user clicks elsewhere; reduced-motion users get a static ring.
 
 ### User-adjustable weight sliders
 
@@ -698,7 +716,7 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - Permalink encoding includes the weight vector.
 - Saved to local storage so the user's preferred weights persist across sessions.
 
-### Shortlist mode
+### ~~Shortlist mode~~ [Daily Access v4]
 
 **What:** Save multiple locations and view their breakdowns in one panel.
 
@@ -708,7 +726,14 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - Side panel lists all shortlisted locations with their component scores.
 - Export as JSON for users who want to keep the list externally.
 
-### Compare mode
+**Done:**
+
+- Exact v4 inspect snapshots for Walk, Bike and Mode-aware are stored in versioned local storage, capped at 20 canonical cells and deduplicated by `cell_id`.
+- The cell-details drawer can save a cell; the control panel supports selection, rename, accessible reordering, removal, retry, clear-all and path-free JSON export. Numbered GeoJSON markers follow the stored order.
+- A build change refreshes saved cells with three concurrent inspect requests, retains one previous snapshot for score deltas, and leaves failed refreshes visible as stale with retry.
+- Legacy v3 deliberately hides these controls because its coarse payload is not comparable with the exact v4 contract.
+
+### ~~Compare mode~~ [Daily Access v4]
 
 **What:** Pin two locations side by side with their score breakdowns.
 
@@ -717,6 +742,13 @@ Improvements to the local frontend. Most of these are also prerequisites for the
 - Two-up panel layout.
 - Highlight differences in component scores with colour-coded bars.
 - Share link encodes both pins.
+
+**Done:**
+
+- Any two shortlist entries open in a responsive right-side/mobile-bottom drawer following the active Walk/Bike/Mode-aware selection.
+- Totals, categories, bonuses and signed penalties show both values, `B − A`, relative bars and correct better/worse treatment for penalties.
+- The permalink contract adds `cmp=<lat1>,<lon1>;<lat2>,<lon2>`. Shared pairs load as temporary comparisons and can be saved explicitly without silently changing local storage.
+- Drawer keyboard focus is contained while open; Escape closes it and returns focus to the invoking control.
 
 ### Isochrone overlay
 

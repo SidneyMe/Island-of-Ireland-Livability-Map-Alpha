@@ -498,7 +498,7 @@ Builds on the service reality layer above. Bus-only transport scoring now uses s
 - [x] Cap low-frequency stops through the 1-5 `transport_score_units` scale so a single rare-service stop cannot match frequent urban transit access.
 - [x] Use bus weekday daytime headway as the scoring driver for bus-only stops, with no rural/urban distinction.
 - [x] Add explicit rail/tram mode tiers without changing the bus frequency model.
-- [ ] Rail proximity sweet spot: reward comfortable station access, but keep the immediate track-adjacent zone damped for noise/dust.
+- [x] Rail proximity sweet spot (Daily Access v4): walking station access bonus with a 300–500 m plateau and active-corridor damping; shared by walk, bike and mode-aware.
 
 ### Noise and nuisance penalty layer
 
@@ -508,10 +508,10 @@ A display-only official-derived noise proxy overlay is now merged. It is intenti
 - [x] Expose noise runtime metadata and frontend controls: hidden-by-default overlay toggle, metric/source controls, mapped-count labels, opacity slider, and explicit caveat that the layer is not measured point noise.
 - [ ] Convert the official-derived noise proxy into a calibrated scoring penalty.
 - [x] Railway track proximity (the tracks themselves, not stations).
-- [ ] Motorway and major-road noise.
+- [x] Motorway and major-road proximity penalty.
 - [ ] Flight paths and airport proximity.
-- [ ] Over-concentration of nightlife, fast food, and retail relative to residential context.
-- [ ] Conditional pitch noise — only when lit or embedded in dense residential context.
+- [x] Over-concentration of nightlife, fast food, and retail relative to residential context (v4).
+- [x] Conditional pitch noise — only when lit or embedded in confidently mapped residential context (v4).
 
 ### New scoring categories and modifiers
 
@@ -523,7 +523,7 @@ A display-only official-derived noise proxy overlay is now merged. It is intenti
 - [ ] Waterfront pleasantness bonus for paths and parks adjacent to water.
 - [ ] Community and public-realm anchors (community centres, libraries, benches, picnic tables).
 - [ ] Dual-role nightlife features (pubs, bars, fast food) that add value in moderation and penalize over-concentration.
-- [ ] Land-use context layer (residential / commercial / industrial) driving concentration penalties and green-buffer bonuses.
+- [x] Land-use context (v4): industrial penalty, residential green-buffer bonus, concentration and pitch context. [Model, parameters and validation](docs/DAILY_ACCESS_CONTEXT.md).
 
 ### Scoring mechanics
 
@@ -533,17 +533,17 @@ A display-only official-derived noise proxy overlay is now merged. It is intenti
 
 ### UI and features
 
-- [x] **Per-cell score breakdowns on click** - click popups now show total score plus per-category raw counts, cluster counts, effective units, and component scores; fine-surface clicks use `/api/inspect` for exact values.
+- [x] **Per-cell score breakdowns on click** — cell details open in a scrollable desktop right drawer/mobile bottom sheet instead of an oversized map popup; the selected grid polygon keeps a high-contrast halo/outline, and Daily Access v4 uses compact two-column `/api/inspect` values.
 - [x] **Operational overlay controls** - the separate Transport network card controls route lines and stop points, with route search/focus, direction selection, transfer links, nested point schedule/frequency filters, and whole-network mode filters; service deserts and official-derived noise remain independent overlays.
 - [x] **Grid debug mode** - `/?debug-grid=1` reveals source/rendered counts, active layer/filter state, diagnosis text, and a copyable debug snapshot without occupying the normal status pill.
 - [ ] **User-adjustable weight sliders** — let users score for their own priorities rather than the built-in defaults.
 - [x] **Layer toggles** — view the map by a single category instead of only the combined score.
-- [ ] **Shortlist mode** — save multiple locations and view their breakdowns in one panel.
-- [ ] **Compare mode** — pin two locations side by side with their score breakdowns.
+- [x] **Shortlist mode** — save up to 20 Daily Access v4 cells locally, rename/reorder them, refresh them across builds, and export a path-free JSON snapshot.
+- [x] **Compare mode** — compare any two saved or shared locations in a responsive drawer with signed component/modifier deltas and build-to-build score changes.
 - [ ] **Isochrone overlay** — click anywhere, draw the reachable polygon at 5 / 10 / 15 min on foot.
 - [ ] **"Is this wrong?" feedback loop** — direct links into OpenStreetMap to edit the relevant feature, turning corrections into upstream contributions.
-- [ ] **Shareable permalinks** — URL encodes viewport and weight vector.
-- [ ] **Data freshness indicator** — surface the OSM extract date in the UI.
+- [x] **Shareable permalinks** — the hash restores viewport, Walk/Bike/Mode-aware selection, category, build key, and an optional inspect cell; linked cells are centred in every model, visibly pulse, and receive an exact highlighted grid outline.
+- [x] **Data freshness indicator** — `/api/runtime` and the map footer expose path-free build, OSM, GTFS, model, and freshness metadata; score popups identify their immutable build.
 
 ### Infrastructure
 
@@ -572,7 +572,7 @@ The hosted demo is the project's public moment, and it deliberately sits at the 
 - **Republic of Ireland county boundaries** — Tailte Éireann (formerly Ordnance Survey Ireland), National Statutory Boundaries 2024, licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 - **Northern Ireland outline** — OSNI Open Data, Largescale Boundaries. © Crown copyright, licensed under the [Open Government Licence](https://www.nationalarchives.gov.uk/doc/open-government-licence/version/3/).
 
-The map UI shows these credits in its attribution control: the livability layer carries the OSM, Overture, transit, and boundary credits, and the noise overlay carries the EPA and DAERA credits, so attribution remains visible even without the self-hosted basemap.
+The map UI shows these credits in a compact attribution control that follows the main panel edge and expands into wrapped licence chips. The livability layer carries the OSM, Overture, transit, and boundary credits, and the noise overlay carries the EPA and DAERA credits, so attribution remains visible even without the self-hosted basemap.
 - **Basemap rendering** — [MapLibre GL](https://maplibre.org/) on the frontend;
   the livability layers and an optional self-hosted Protomaps background are
   served locally from PMTiles archives. See [self-hosted basemap setup](docs/BASEMAP.md).
