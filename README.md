@@ -449,7 +449,7 @@ boundaries/*.geojson
 ## Known Limitations
 
 - Scoring weights and caps are hand-picked, not calibrated against any ground-truth livability index.
-- The 500 m walk radius is a single fixed value — no mode-aware scoring (cycling, transit-chained trips).
+- Daily Access v4 supports independent walk and length-only legal-bike reach plus a diminishing-return mode-aware blend. It does not yet model cycling stress/slope/quality or transit-chained trips.
 - Healthcare has type tiers, but not capacity, catchment, waiting-time, or quality weighting.
 - Park scoring uses size tiers, but not park quality, entrance accessibility, lighting, or facility condition.
 - Transport scoring uses scheduled GTFS frequency, not live reliability, cancellations, crowding, or fares.
@@ -528,7 +528,8 @@ A display-only official-derived noise proxy overlay is now merged. It is intenti
 ### Scoring mechanics
 
 - [x] Distance-decay scoring to replace the binary in-range / out-of-range cutoff.
-- [ ] Mode-aware scoring: cycling, transit-chained trips, and variable walk radii instead of a single fixed 500 m.
+- [x] Walk/bike mode-aware Daily Access v4 scoring with per-mode minute thresholds and a diminishing-return blend.
+- [ ] Transit-chained reach and bike stress/slope/quality modelling.
 
 ### UI and features
 

@@ -673,6 +673,15 @@ DAILY_ACCESS_REACH_BUFFER_M = 2_000.0
 # --- Daily access score (v4) reach + scoring --------------------------------
 # Reference implementation: precompute/daily_access_{snap,reach,score,reference}.py
 DAILY_ACCESS_WALK_SPEED_M_PER_MIN = 80.0
+DAILY_ACCESS_BIKE_SPEED_M_PER_MIN = 200.0
+DAILY_ACCESS_MODES = ("walk", "bike")
+DAILY_ACCESS_MODE_SPEED_M_PER_MIN = {
+    "walk": DAILY_ACCESS_WALK_SPEED_M_PER_MIN,
+    "bike": DAILY_ACCESS_BIKE_SPEED_M_PER_MIN,
+}
+DAILY_ACCESS_DEFAULT_MODE = "walk"
+DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS = 0.25
+DAILY_ACCESS_MODE_AWARE_VERSION = 1
 DAILY_ACCESS_SNAP_RADIUS_M = 250.0
 DAILY_ACCESS_LAND_BAND_M = 250.0
 DAILY_ACCESS_TOP_K = 3
@@ -694,6 +703,13 @@ DAILY_ACCESS_HEALTHCARE_MIX = {"primary_care": 0.60, "pharmacy": 0.40}
 DAILY_ACCESS_SEARCH_CUTOFF_M = {
     need: zero_min * DAILY_ACCESS_WALK_SPEED_M_PER_MIN
     for need, (_full_min, zero_min) in DAILY_ACCESS_NEED_THRESHOLDS_MIN.items()
+}
+DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE = {
+    mode: {
+        need: zero_min * speed_m_per_min
+        for need, (_full_min, zero_min) in DAILY_ACCESS_NEED_THRESHOLDS_MIN.items()
+    }
+    for mode, speed_m_per_min in DAILY_ACCESS_MODE_SPEED_M_PER_MIN.items()
 }
 DAILY_ACCESS_DISTANCE_STEP_M = 0.1
 DAILY_ACCESS_DISTANCE_MISSING = 65535
@@ -787,12 +803,15 @@ def daily_access_geometry_params() -> dict[str, Any]:
     }
 
 
-def daily_access_score_params() -> dict[str, Any]:
+def daily_access_score_params(mode: str = DAILY_ACCESS_DEFAULT_MODE) -> dict[str, Any]:
     """Weights and curves of the daily access score (score hash)."""
-    return {
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in DAILY_ACCESS_MODE_SPEED_M_PER_MIN:
+        raise ValueError(f"Unsupported daily access mode: {mode!r}")
+    speed_m_per_min = DAILY_ACCESS_MODE_SPEED_M_PER_MIN[normalized_mode]
+    params = {
         "model": DAILY_ACCESS_SCORE_MODEL,
         "model_version": DAILY_ACCESS_SCORE_MODEL_VERSION,
-        "walk_speed_m_per_min": DAILY_ACCESS_WALK_SPEED_M_PER_MIN,
         "need_thresholds_min": {need: list(value) for need, value in DAILY_ACCESS_NEED_THRESHOLDS_MIN.items()},
         "top3_weights": list(DAILY_ACCESS_TOP3_WEIGHTS),
         "category_max": DAILY_ACCESS_CATEGORY_MAX,
@@ -800,6 +819,34 @@ def daily_access_score_params() -> dict[str, Any]:
         "healthcare_mix": DAILY_ACCESS_HEALTHCARE_MIX,
         "score_step": DAILY_ACCESS_SCORE_STEP,
         "access_step": DAILY_ACCESS_ACCESS_STEP,
+    }
+    if normalized_mode == DAILY_ACCESS_DEFAULT_MODE:
+        # Preserve the v4 walk score hash and its expensive national cache.
+        params["walk_speed_m_per_min"] = speed_m_per_min
+    else:
+        params.update(
+            {
+                "mode": normalized_mode,
+                "speed_m_per_min": speed_m_per_min,
+                "search_cutoff_m": DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[normalized_mode],
+            }
+        )
+    return params
+
+
+def daily_access_mode_aware_params() -> dict[str, Any]:
+    """Published multimode contract; mode scores stay independently cacheable."""
+    return {
+        "version": DAILY_ACCESS_MODE_AWARE_VERSION,
+        "modes": list(DAILY_ACCESS_MODES),
+        "default_mode": DAILY_ACCESS_DEFAULT_MODE,
+        "speed_m_per_min": dict(DAILY_ACCESS_MODE_SPEED_M_PER_MIN),
+        "secondary_bonus": DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS,
+        "formula": "best + secondary_bonus * second * (1 - best)",
+        "bike_graph_profile": "bike",
+        "bike_network_model": "legally-accessible-length-only",
+        "bike_to_transport": True,
+        "transit_chained": False,
     }
 
 

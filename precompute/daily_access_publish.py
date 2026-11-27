@@ -27,6 +27,8 @@ from shapely.ops import transform
 from config import (
     CANONICAL_BASE_RESOLUTION_M,
     DAILY_ACCESS_NEEDS,
+    DAILY_ACCESS_DEFAULT_MODE,
+    DAILY_ACCESS_MODES,
     DAILY_ACCESS_SCORE_MODEL,
     OSM_EXTRACT_PATH,
     noise_pmtiles_output_path,
@@ -34,6 +36,7 @@ from config import (
     SURFACE_SHARD_SIZE_M,
     TO_WGS84,
     build_profile_settings,
+    daily_access_mode_aware_params,
     hash_dict,
     package_snapshot,
     pmtiles_output_path,
@@ -48,7 +51,7 @@ from .daily_access_build import (
     surface_tier_problems,
     transport_gate,
 )
-from .daily_access_runtime import CHANNELS, LEGACY_UNAVAILABLE_FIELDS, DailyAccessSurfaceRuntime
+from .daily_access_runtime import LEGACY_UNAVAILABLE_FIELDS, DailyAccessSurfaceRuntime
 from .daily_access_score import CATEGORIES, PENALTIES
 from .display_layers import DISPLAY_LAYERS_VERSION, prepare_display_layers, select_noise_artifact
 from .grid import build_cell_id
@@ -80,6 +83,40 @@ def check_publishable(context: BuildContext, *, allow_missing_transport: bool) -
         "surface": surface_problems,
         "reach": reach_tier_problems(context.reach_dir, key=context.keys.reach),
     }
+    bike_keys = getattr(context, "bike_keys", None)
+    bike_shell_dir = getattr(context, "bike_shell_dir", None)
+    bike_reach_dir = getattr(context, "bike_reach_dir", None)
+    bike_score_dir = getattr(context, "bike_score_dir", None)
+    if any(
+        value is None
+        for value in (
+            bike_keys,
+            bike_shell_dir,
+            bike_reach_dir,
+            bike_score_dir,
+        )
+    ):
+        problems["bike"] = ["bike build context is incomplete"]
+        bike_shard_ids: list[str] = []
+    else:
+        assert bike_keys is not None
+        assert bike_shell_dir is not None and bike_score_dir is not None
+        assert bike_reach_dir is not None
+        bike_surface_problems, bike_shard_ids = surface_tier_problems(
+            bike_shell_dir,
+            bike_score_dir,
+            shell_key=bike_keys.shell,
+            reach_key=bike_keys.reach,
+            score_key=bike_keys.score,
+        )
+        problems["bike_surface"] = bike_surface_problems
+        problems["bike_reach"] = reach_tier_problems(
+            bike_reach_dir,
+            key=bike_keys.reach,
+            mode="bike",
+        )
+        if bike_shard_ids != shard_ids:
+            problems["bike_alignment"] = ["walk and bike shard inventories differ"]
     problems = {tier: found for tier, found in problems.items() if found}
     if problems:
         raise DailyAccessBuildError(
@@ -89,7 +126,22 @@ def check_publishable(context: BuildContext, *, allow_missing_transport: bool) -
     reach = json.loads((context.reach_dir / "manifest.json").read_text(encoding="utf-8"))
     losses = reach.get("losses") or {}
     warnings = transport_gate(losses, allow_missing_transport=allow_missing_transport) + feed_loss_warnings(losses)
-    return {"shard_ids": shard_ids, "losses": losses, "warnings": warnings}
+    bike_reach = json.loads((bike_reach_dir / "manifest.json").read_text(encoding="utf-8"))
+    bike_losses = bike_reach.get("losses") or {}
+    warnings += [f"bike: {warning}" for warning in feed_loss_warnings(bike_losses)]
+    warnings += [
+        f"bike: {warning}"
+        for warning in transport_gate(
+            bike_losses,
+            allow_missing_transport=allow_missing_transport,
+        )
+    ]
+    return {
+        "shard_ids": shard_ids,
+        "losses": losses,
+        "bike_losses": bike_losses,
+        "warnings": warnings,
+    }
 
 
 def coarse_cells(
@@ -102,7 +154,7 @@ def coarse_cells(
     if SURFACE_SHARD_SIZE_M % int(resolution_m):
         raise DailyAccessBuildError(f"{resolution_m} m does not tile the {SURFACE_SHARD_SIZE_M} m shards")
     shapely.prepare(study_area_metric)
-    channels = ["total", *CATEGORIES, *PENALTIES, *(f"access_{need}" for need in DAILY_ACCESS_NEEDS), "network_coverage"]
+    channels = [*runtime.channels, *runtime.network_coverage_modes]
     cells: list[dict[str, Any]] = []
     cell_area = float(resolution_m) ** 2
     for shard_id in sorted(shard_ids):
@@ -126,6 +178,29 @@ def coarse_cells(
             scores.update({penalty: -value(penalty) for penalty in PENALTIES})
             scores.update({f"access_{need}": value(f"access_{need}") for need in DAILY_ACCESS_NEEDS})
             scores["network_coverage_share"] = value("network_coverage")
+            mode_scores: dict[str, Any] = {}
+            for mode in runtime.available_modes:
+                if mode == "walk":
+                    mode_scores[mode] = {
+                        "total": value("total"),
+                        "components": {category: value(category) for category in CATEGORIES},
+                        "service_access": {
+                            need: value(f"access_{need}") for need in DAILY_ACCESS_NEEDS
+                        },
+                        "network_coverage_share": value("network_coverage"),
+                    }
+                    continue
+                mode_scores[mode] = {
+                    "total": value(f"{mode}_total"),
+                    "components": {
+                        category: value(f"{mode}_{category}") for category in CATEGORIES
+                    },
+                    "service_access": {
+                        need: value(f"{mode}_access_{need}") for need in DAILY_ACCESS_NEEDS
+                    },
+                    "network_coverage_share": value(f"{mode}_network_coverage"),
+                }
+            scores["modes"] = mode_scores
             land_m2 = float(land[row, col])
             cells.append(
                 {
@@ -298,12 +373,20 @@ def publish_daily_access(
     live = context.hashes
     build_key = hash_dict({
         "input_build_key": live.build_key, "model": DAILY_ACCESS_SCORE_MODEL, "score_key": context.keys.score,
+        "bike_score_key": None if context.bike_keys is None else context.bike_keys.score,
+        "mode_aware": daily_access_mode_aware_params(),
         "display_layers_version": DISPLAY_LAYERS_VERSION, "noise_artifact_hash": artifact.artifact_hash if artifact else None,
     })
     staging_config_hash = f"{live.config_hash}{STAGING_SUFFIX}"
     staged = dataclasses.replace(live, build_key=build_key, config_hash=staging_config_hash)
 
-    runtime = DailyAccessSurfaceRuntime(context.shell_dir, context.score_dir, profile=context.profile)
+    runtime = DailyAccessSurfaceRuntime(
+        context.shell_dir,
+        context.score_dir,
+        profile=context.profile,
+        bike_shell_dir=context.bike_shell_dir,
+        bike_score_dir=context.bike_score_dir,
+    )
     resolutions = list(build_profile_settings(context.profile).coarse_vector_resolutions_m)
     cells_by_resolution = {
         resolution: coarse_cells(runtime, checked["shard_ids"], resolution, context.study_area_metric)
@@ -334,15 +417,34 @@ def publish_daily_access(
             "daily_access": {
                 **model_versions(),
                 "keys": dataclasses.asdict(context.keys),
+                "available_modes": [*DAILY_ACCESS_MODES, "mode_aware"],
+                "default_mode": DAILY_ACCESS_DEFAULT_MODE,
+                "mode_aware": daily_access_mode_aware_params(),
                 "graph_dir": str(context.graph_dir),
                 "shell_dir": str(context.shell_dir),
                 "reach_dir": str(context.reach_dir),
                 "score_dir": str(context.score_dir),
+                "modes": {
+                    "walk": {
+                        "keys": dataclasses.asdict(context.keys),
+                        "graph_dir": str(context.graph_dir),
+                        "shell_dir": str(context.shell_dir),
+                        "reach_dir": str(context.reach_dir),
+                        "score_dir": str(context.score_dir),
+                    },
+                    "bike": {
+                        "keys": dataclasses.asdict(context.bike_keys),
+                        "graph_dir": str(context.bike_graph_dir),
+                        "shell_dir": str(context.bike_shell_dir),
+                        "reach_dir": str(context.bike_reach_dir),
+                        "score_dir": str(context.bike_score_dir),
+                    },
+                },
                 "import_fingerprint": context.source_state.import_fingerprint,
                 "transit_reality_fingerprint": context.reality_fingerprint,
                 "overture_dataset_signature": context.overture_dataset_signature,
                 "resolution_m": CANONICAL_BASE_RESOLUTION_M,
-                "channels": list(CHANNELS),
+                "channels": list(runtime.channels),
                 "losses": checked["losses"],
                 "warnings": checked["warnings"],
                 "fine_png_resolutions_m": list(build_profile_settings(context.profile).fine_resolutions_m),
@@ -367,7 +469,12 @@ def publish_daily_access(
         # Fine vector cells come from the v4 shards (real components), never
         # from v3 node scores; profiles without fine resolutions bake coarse only.
         fine_grid_config = (
-            {"shell_dir": str(context.shell_dir), "score_dir": str(context.score_dir)}
+            {
+                "shell_dir": str(context.shell_dir),
+                "score_dir": str(context.score_dir),
+                "bike_shell_dir": str(context.bike_shell_dir),
+                "bike_score_dir": str(context.bike_score_dir),
+            }
             if build_profile_settings(context.profile).fine_resolutions_m
             else {}
         )

@@ -94,7 +94,7 @@ import { coarseGridPopupHtml, inspectPopupHtml } from "./popups/grid_popup.js";
       service_access: { food: 0.6, other_retail: 0.1, primary_care: 0.3, pharmacy: 0.2, green: 0.4, transport: 0.5 }
     }
   });
-  assert.match(html, /Daily access score 61\.3 \/ 100/);
+  assert.match(html, /Walk score 61\.3 \/ 100/);
   assert.match(html, /Food shops: 90%/);
   assert.match(html, /Road proximity<\/strong>: -1\.8 points/);
   assert.match(html, /82% of land/);
@@ -115,9 +115,36 @@ import { coarseGridPopupHtml, inspectPopupHtml } from "./popups/grid_popup.js";
     5000,
     { legacyUnavailable: true }
   );
-  assert.match(html, /Daily access score 33\.0/);
+  assert.match(html, /Walk score 33\.0/);
   assert.doesNotMatch(html, /0 raw/);
   assert.match(html, /not part of this model/);
+}
+
+{
+  const html = inspectPopupHtml({
+    scoring_model: "daily-access-v4",
+    valid_land: true,
+    resolution_m: 50,
+    total_score: 40,
+    network_status: "ok",
+    modes: {
+      walk: { total_score: 40, network_status: "ok", component_scores: {}, penalties: {}, service_access: {} },
+      bike: { total_score: 55, network_status: "ok", component_scores: {}, penalties: {}, service_access: {} },
+      mode_aware: { total_score: 58, network_status: "ok", component_scores: {}, penalties: {}, service_access: {} }
+    }
+  }, { selectedMode: "bike" });
+  assert.match(html, /Bike score 55\.0 \/ 100/);
+  assert.match(html, /Travel modes/);
+  assert.match(html, /Mode-aware<\/strong>: 58\.0 \/ 100/);
+}
+
+{
+  const html = coarseGridPopupHtml(
+    { total_score: 47, bike_total_score: 0, bike_score_shops: 0 },
+    5000,
+    { legacyUnavailable: true, selectedMode: "bike" }
+  );
+  assert.match(html, /Bike score 0\.0 \/ 100/);
 }
 
 console.log("grid popup checks passed");

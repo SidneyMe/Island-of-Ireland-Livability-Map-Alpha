@@ -44,6 +44,36 @@ const GRID_SCORE_LAYER_OPTIONS = [
   { value: "healthcare", label: "Healthcare", field: "score_healthcare" },
   { value: "parks", label: "Parks", field: "score_parks" }
 ];
+const GRID_TRAVEL_MODE_OPTIONS = [
+  { value: "walk", label: "Walk" },
+  { value: "bike", label: "Bike" },
+  { value: "mode_aware", label: "Mode-aware" }
+];
+
+function availableGridTravelModes(runtime) {
+  const declared = runtime && runtime.daily_access && Array.isArray(runtime.daily_access.available_modes)
+    ? runtime.daily_access.available_modes.map(String)
+    : ["walk"];
+  return GRID_TRAVEL_MODE_OPTIONS.filter(function (entry) {
+    return declared.includes(entry.value);
+  }).map(function (entry) {
+    return { ...entry };
+  });
+}
+
+function normalizeGridTravelMode(value, runtime) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return availableGridTravelModes(runtime).some(function (entry) {
+    return entry.value === normalized;
+  }) ? normalized : "walk";
+}
+
+function gridTravelModeLabel(value) {
+  const entry = GRID_TRAVEL_MODE_OPTIONS.find(function (option) {
+    return option.value === String(value || "walk");
+  });
+  return entry ? entry.label : "Walk";
+}
 
 function normalizeGridScoreLayer(value) {
   const normalized = String(value || "").trim().toLowerCase();
@@ -92,17 +122,20 @@ function inspectAvailable(runtime) {
 }
 
 // Score layer -> v4 surface PNG channel (``/tiles/surface/...png?channel=``).
-function surfaceChannelForScoreLayer(value) {
+function surfaceChannelForScoreLayer(value, travelMode = "walk") {
   const normalized = normalizeGridScoreLayer(value);
-  return normalized === "combined" ? "total" : normalized;
+  const channel = normalized === "combined" ? "total" : normalized;
+  return travelMode === "walk" ? channel : travelMode + "_" + channel;
 }
 
-function gridScoreLayerField(value) {
+function gridScoreLayerField(value, travelMode = "walk") {
   const normalized = normalizeGridScoreLayer(value);
   const entry = GRID_SCORE_LAYER_OPTIONS.find(function (option) {
     return option.value === normalized;
   });
-  return entry ? entry.field : "total_score";
+  const field = entry ? entry.field : "total_score";
+  if (travelMode === "walk") return field;
+  return travelMode + "_" + field;
 }
 
 function noiseOutlineOpacity(fillOpacity) {
@@ -251,7 +284,7 @@ function gridZoomRange(runtime) {
   };
 }
 
-function buildActiveGridLayers(runtime, resolutionM, scoreLayer = "combined") {
+function buildActiveGridLayers(runtime, resolutionM, scoreLayer = "combined", travelMode = "walk") {
   const range = gridZoomRange(runtime);
   const filter = gridFilterForResolution(resolutionM);
   return [
@@ -265,7 +298,7 @@ function buildActiveGridLayers(runtime, resolutionM, scoreLayer = "combined") {
       filter: filter,
       layout: { visibility: "none" },
       paint: {
-        "fill-color": gridFillColorExpression(scoreLayer),
+        "fill-color": gridFillColorExpression(scoreLayer, travelMode),
         "fill-antialias": false,
         "fill-opacity": 0.52
       }
@@ -307,13 +340,13 @@ function buildActiveGridLayers(runtime, resolutionM, scoreLayer = "combined") {
   ];
 }
 
-function activeGridLifecycle(runtime, previousResolutionM, zoom, scoreLayer = "combined") {
+function activeGridLifecycle(runtime, previousResolutionM, zoom, scoreLayer = "combined", travelMode = "walk") {
   const resolutionM = activeGridResolution(runtime, zoom);
   return {
     resolutionM: resolutionM,
     rebuild: Number(previousResolutionM) !== Number(resolutionM),
     filter: gridFilterForResolution(resolutionM),
-    layerDefinitions: buildActiveGridLayers(runtime, resolutionM, scoreLayer)
+    layerDefinitions: buildActiveGridLayers(runtime, resolutionM, scoreLayer, travelMode)
   };
 }
 
@@ -393,8 +426,8 @@ function zoomBoundsForResolution(runtime, resolutionM) {
   return { minZoom: 0, maxZoom: Number(runtime.max_zoom || 19) + 1 };
 }
 
-function gridFillColorExpression(scoreLayer = "combined") {
-  const field = gridScoreLayerField(scoreLayer);
+function gridFillColorExpression(scoreLayer = "combined", travelMode = "walk") {
+  const field = gridScoreLayerField(scoreLayer, travelMode);
   return [
     "interpolate",
     ["linear"],
@@ -531,6 +564,10 @@ function buildStyle(runtime, options = {}) {
   const colors = runtime.category_colors || {};
   const origin = options.windowOrigin || "http://127.0.0.1:8000";
   const selectedGridLayer = normalizeGridScoreLayer(options.selectedGridLayer || "combined");
+  const selectedGridTravelMode = normalizeGridTravelMode(
+    options.selectedGridTravelMode || "walk",
+    runtime
+  );
   const basemapPmtilesUrl = runtime.basemap_pmtiles_url
     ? "pmtiles://" + origin + runtime.basemap_pmtiles_url
     : null;
@@ -643,7 +680,8 @@ function buildStyle(runtime, options = {}) {
   buildActiveGridLayers(
     runtime,
     activeGridResolution(runtime, Number(runtime.default_zoom || 0)),
-    selectedGridLayer
+    selectedGridLayer,
+    selectedGridTravelMode
   ).forEach(function (layer) {
     layers.push(layer);
   });
@@ -962,6 +1000,7 @@ export {
   activeGridLifecycle,
   activeGridOutlineLayerId,
   activeGridResolution,
+  availableGridTravelModes,
   buildStyle,
   buildActiveGridLayers,
   debugGridVisibilityPlan,
@@ -977,9 +1016,11 @@ export {
   gridScoreLayerField,
   gridScoreLayerLabel,
   gridScoreLayerOptions,
+  gridTravelModeLabel,
   gridVisibilityPlan,
   gridLayerIds,
   noiseOutlineOpacity,
+  normalizeGridTravelMode,
   normalizeGridScoreLayer,
   landuseContextLayerMinZoom,
   landuseContextLayerMaxZoom,

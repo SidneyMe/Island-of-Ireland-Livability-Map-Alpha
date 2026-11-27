@@ -708,7 +708,7 @@ class FineVectorPmtilesWorkerTests(TestCase):
             shell_dir, score_dir, shard_ids = _build_surface_fixture(tmp, shard_count=10)
             context = fine_worker.FineGridTileContext(shell_dir=shell_dir, score_dir=score_dir)
             context.shard_wgs84_bbox(shard_ids[0])
-            cache_key = (str(shell_dir), str(score_dir))
+            cache_key = (str(shell_dir), str(score_dir), "", "")
             fine_worker._FINE_GRID_CONTEXTS.clear()
             fine_worker._FINE_GRID_CONTEXTS[cache_key] = context
 

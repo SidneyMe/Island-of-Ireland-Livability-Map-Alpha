@@ -11,6 +11,7 @@ from config import (
     RAILWAY_PROXIMITY_ACTIVE_MODES, RAILWAY_PROXIMITY_FULL_PENALTY_DISTANCE_M,
     RAILWAY_PROXIMITY_MAX_PENALTY, RAILWAY_PROXIMITY_ZERO_PENALTY_DISTANCE_M,
     TAGS, TO_WGS84, WALK_RADIUS_M, build_profile_settings,
+    daily_access_mode_aware_params,
 )
 from db_postgis import (
     load_landuse_context_rows, load_merged_source_amenity_rows, load_railway_corridor_rows,
@@ -209,7 +210,9 @@ def prepare_display_layers(context, cells_by_resolution, *, hashes, created_at, 
         load_railway_corridor_rows(engine, context.reality_fingerprint),
     )
     summary.update({
-        "mode_aware_scoring_enabled": False, "mode_aware_score_weights": {},
+        "mode_aware_scoring_enabled": True,
+        "mode_aware_score_weights": {},
+        "mode_aware": daily_access_mode_aware_params(),
         "transport_reality_enabled": bool(transport),
         "transport_network_enabled": bool(route_patterns),
         "transport_route_index_url": (

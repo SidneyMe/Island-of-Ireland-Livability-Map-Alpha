@@ -209,7 +209,7 @@ Phase 1's outputs are now used directly by the frequency-based transport scorer.
 
 ## Phase 2 — Scoring model v2
 
-The original v1 model counted features by presence. A corner shop scored the same as a supermarket, a tiny pocket park the same as Phoenix Park, and a rural GP the same as a major hospital. The current model has landed tiered units, variety clustering, and distance decay. Remaining v2-style work is mostly mode-aware reach and land-use context.
+The original v1 model counted features by presence. A corner shop scored the same as a supermarket, a tiny pocket park the same as Phoenix Park, and a rural GP the same as a major hospital. The current model has landed tiered units, variety clustering, distance decay, and walk/bike mode-aware reach. Remaining v2-style work is mostly transit-chained reach, bike quality modelling, and land-use context.
 
 ### ~~Sub-tier shops~~
 
@@ -270,19 +270,19 @@ The original v1 model counted features by presence. A corner shop scored the sam
 - Parameters calibrated against the sanity fixture.
 - Interacts with the fixed 500 m walk radius currently in `config.py`. The radius becomes a search bound, not a scoring cutoff; features beyond it contribute zero, features inside it contribute per the decay curve.
 
-### Mode-aware scoring [design-needed]
+### Mode-aware scoring [walk/bike implemented]
 
-**What:** Score with walking, cycling, and transit-chained trips, not just a fixed 500 m walk radius.
+**What:** Score Daily Access v4 independently for walking and cycling, expose both modes, and combine them without reducing the better mode.
 
 **How:**
 
-- Extend the Rust walkgraph helper to emit per-mode reach polygons (walk at 500 m / 1 km / 1.5 km, cycle at 3 km / 5 km).
-- Score each mode separately and combine with weighted blending.
-- Transit-chained reach requires the current GTFS frequency data plus a mode-tiering design before it is feasible. The earlier speculative standalone helper was removed pending that integrated design.
+- Walk remains the default. Bike uses the existing legally accessible, length-only graph at 12 km/h; the same minute curves become 1–4 km for ordinary needs, 1–5 km for green space, and 0.6–2 km for bike-to-stop access.
+- Score each need separately for walk and bike, then combine it as `best + 0.25 * second * (1 - best)` before category weighting and penalties.
+- Bike-to-stop is included because GTFS stops are ordinary bike reach objects. Transit-chained travel is not included.
+- Publication is fail-closed: both walk and bike graph/shell/reach/score tiers must be complete and aligned.
+- `/api/inspect`, fine/coarse PMTiles, PNG channels, popups, and the map control expose Walk, Bike, and Mode-aware views; Walk remains the default and its existing cache keys are preserved.
 
-**Open questions:**
-
-- How to combine modes without over-rewarding places that are great for walking *and* cycling *and* transit. Likely a max-of with diminishing returns on the second-best mode, to prevent "good at everything" from dominating "good at one thing by a lot".
+**Still open:** bike stress/slope/surface/quality and a GTFS-aware transit-chained model.
 
 ### Land-use context layer [design-needed]
 

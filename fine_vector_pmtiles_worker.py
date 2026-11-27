@@ -14,6 +14,13 @@ from sqlalchemy import create_engine
 
 from config import (
     CANONICAL_BASE_RESOLUTION_M,
+    DAILY_ACCESS_ACCESS_STEP,
+    DAILY_ACCESS_CATEGORY_MAX,
+    DAILY_ACCESS_HEALTHCARE_MIX,
+    DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS,
+    DAILY_ACCESS_SCORE_STEP,
+    DAILY_ACCESS_SHOP_MIX,
+    DAILY_ACCESS_UINT16_MISSING,
     FINE_RESOLUTIONS_M,
     SURFACE_SHARD_SIZE_M,
     TO_TARGET,
@@ -41,7 +48,7 @@ _AGGREGATED_CACHE_LIMIT = 16
 
 _WORKER_ENGINE = None  # type: ignore[var-annotated]
 _WORKER_DB_URL: str | None = None
-_FINE_GRID_CONTEXTS: dict[tuple[str, str], "FineGridTileContext"] = {}
+_FINE_GRID_CONTEXTS: dict[tuple[str, str, str, str], "FineGridTileContext"] = {}
 
 
 def _aligned_floor(value: float, step: int) -> int:
@@ -282,9 +289,18 @@ class FineGridShardEntry:
 
 
 class FineGridTileContext:
-    def __init__(self, *, shell_dir: Path, score_dir: Path) -> None:
+    def __init__(
+        self,
+        *,
+        shell_dir: Path,
+        score_dir: Path,
+        bike_shell_dir: Path | None = None,
+        bike_score_dir: Path | None = None,
+    ) -> None:
         self.shell_dir = Path(shell_dir)
         self.score_dir = Path(score_dir)
+        self.bike_shell_dir = None if bike_shell_dir is None else Path(bike_shell_dir)
+        self.bike_score_dir = None if bike_score_dir is None else Path(bike_score_dir)
         shell_manifest = _load_manifest(self.shell_dir)
         score_manifest = _load_manifest(self.score_dir)
         # Daily access v4 shards: real components/penalties per cell, land-area weights.
@@ -375,19 +391,90 @@ class FineGridTileContext:
         if cached is None:
             entry = self.shard_entries[shard_id]
             with np.load(self.score_dir / entry.score_path, allow_pickle=False) as data:
-                raw = {name: np.asarray(data[name]) for name in ("total", "components", "penalties")}
+                raw = {
+                    name: np.asarray(data[name])
+                    for name in ("total", "components", "penalties", "service_access")
+                }
             with np.load(self.shell_dir / entry.shell_path, allow_pickle=False) as data:
                 land = np.asarray(data["land_area_m2"], dtype=np.float32)
 
-            def decode(values: np.ndarray) -> np.ndarray:
-                return np.where(values == 65535, np.nan, values.astype(np.float32) / 100.0)
+            def decode_score(values: np.ndarray) -> np.ndarray:
+                return np.where(
+                    values == DAILY_ACCESS_UINT16_MISSING,
+                    np.nan,
+                    values.astype(np.float32) * np.float32(DAILY_ACCESS_SCORE_STEP),
+                )
 
-            channels = {"total_score": decode(raw["total"])}
+            def decode_access(values: np.ndarray) -> np.ndarray:
+                return np.where(
+                    values == DAILY_ACCESS_UINT16_MISSING,
+                    0.0,
+                    values.astype(np.float32) * np.float32(DAILY_ACCESS_ACCESS_STEP),
+                )
+
+            channels = {"total_score": decode_score(raw["total"])}
             for index, category in enumerate(("shops", "transport", "healthcare", "parks")):
-                channels[f"score_{category}"] = decode(raw["components"][index])
+                channels[f"score_{category}"] = decode_score(raw["components"][index])
             # v3 tile convention: penalties are negative score contributions.
-            channels["score_railway_proximity"] = -decode(raw["penalties"][0])
-            channels["score_road_proximity"] = -decode(raw["penalties"][1])
+            channels["score_railway_proximity"] = -decode_score(raw["penalties"][0])
+            channels["score_road_proximity"] = -decode_score(raw["penalties"][1])
+
+            if self.bike_score_dir is not None:
+                with np.load(
+                    self.bike_score_dir / entry.score_path,
+                    allow_pickle=False,
+                ) as data:
+                    bike = {
+                        name: np.asarray(data[name])
+                        for name in ("total", "components", "service_access")
+                    }
+                channels["bike_total_score"] = decode_score(bike["total"])
+                for index, category in enumerate(("shops", "transport", "healthcare", "parks")):
+                    channels[f"bike_score_{category}"] = decode_score(bike["components"][index])
+
+                walk_access = decode_access(raw["service_access"]).astype(np.float64)
+                bike_access = decode_access(bike["service_access"]).astype(np.float64)
+                best = np.maximum(walk_access, bike_access)
+                second = np.minimum(walk_access, bike_access)
+                access = np.minimum(
+                    best + DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS * second * (1.0 - best),
+                    1.0,
+                )
+                components = np.empty((4, *raw["total"].shape), dtype=np.float64)
+                components[0] = DAILY_ACCESS_CATEGORY_MAX["shops"] * (
+                    DAILY_ACCESS_SHOP_MIX["food"] * access[0]
+                    + DAILY_ACCESS_SHOP_MIX["other_retail"] * access[1]
+                )
+                components[1] = DAILY_ACCESS_CATEGORY_MAX["transport"] * access[5]
+                components[2] = DAILY_ACCESS_CATEGORY_MAX["healthcare"] * (
+                    DAILY_ACCESS_HEALTHCARE_MIX["primary_care"] * access[2]
+                    + DAILY_ACCESS_HEALTHCARE_MIX["pharmacy"] * access[3]
+                )
+                components[3] = DAILY_ACCESS_CATEGORY_MAX["parks"] * access[4]
+                penalties = np.stack(
+                    [decode_score(raw["penalties"][0]), decode_score(raw["penalties"][1])]
+                )
+                mode_total = np.clip(
+                    components.sum(axis=0) - np.nan_to_num(penalties, nan=0.0).sum(axis=0),
+                    0.0,
+                    100.0,
+                )
+                quantize_score = lambda values: (  # noqa: E731 - local vector contract
+                    np.floor(np.clip(values, 0.0, 100.0) / DAILY_ACCESS_SCORE_STEP + 0.5)
+                    * DAILY_ACCESS_SCORE_STEP
+                ).astype(np.float32)
+                missing = raw["total"] == DAILY_ACCESS_UINT16_MISSING
+                channels["mode_aware_total_score"] = np.where(
+                    missing,
+                    np.nan,
+                    quantize_score(mode_total),
+                )
+                for index, category in enumerate(("shops", "transport", "healthcare", "parks")):
+                    channels[f"mode_aware_score_{category}"] = np.where(
+                        missing,
+                        np.nan,
+                        quantize_score(components[index]),
+                    )
             weights = np.where(np.isfinite(channels["total_score"]), land, 0.0).astype(np.float32)
             cached = self._cache_put(self._score_cache, shard_id, {"channels": channels, "weights": weights},
                                      limit=_RAW_SCORE_CACHE_LIMIT)
@@ -656,10 +743,17 @@ def _fine_grid_context(config: dict[str, Any] | None) -> FineGridTileContext | N
         return None
     shell_dir = str(config["shell_dir"])
     score_dir = str(config["score_dir"])
-    cache_key = (shell_dir, score_dir)
+    bike_shell_dir = str(config.get("bike_shell_dir") or "")
+    bike_score_dir = str(config.get("bike_score_dir") or "")
+    cache_key = (shell_dir, score_dir, bike_shell_dir, bike_score_dir)
     context = _FINE_GRID_CONTEXTS.get(cache_key)
     if context is None:
-        context = FineGridTileContext(shell_dir=Path(shell_dir), score_dir=Path(score_dir))
+        context = FineGridTileContext(
+            shell_dir=Path(shell_dir),
+            score_dir=Path(score_dir),
+            bike_shell_dir=Path(bike_shell_dir) if bike_shell_dir else None,
+            bike_score_dir=Path(bike_score_dir) if bike_score_dir else None,
+        )
         _FINE_GRID_CONTEXTS[cache_key] = context
     return context
 
@@ -668,7 +762,14 @@ def _reset_fine_grid_worker_caches(config: dict[str, Any] | None = None) -> None
     if not _FINE_GRID_CONTEXTS:
         return
     if config:
-        context = _FINE_GRID_CONTEXTS.get((str(config["shell_dir"]), str(config["score_dir"])))
+        context = _FINE_GRID_CONTEXTS.get(
+            (
+                str(config["shell_dir"]),
+                str(config["score_dir"]),
+                str(config.get("bike_shell_dir") or ""),
+                str(config.get("bike_score_dir") or ""),
+            )
+        )
         if context is not None:
             context.reset_large_caches()
         return

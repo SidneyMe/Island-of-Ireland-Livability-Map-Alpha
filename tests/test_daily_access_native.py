@@ -177,6 +177,8 @@ class NativeParityTests(TestCase):
             )
             reference = compute_reference(graph=graph, **kwargs)
             native = compute_native(graph_dir=graph_dir, **kwargs)
+            bike_reference = compute_reference(graph=graph, mode="bike", **kwargs)
+            bike_native = compute_native(graph_dir=graph_dir, mode="bike", **kwargs)
 
         report = compare_with_reference(reference, native)
         if os.getenv("DAILY_ACCESS_PARITY_REPORT"):
@@ -189,6 +191,11 @@ class NativeParityTests(TestCase):
         self.assertEqual(reference.losses, native.losses)
         statuses = set(native.network_status.tolist())
         self.assertTrue({0, 1, 2} <= statuses, statuses)  # outside, ok and no-network cells all exercised
+        bike_report = compare_with_reference(bike_reference, bike_native)
+        self.assertTrue(bike_report["within_limits"], bike_report)
+        self.assertEqual(bike_report["status_mismatches"], 0, bike_report)
+        self.assertLessEqual(bike_report["max_reach_step_diff"], 1, bike_report)
+        self.assertEqual(bike_report["reach_label_mismatches"], 0, bike_report)
 
 
 if __name__ == "__main__":

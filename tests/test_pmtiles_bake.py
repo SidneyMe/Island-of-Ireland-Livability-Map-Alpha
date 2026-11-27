@@ -104,6 +104,10 @@ class PmtilesBakeContractTests(TestCase):
                     f"AS score_{category}",
                     sql,
                 )
+                self.assertIn(f"AS bike_score_{category}", sql)
+                self.assertIn(f"AS mode_aware_score_{category}", sql)
+        self.assertIn("AS bike_total_score", sql)
+        self.assertIn("AS mode_aware_total_score", sql)
 
     def test_grid_layer_metadata_declares_popup_score_and_count_fields(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(
@@ -126,6 +130,10 @@ class PmtilesBakeContractTests(TestCase):
                 self.assertEqual(grid_layer["fields"][f"score_{category}"], "Number")
         self.assertEqual(grid_layer["fields"]["score_railway_proximity"], "Number")
         self.assertEqual(grid_layer["fields"]["score_road_proximity"], "Number")
+        for mode in ("bike", "mode_aware"):
+            self.assertEqual(grid_layer["fields"][f"{mode}_total_score"], "Number")
+            for category in bake_pmtiles.GRID_AMENITY_CATEGORIES:
+                self.assertEqual(grid_layer["fields"][f"{mode}_score_{category}"], "Number")
 
     def test_pmtiles_metadata_declares_transit_reality_and_service_desert_layers(self) -> None:
         metadata = bake_pmtiles._pmtiles_metadata(

@@ -91,20 +91,42 @@ function dailyAccessSectionHtml(values) {
 
 // Daily access v4: values come from the score shards; there are no raw
 // counts, clusters or effective units to show (and no zeros in their place).
-function dailyAccessInspectHtml(payload) {
-  const status = String(payload.network_status || "outside_mask");
+const MODE_LABELS = { walk: "Walk", bike: "Bike", mode_aware: "Mode-aware" };
+
+function selectedModeValues(payload, selectedMode) {
+  const modes = payload && payload.modes;
+  return modes && modes[selectedMode] ? modes[selectedMode] : payload;
+}
+
+function modeComparisonHtml(payload) {
+  const modes = payload && payload.modes;
+  if (!modes || typeof modes !== "object") return "";
+  const items = ["walk", "bike", "mode_aware"].filter(function (mode) {
+    return modes[mode] && !isMissing(modes[mode].total_score);
+  }).map(function (mode) {
+    return "<li><strong>" + MODE_LABELS[mode] + "</strong>: " +
+      Number(modes[mode].total_score).toFixed(1) + " / 100</li>";
+  }).join("");
+  return items ? '<div class="popup-score-variant"><h4>Travel modes</h4><ul>' + items + "</ul></div>" : "";
+}
+
+function dailyAccessInspectHtml(payload, options = {}) {
+  const selectedMode = String(options.selectedMode || "walk");
+  const selected = selectedModeValues(payload, selectedMode);
+  const status = String(selected.network_status || "outside_mask");
   const visible = payload.visible;
+  const selectedVisible = visible ? selectedModeValues(visible, selectedMode) : null;
   let visibleHtml = "";
-  if (visible && typeof visible === "object") {
-    const coverage = Number(visible.network_coverage_share);
+  if (selectedVisible && typeof selectedVisible === "object") {
+    const coverage = Number(selectedVisible.network_coverage_share);
     visibleHtml =
       '<div class="popup-score-variant">' +
         "<h4>Visible " + escapeHtml(formatResolutionLabel(visible.resolution_m)) + " cell: " +
-          (isMissing(visible.total_score) ? "n/a" : Number(visible.total_score).toFixed(1) + " / 100") +
+          (isMissing(selectedVisible.total_score) ? "n/a" : Number(selectedVisible.total_score).toFixed(1) + " / 100") +
         "</h4>" +
-        "<p>Network: " + escapeHtml(NETWORK_STATUS_LABELS[visible.network_status] || visible.network_status) +
+        "<p>Network: " + escapeHtml(NETWORK_STATUS_LABELS[selectedVisible.network_status] || selectedVisible.network_status) +
           (Number.isFinite(coverage) ? " (" + Math.round(coverage * 100) + "% of land)" : "") + "</p>" +
-        (isMissing(visible.total_score) ? "" : dailyAccessSectionHtml(visible)) +
+        (isMissing(selectedVisible.total_score) ? "" : dailyAccessSectionHtml(selectedVisible)) +
       "</div>";
   }
   if (!payload.valid_land) {
@@ -118,19 +140,21 @@ function dailyAccessInspectHtml(payload) {
   }
   return (
     '<div class="popup-content">' +
-      "<h3>Daily access score " + Number(payload.total_score || 0).toFixed(1) + " / 100</h3>" +
+      "<h3>" + escapeHtml(MODE_LABELS[selectedMode] || "Walk") + " score " +
+        Number(selected.total_score || 0).toFixed(1) + " / 100</h3>" +
       "<p>Exact surface: " + escapeHtml(formatResolutionLabel(payload.resolution_m || 50)) + "</p>" +
       "<p>Network: " + escapeHtml(NETWORK_STATUS_LABELS[status] || status) + "</p>" +
-      dailyAccessSectionHtml(payload) +
+      dailyAccessSectionHtml(selected) +
+      modeComparisonHtml(payload) +
       visibleHtml +
       "<p>Model: " + escapeHtml(payload.scoring_model) + "</p>" +
     "</div>"
   );
 }
 
-export function inspectPopupHtml(payload) {
+export function inspectPopupHtml(payload, options = {}) {
   if (payload && payload.scoring_model === "daily-access-v4") {
-    return dailyAccessInspectHtml(payload);
+    return dailyAccessInspectHtml(payload, options);
   }
   if (!payload.valid_land) {
     return (
@@ -177,12 +201,15 @@ export function inspectPopupHtml(payload) {
 
 export function coarseGridPopupHtml(properties, fallbackResolutionM = 50, options = {}) {
   const legacyUnavailable = Boolean(options && options.legacyUnavailable);
+  const selectedMode = String(options && options.selectedMode || "walk");
+  const modePrefix = selectedMode === "walk" ? "" : selectedMode + "_";
+  const selectedTotal = properties[modePrefix + "total_score"];
   const listHtml = SCORE_SECTIONS.map(function (category) {
     const title = scoreLabel(category);
     const count = Number(properties["count_" + category] || 0);
     const clusterCount = Number(properties["cluster_" + category] || 0);
     const effectiveUnits = formatEffectiveUnits(properties["effective_units_" + category] || 0);
-    const score = Number(properties["score_" + category] || 0).toFixed(1);
+    const score = Number(properties[modePrefix + "score_" + category] || 0).toFixed(1);
     if (category === "railway_proximity" || category === "road_proximity" || legacyUnavailable) {
       return (
         "<li><strong>" + title + "</strong>: " +
@@ -200,7 +227,8 @@ export function coarseGridPopupHtml(properties, fallbackResolutionM = 50, option
 
   return (
     '<div class="popup-content">' +
-      "<h3>" + (legacyUnavailable ? "Daily access score " : "Walk score ") + Number(properties.total_score || 0).toFixed(1) + " / 100</h3>" +
+      "<h3>" + (legacyUnavailable ? escapeHtml(MODE_LABELS[selectedMode] || "Walk") + " score " : "Walk score ") +
+        Number(isMissing(selectedTotal) ? (properties.total_score || 0) : selectedTotal).toFixed(1) + " / 100</h3>" +
       "<p>Visible grid: " + escapeHtml(formatResolutionLabel(properties.resolution_m || fallbackResolutionM)) + "</p>" +
       "<ul>" + listHtml + "</ul>" +
       (legacyUnavailable ? "<p>Raw counts, clusters and effective units are not part of this model.</p>" : "") +

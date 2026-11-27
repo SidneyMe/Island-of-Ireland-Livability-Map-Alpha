@@ -14,7 +14,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 from shapely.geometry import Point, Polygon, box
 
-from config import DAILY_ACCESS_CATEGORY_MAX, DAILY_ACCESS_SEARCH_CUTOFF_M
+from config import DAILY_ACCESS_CATEGORY_MAX, DAILY_ACCESS_SEARCH_CUTOFF_M, DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE
 from db_postgis.daily_access_green import GreenSite, candidate_edge_slots
 from precompute.daily_access_classify import LogicalPlace, build_logical_places
 from precompute.daily_access_reach import Seed, k_nearest_labels, reach_for_kind
@@ -26,6 +26,7 @@ from precompute.daily_access_reference import (
 from precompute.daily_access_score import (
     access_status,
     category_components,
+    combine_mode_access,
     decay,
     need_access,
     quantize_access,
@@ -101,6 +102,26 @@ class CurveAndAggregationTests(TestCase):
             "food": 1600.0, "other_retail": 1600.0, "primary_care": 1600.0,
             "pharmacy": 1600.0, "green": 2000.0, "transport": 800.0,
         })
+
+    def test_bike_uses_the_same_minutes_at_twelve_kilometres_per_hour(self) -> None:
+        for need, (full_m, zero_m) in {
+            "food": (1000.0, 4000.0),
+            "green": (1000.0, 5000.0),
+            "transport": (600.0, 2000.0),
+        }.items():
+            self.assertEqual(decay(full_m, need, mode="bike"), 1.0)
+            self.assertEqual(decay(zero_m, need, mode="bike"), 0.0)
+            self.assertAlmostEqual(decay((full_m + zero_m) / 2, need, mode="bike"), 0.5)
+        self.assertEqual(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE["bike"]["green"], 5000.0)
+
+    def test_mode_aware_blend_rewards_the_secondary_mode_without_exceeding_one(self) -> None:
+        forward = combine_mode_access({"food": 0.8}, {"food": 0.4})["food"]
+        reverse = combine_mode_access({"food": 0.4}, {"food": 0.8})["food"]
+        full = combine_mode_access({"food": 1.0}, {"food": 1.0})["food"]
+        self.assertAlmostEqual(forward, 0.82)
+        self.assertAlmostEqual(reverse, 0.82)
+        self.assertEqual(full, 1.0)
+        self.assertGreaterEqual(forward, 0.8)
 
     def test_top3_saturation_80_15_5(self) -> None:
         self.assertAlmostEqual(top3_access([1.0]), 0.80)

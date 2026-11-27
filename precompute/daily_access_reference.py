@@ -38,8 +38,9 @@ import numpy as np
 import shapely
 
 from config import (
+    DAILY_ACCESS_DEFAULT_MODE,
     DAILY_ACCESS_NEEDS,
-    DAILY_ACCESS_SEARCH_CUTOFF_M,
+    DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE,
     DAILY_ACCESS_SERVICE_KINDS,
     DAILY_ACCESS_TOP_K,
     DAILY_ACCESS_TRANSPORT_TIER_QUALITY,
@@ -432,6 +433,7 @@ def run_reach(
     seeds_by_kind: Mapping[str, Sequence[Seed]],
     origin_nodes: np.ndarray,
     *,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     keep_raw: bool = False,
 ) -> dict[str, KindReach]:
     """One kind at a time: dense per-node state never exists for two kinds."""
@@ -446,7 +448,7 @@ def run_reach(
             seeds_by_kind[kind],
             origin_nodes,
             k=service_kind_k(kind),
-            cutoff_m=DAILY_ACCESS_SEARCH_CUTOFF_M[need],
+            cutoff_m=DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need],
             keep_raw=keep_raw,
         )
     return results
@@ -525,6 +527,7 @@ def kind_distances(
 def score_from_distances(
     distances_by_kind: Mapping[str, Mapping[int, float]],
     *,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     railway_penalty: float,
     road_penalty: float,
 ) -> CellScore:
@@ -536,7 +539,12 @@ def score_from_distances(
             # Green roots are shared across green kinds; other labels are per kind.
             key: object = ("green", label) if need == "green" else (kind, label)
             options[need].append((key, quality, distance))
-    return score_cell_options(options, railway_penalty=railway_penalty, road_penalty=road_penalty)
+    return score_cell_options(
+        options,
+        mode=mode,
+        railway_penalty=railway_penalty,
+        road_penalty=road_penalty,
+    )
 
 
 def no_network_score(*, railway_penalty: float, road_penalty: float) -> CellScore:
@@ -555,6 +563,7 @@ def compute_reference(
     land_mask: LandMask,
     cells: Iterable[tuple[float, float]],
     cell_size_m: float,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     places: Sequence[LogicalPlace] = (),
     green_sites: Sequence[Any] = (),
     park_approaches: Mapping[str, Sequence[tuple[int, float]]] | None = None,
@@ -585,7 +594,13 @@ def compute_reference(
         dtype=np.int64,
     )
     row_by_node = {int(node): row for row, node in enumerate(origin_nodes.tolist())}
-    reach_by_kind = run_reach(graph, seeds_by_kind, origin_nodes, keep_raw=use_raw_distances)
+    reach_by_kind = run_reach(
+        graph,
+        seeds_by_kind,
+        origin_nodes,
+        mode=mode,
+        keep_raw=use_raw_distances,
+    )
     kinds = sorted(set(reach_by_kind) | set(pieces_by_kind))
 
     origins_xy = [origin for _, _, origin, _ in cell_inputs if origin is not None]
@@ -623,11 +638,16 @@ def compute_reference(
                         pieces_by_kind.get(kind, {}),
                         use_raw=use_raw_distances,
                         k=service_kind_k(kind),
-                        cutoff_m=DAILY_ACCESS_SEARCH_CUTOFF_M[service_kind_need(kind)],
+                        cutoff_m=DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][service_kind_need(kind)],
                     )
                     for kind in kinds
                 }
-                score = score_from_distances(distances, railway_penalty=railway, road_penalty=road)
+                score = score_from_distances(
+                    distances,
+                    mode=mode,
+                    railway_penalty=railway,
+                    road_penalty=road,
+                )
                 best_by_kind = {
                     kind: sorted(((label, distance) for label, distance in best.items()), key=lambda item: (item[1], item[0]))[
                         : service_kind_k(kind)

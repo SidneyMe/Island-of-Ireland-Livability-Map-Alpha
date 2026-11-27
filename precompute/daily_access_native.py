@@ -27,9 +27,10 @@ from config import (
     DAILY_ACCESS_CATEGORY_MAX,
     DAILY_ACCESS_HEALTHCARE_MIX,
     DAILY_ACCESS_INTERVAL_MERGE_M,
+    DAILY_ACCESS_DEFAULT_MODE,
     DAILY_ACCESS_NEEDS,
     DAILY_ACCESS_SAME_EDGE_ITERATIONS,
-    DAILY_ACCESS_SEARCH_CUTOFF_M,
+    DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE,
     DAILY_ACCESS_SERVICE_KINDS,
     DAILY_ACCESS_SHOP_MIX,
     DAILY_ACCESS_SNAP_RADIUS_M,
@@ -159,9 +160,9 @@ def _run(walkgraph_bin: str, args: Sequence[str]) -> None:
         )
 
 
-def score_params_json() -> dict[str, Any]:
+def score_params_json(mode: str = DAILY_ACCESS_DEFAULT_MODE) -> dict[str, Any]:
     return {
-        "thresholds_m": {need: list(need_thresholds_m(need)) for need in DAILY_ACCESS_NEEDS},
+        "thresholds_m": {need: list(need_thresholds_m(need, mode)) for need in DAILY_ACCESS_NEEDS},
         "top3_weights": list(DAILY_ACCESS_TOP3_WEIGHTS),
         "category_max": dict(DAILY_ACCESS_CATEGORY_MAX),
         "shop_mix": [DAILY_ACCESS_SHOP_MIX["food"], DAILY_ACCESS_SHOP_MIX["other_retail"]],
@@ -397,6 +398,7 @@ def native_reach(
     origins: np.ndarray,
     work_dir: Path,
     *,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     walkgraph_bin: str = WALKGRAPH_BIN,
     load_results: bool = True,
 ) -> tuple[dict[str, KindReach], list[dict[str, Any]]]:
@@ -419,7 +421,7 @@ def native_reach(
                 "quality": service_kind_quality(kind),
                 "seeds_bin": str(seeds_bin),
                 "k": service_kind_k(kind),
-                "cutoff_m": float(DAILY_ACCESS_SEARCH_CUTOFF_M[need]),
+                "cutoff_m": float(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need]),
                 "out_distances": str(reach_dir / f"{kind}.distances.bin"),
                 "out_labels": str(reach_dir / f"{kind}.labels.bin"),
             }
@@ -447,6 +449,7 @@ def native_score(
     kinds: Sequence[Mapping[str, Any]],
     work_dir: Path,
     *,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     objects: ObjectFiles | None,
     penalties: np.ndarray | None = None,
     walkgraph_bin: str = WALKGRAPH_BIN,
@@ -465,7 +468,7 @@ def native_score(
     origins_bin = score_dir / "origins.bin"
     np.asarray(block_origins, dtype="<u4").tofile(origins_bin)
     config: dict[str, Any] = {
-        "params": score_params_json(),
+        "params": score_params_json(mode),
         "cells_bin": str(cells_bin),
         "mask_geojson": str(mask_geojson),
         "radius_m": float(DAILY_ACCESS_SNAP_RADIUS_M),
@@ -547,6 +550,7 @@ def compute_native(
     land_mask: LandMask,
     cells: Iterable[tuple[float, float]],
     cell_size_m: float,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     places: Sequence[LogicalPlace] = (),
     green_sites: Sequence[Any] = (),
     park_approaches: Mapping[str, Sequence[tuple[int, float]]] | None = None,
@@ -575,7 +579,14 @@ def compute_native(
         losses, _warnings = loss_report(sources, reasons)
         records = cell_records(cells, cell_size_m, land_mask)
         attach = native_attach(graph_dir, mask_path, records, temp_dir, walkgraph_bin=walkgraph_bin)
-        reach_by_kind, kinds = native_reach(graph_dir, seeds, attach["origins"], temp_dir, walkgraph_bin=walkgraph_bin)
+        reach_by_kind, kinds = native_reach(
+            graph_dir,
+            seeds,
+            attach["origins"],
+            temp_dir,
+            mode=mode,
+            walkgraph_bin=walkgraph_bin,
+        )
         score_kinds = [{**kind, "distances": kind["out_distances"], "labels": kind["out_labels"]} for kind in kinds]
         scored = native_score(
             graph_dir,
@@ -584,6 +595,7 @@ def compute_native(
             attach["origins"],
             score_kinds,
             temp_dir,
+            mode=mode,
             objects=objects,
             penalties=penalties_for_records(records, penalty_fn),
             walkgraph_bin=walkgraph_bin,

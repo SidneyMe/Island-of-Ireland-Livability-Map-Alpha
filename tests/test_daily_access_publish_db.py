@@ -96,6 +96,21 @@ class StandalonePublicationDatabaseTests(unittest.TestCase):
             import_fingerprint="fixture-import_fingerprint",
             reality_fingerprint="fixture-gtfs",
         )
+        bike_root = root / "bike"
+        bike_shell_dir, bike_score_dir = write_tiers(
+            bike_root,
+            profile="test",
+            import_fingerprint="fixture-import_fingerprint",
+            reality_fingerprint="fixture-gtfs",
+        )
+        bike_reach_dir = write_empty_reach_tier(
+            bike_root,
+            losses={"transport": {"eligible": 1, "unbound": 0}},
+            profile="test",
+            import_fingerprint="fixture-import_fingerprint",
+            reality_fingerprint="fixture-gtfs",
+            mode="bike",
+        )
         graph_dir = root / "graph"
         write_walkgraph(graph_dir, [(0, 0), (100, 0), (0, 100), (100, 100)], [(0, 1), (0, 2), (1, 3), (2, 3)])
         offsets = np.fromfile(graph_dir / "walk_graph.adjacency_offsets.bin", dtype="<u8")
@@ -118,6 +133,12 @@ class StandalonePublicationDatabaseTests(unittest.TestCase):
             SimpleNamespace(reality_fingerprint="fixture-gtfs", analysis_date=NOW.date()),
             overture_dataset_signature="fixture-overture",
         )
+        ctx.bike_graph_padding_m = 5250
+        ctx.bike_keys = build.TierKeys("bike-g", "s", "r", "c")
+        ctx.bike_graph_dir = graph_dir
+        ctx.bike_shell_dir = bike_shell_dir
+        ctx.bike_reach_dir = bike_reach_dir
+        ctx.bike_score_dir = bike_score_dir
         lon, lat = TO_WGS84(X0 + 25, Y0 + 25)
         with self.engine.begin() as connection:
             _bulk_insert(connection, tables.features, [

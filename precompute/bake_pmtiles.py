@@ -143,6 +143,10 @@ def _grid_layer_fields() -> dict[str, str]:
         fields[f"score_{category}"] = "Number"
     fields["score_railway_proximity"] = "Number"
     fields["score_road_proximity"] = "Number"
+    for mode in ("bike", "mode_aware"):
+        fields[f"{mode}_total_score"] = "Number"
+        for category in GRID_AMENITY_CATEGORIES:
+            fields[f"{mode}_score_{category}"] = "Number"
     return fields
 
 
@@ -611,6 +615,16 @@ def _fine_grid_shard_count(fine_grid_config: dict[str, str] | None) -> int:
     context = FineGridTileContext(
         shell_dir=Path(fine_grid_config["shell_dir"]),
         score_dir=Path(fine_grid_config["score_dir"]),
+        bike_shell_dir=(
+            Path(fine_grid_config["bike_shell_dir"])
+            if fine_grid_config.get("bike_shell_dir")
+            else None
+        ),
+        bike_score_dir=(
+            Path(fine_grid_config["bike_score_dir"])
+            if fine_grid_config.get("bike_score_dir")
+            else None
+        ),
     )
     return len(context.shard_entries)
 

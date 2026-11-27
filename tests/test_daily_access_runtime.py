@@ -9,7 +9,7 @@ import numpy as np
 from shapely.geometry import box
 
 import serve_from_db
-from config import DAILY_ACCESS_SEARCH_CUTOFF_M, SURFACE_SHARD_SIZE_M, TO_WGS84
+from config import DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE, SURFACE_SHARD_SIZE_M, TO_WGS84
 from precompute import daily_access_build as build
 from precompute import daily_access_publish as publish
 from precompute.daily_access_native import ALL_KINDS, INTERVAL_DTYPE, OBJECT_DTYPE
@@ -86,6 +86,7 @@ def write_empty_reach_tier(
     profile: str = "dev",
     import_fingerprint: str = "imp",
     reality_fingerprint: str = "gtfs",
+    mode: str = "walk",
 ) -> Path:
     reach_dir = root / "reach"
     build.begin_tier(reach_dir, "reach", "r", {
@@ -112,7 +113,7 @@ def write_empty_reach_tier(
         need = service_kind_need(kind)
         kinds.append({
             "kind": kind, "kind_index": index, "need": need, "quality": service_kind_quality(kind),
-            "k": k, "cutoff_m": float(DAILY_ACCESS_SEARCH_CUTOFF_M[need]),
+            "k": k, "cutoff_m": float(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need]),
             "out_distances": str(distances), "out_labels": str(labels),
         })
     build.save_reach_cache(reach_dir, np.zeros(0, dtype=np.uint32), kinds, {})
@@ -155,6 +156,31 @@ class RuntimeTests(TestCase):
         self.assertEqual(payload["network_status"], "no_walking_network")
         self.assertEqual(payload["total_score"], 0.0)
         self.assertTrue(payload["valid_land"])
+
+    def test_bike_and_mode_aware_are_lazy_parallel_views(self) -> None:
+        bike_root = self.root / "bike"
+        bike_shell_dir, bike_score_dir = write_tiers(bike_root)
+        runtime = DailyAccessSurfaceRuntime(
+            self.shell_dir,
+            self.score_dir,
+            self.root / "tiles-modes",
+            profile="dev",
+            bike_shell_dir=bike_shell_dir,
+            bike_score_dir=bike_score_dir,
+        )
+        lat, lon = lat_lon(X0 + 25.0, Y0 + 25.0)
+        payload = runtime.inspect(lat=lat, lon=lon)
+        self.assertEqual(payload["available_modes"], ["walk", "bike", "mode_aware"])
+        self.assertAlmostEqual(payload["modes"]["walk"]["total_score"], 60.0)
+        self.assertAlmostEqual(payload["modes"]["bike"]["total_score"], 60.0)
+        self.assertGreater(
+            payload["modes"]["mode_aware"]["service_access"]["food"],
+            payload["modes"]["walk"]["service_access"]["food"],
+        )
+        png = runtime.render_tile(
+            resolution_m=1000, z=10, x=495, y=339, channel="mode_aware_total"
+        )
+        self.assertTrue(png.startswith(b"\x89PNG"))
 
     def test_visible_cell_is_a_land_weighted_mean_of_stored_values(self) -> None:
         lat, lon = lat_lon(X0 + 100.0, Y0 + 100.0)
@@ -204,9 +230,13 @@ class RuntimeTests(TestCase):
 class RuntimeServiceTests(TestCase):
     def test_dev_inspect_works_without_fine_tiles(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            shell_dir, score_dir = write_tiers(Path(temp))
+            root = Path(temp)
+            shell_dir, score_dir = write_tiers(root)
+            bike_shell_dir, bike_score_dir = write_tiers(root / "bike")
             summary = {"scoring_model": "daily-access-v4",
                        "daily_access": {"shell_dir": str(shell_dir), "score_dir": str(score_dir), "model": "daily-access-v4",
+                                        "available_modes": ["walk", "bike", "mode_aware"],
+                                        "modes": {"bike": {"shell_dir": str(bike_shell_dir), "score_dir": str(bike_score_dir)}},
                                         "fine_png_resolutions_m": [2500, 1000]}}
             model, info, warning = serve_from_db._daily_access_state(summary, "dev")
             self.assertEqual(model, "daily-access-v4")
@@ -221,6 +251,8 @@ class RuntimeServiceTests(TestCase):
             payload = service.inspect(lat=lat, lon=lon, zoom=8)
             self.assertEqual(payload["scoring_model"], "daily-access-v4")
             self.assertAlmostEqual(payload["total_score"], 60.0)
+            self.assertEqual(payload["available_modes"], ["walk", "bike", "mode_aware"])
+            self.assertAlmostEqual(payload["modes"]["bike"]["total_score"], 60.0)
             self.assertIsNotNone(payload["visible"])
             with self.assertRaises(ValueError):
                 service.get_surface_tile(resolution_m=1000, z=10, x=1, y=1)  # no fine tiles in dev
@@ -248,7 +280,14 @@ class PublishTests(TestCase):
             "transport": {"eligible": 4, "unbound": 1, "unbound_share": 0.25},
             "transport_feed:nta": {"eligible": 4, "unbound": 1, "unbound_share": 0.25},
         })
+        bike_root = root / "bike"
+        bike_shell_dir, bike_score_dir = write_tiers(bike_root)
+        bike_reach_dir = write_empty_reach_tier(bike_root, losses={
+            "transport": {"eligible": 4, "unbound": 1, "unbound_share": 0.25},
+            "transport_feed:nta": {"eligible": 4, "unbound": 1, "unbound_share": 0.25},
+        }, mode="bike")
         keys = build.TierKeys(graph="g", shell="s", reach="r", score="c")
+        bike_keys = build.TierKeys(graph="bg", shell="s", reach="r", score="c")
         import dataclasses
 
         @dataclasses.dataclass
@@ -263,6 +302,8 @@ class PublishTests(TestCase):
             study_area_wgs84=box(-8.6, 51.8, -8.3, 52.0),
             source_state=SimpleNamespace(extract_path="x.pbf", import_fingerprint="imp"),
             graph_dir=root / "graph", reality_fingerprint="gtfs", overture_dataset_signature="overture-test",
+            bike_graph_padding_m=5250.0, bike_keys=bike_keys, bike_graph_dir=root / "bike-graph",
+            bike_shell_dir=bike_shell_dir, bike_reach_dir=bike_reach_dir, bike_score_dir=bike_score_dir,
         ), None
 
     def test_checks_tiers_and_warns_on_feed_losses(self) -> None:
@@ -357,13 +398,24 @@ class FineVectorGridTests(TestCase):
         from fine_vector_pmtiles_worker import FineGridTileContext
 
         with tempfile.TemporaryDirectory() as temp:
-            shell_dir, score_dir = write_tiers(Path(temp))
-            context = FineGridTileContext(shell_dir=shell_dir, score_dir=score_dir)
+            root = Path(temp)
+            shell_dir, score_dir = write_tiers(root)
+            bike_shell_dir, bike_score_dir = write_tiers(root / "bike")
+            context = FineGridTileContext(
+                shell_dir=shell_dir,
+                score_dir=score_dir,
+                bike_shell_dir=bike_shell_dir,
+                bike_score_dir=bike_score_dir,
+            )
             self.assertTrue(context.daily_access)
             aggregates, valid = context.daily_access_aggregates(SHARD, 1000)
             self.assertTrue(valid[0, 0])
             self.assertAlmostEqual(float(aggregates["total_score"][0, 0]), 60.0, places=4)
             self.assertAlmostEqual(float(aggregates["score_shops"][0, 0]), 30.0, places=4)
             self.assertAlmostEqual(float(aggregates["score_road_proximity"][0, 0]), -1.5, places=4)
+            self.assertAlmostEqual(float(aggregates["bike_total_score"][0, 0]), 60.0, places=4)
+            self.assertAlmostEqual(float(aggregates["bike_score_shops"][0, 0]), 30.0, places=4)
+            self.assertAlmostEqual(float(aggregates["mode_aware_score_shops"][0, 0]), 29.06, places=4)
+            self.assertIn("mode_aware_total_score", aggregates)
             self.assertFalse(valid[0, -1])  # water
             del context

@@ -41,6 +41,20 @@ class DailyAccessBuildTests(TestCase):
         )
         keys = build.tier_keys(**base)
         self.assertEqual(keys, build.tier_keys(**base))
+        self.assertEqual(keys, build.tier_keys(**base, mode="walk"))
+        bike = build.tier_keys(**base, mode="bike")
+        self.assertNotEqual(bike.graph, keys.graph)
+        self.assertNotEqual(bike.shell, keys.shell)
+        self.assertNotEqual(bike.reach, keys.reach)
+        self.assertNotEqual(bike.score, keys.score)
+        with mock.patch.dict(
+            build.DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE["bike"],
+            {"food": 4100.0},
+        ):
+            changed_bike_reach = build.tier_keys(**base, mode="bike")
+            unchanged_walk = build.tier_keys(**base)
+        self.assertNotEqual(changed_bike_reach.reach, bike.reach)
+        self.assertEqual(unchanged_walk, keys)
         weights = build.tier_keys(**base, score_inputs="other-weights")
         self.assertEqual((weights.graph, weights.shell, weights.reach), (keys.graph, keys.shell, keys.reach))
         self.assertNotEqual(weights.score, keys.score)

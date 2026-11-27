@@ -35,12 +35,17 @@ from config import (
     CANONICAL_BASE_RESOLUTION_M,
     DAILY_ACCESS_ACCESS_STEP,
     DAILY_ACCESS_CATEGORY_MAX,
+    DAILY_ACCESS_DEFAULT_MODE,
+    DAILY_ACCESS_HEALTHCARE_MIX,
+    DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS,
+    DAILY_ACCESS_MODES,
     DAILY_ACCESS_NEEDS,
     DAILY_ACCESS_RUNTIME_AGGREGATE_CACHE_BYTES,
     DAILY_ACCESS_RUNTIME_SCORE_CACHE_BYTES,
     DAILY_ACCESS_RUNTIME_SHELL_CACHE_BYTES,
     DAILY_ACCESS_SCORE_MODEL,
     DAILY_ACCESS_SCORE_STEP,
+    DAILY_ACCESS_SHOP_MIX,
     DAILY_ACCESS_UINT16_MISSING,
     RAILWAY_PROXIMITY_MAX_PENALTY,
     ROAD_PROXIMITY_CLASS_SETTINGS,
@@ -61,9 +66,11 @@ _ROAD_MAX = max(float(s["max_penalty"]) for s in ROAD_PROXIMITY_CLASS_SETTINGS.v
 )
 
 
-def _channels() -> dict[str, tuple[str, int, float, float]]:
+def _base_channels() -> dict[str, tuple[str, int, float, float]]:
     """channel -> (shard field, index, decode scale, max for colouring)."""
-    channels: dict[str, tuple[str, int, float, float]] = {"total": ("total", -1, DAILY_ACCESS_SCORE_STEP, 100.0)}
+    channels: dict[str, tuple[str, int, float, float]] = {
+        "total": ("total", -1, DAILY_ACCESS_SCORE_STEP, 100.0)
+    }
     for index, category in enumerate(CATEGORIES):
         channels[category] = ("components", index, DAILY_ACCESS_SCORE_STEP, float(DAILY_ACCESS_CATEGORY_MAX[category]))
     channels["railway_proximity"] = ("penalties", 0, DAILY_ACCESS_SCORE_STEP, float(RAILWAY_PROXIMITY_MAX_PENALTY))
@@ -73,7 +80,18 @@ def _channels() -> dict[str, tuple[str, int, float, float]]:
     return channels
 
 
-CHANNELS = _channels()
+BASE_CHANNELS = _base_channels()
+CHANNELS: dict[str, tuple[str, str, int, float, float]] = {}
+for _mode in (*DAILY_ACCESS_MODES, "mode_aware"):
+    for _channel, (_field, _index, _scale, _maximum) in BASE_CHANNELS.items():
+        _name = _channel if _mode == DAILY_ACCESS_DEFAULT_MODE else f"{_mode}_{_channel}"
+        CHANNELS[_name] = (_mode, _field, _index, _scale, _maximum)
+
+NETWORK_COVERAGE_MODES = {
+    "network_coverage": "walk",
+    "bike_network_coverage": "bike",
+    "mode_aware_network_coverage": "mode_aware",
+}
 
 
 class ByteLRU:
@@ -154,11 +172,22 @@ def aggregate_status(coverage: float | None, land_m2: float) -> str:
 class DailyAccessSurfaceRuntime:
     """Serves one published (or dev) v4 build straight from its shards."""
 
-    def __init__(self, shell_dir: Path, score_dir: Path, tile_dir: Path | None = None, *, profile: str | None = None) -> None:
+    def __init__(
+        self,
+        shell_dir: Path,
+        score_dir: Path,
+        tile_dir: Path | None = None,
+        *,
+        profile: str | None = None,
+        bike_shell_dir: Path | None = None,
+        bike_score_dir: Path | None = None,
+    ) -> None:
         import json
 
         self.shell_dir = Path(shell_dir)
         self.score_dir = Path(score_dir)
+        self.bike_shell_dir = None if bike_shell_dir is None else Path(bike_shell_dir)
+        self.bike_score_dir = None if bike_score_dir is None else Path(bike_score_dir)
         self.tile_dir = None if tile_dir is None else Path(tile_dir)
         self.profile = profile
         manifest = json.loads((self.score_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -166,6 +195,35 @@ class DailyAccessSurfaceRuntime:
             raise RuntimeError(f"daily access score tier {self.score_dir} is not complete")
         self.manifest = manifest
         self.shard_ids = frozenset(str(shard) for shard in manifest.get("shards") or ())
+        self.available_modes = ["walk"]
+        if (self.bike_shell_dir is None) != (self.bike_score_dir is None):
+            raise RuntimeError("daily access bike shell and score tiers must be supplied together")
+        if self.bike_score_dir is not None:
+            assert self.bike_shell_dir is not None
+            bike_shell_manifest = json.loads(
+                (self.bike_shell_dir / "manifest.json").read_text(encoding="utf-8")
+            )
+            bike_manifest = json.loads((self.bike_score_dir / "manifest.json").read_text(encoding="utf-8"))
+            bike_shell_shards = frozenset(
+                str(shard) for shard in bike_shell_manifest.get("shards") or ()
+            )
+            bike_shards = frozenset(str(shard) for shard in bike_manifest.get("shards") or ())
+            if (
+                bike_shell_manifest.get("status") != "complete"
+                or bike_manifest.get("status") != "complete"
+                or bike_shell_shards != self.shard_ids
+                or bike_shards != self.shard_ids
+            ):
+                raise RuntimeError("daily access bike shell/score tiers are incomplete or misaligned")
+            self.available_modes.extend(["bike", "mode_aware"])
+        self.channels = {
+            name: spec for name, spec in CHANNELS.items() if spec[0] in self.available_modes
+        }
+        self.network_coverage_modes = {
+            name: mode
+            for name, mode in NETWORK_COVERAGE_MODES.items()
+            if mode in self.available_modes
+        }
         self._shells = ByteLRU(DAILY_ACCESS_RUNTIME_SHELL_CACHE_BYTES)
         self._scores = ByteLRU(DAILY_ACCESS_RUNTIME_SCORE_CACHE_BYTES)
         self._aggregates = ByteLRU(DAILY_ACCESS_RUNTIME_AGGREGATE_CACHE_BYTES)
@@ -182,12 +240,83 @@ class DailyAccessSurfaceRuntime:
                 cached = self._shells.put(shard_id, {name: np.asarray(data[name]) for name in ("land_area_m2", "x_min_m", "y_min_m")})
         return cached
 
-    def _score(self, shard_id: str) -> dict[str, np.ndarray]:
-        cached = self._scores.get(shard_id)
+    def _raw_score(self, shard_id: str, mode: str = "walk") -> dict[str, np.ndarray]:
+        cache_key = (mode, shard_id)
+        cached = self._scores.get(cache_key)
         if cached is None:
-            with np.load(self.score_dir / "shards" / f"{shard_id}.npz", allow_pickle=False) as data:
-                cached = self._scores.put(shard_id, {name: np.asarray(data[name]) for name in data.files})
+            directory = self.score_dir if mode == "walk" else self.bike_score_dir
+            if directory is None:
+                raise RuntimeError(f"daily access mode {mode!r} is unavailable")
+            with np.load(directory / "shards" / f"{shard_id}.npz", allow_pickle=False) as data:
+                cached = self._scores.put(cache_key, {name: np.asarray(data[name]) for name in data.files})
         return cached
+
+    @staticmethod
+    def _quantize(values: np.ndarray, scale: float, *, missing: np.ndarray) -> np.ndarray:
+        codes = np.floor(np.clip(values, 0.0, None) / scale + 0.5).astype(np.uint16)
+        return np.where(missing, DAILY_ACCESS_UINT16_MISSING, codes).astype(np.uint16)
+
+    def _mode_aware_score(self, shard_id: str) -> dict[str, np.ndarray]:
+        cache_key = ("mode_aware", shard_id)
+        cached = self._scores.get(cache_key)
+        if cached is not None:
+            return cached
+        walk = self._raw_score(shard_id, "walk")
+        bike = self._raw_score(shard_id, "bike")
+        outside = (walk["network_status"] == NETWORK_STATUS_CODES["outside_mask"])
+        walk_access = np.where(
+            walk["service_access"] == DAILY_ACCESS_UINT16_MISSING,
+            0.0,
+            walk["service_access"].astype(np.float64) * DAILY_ACCESS_ACCESS_STEP,
+        )
+        bike_access = np.where(
+            bike["service_access"] == DAILY_ACCESS_UINT16_MISSING,
+            0.0,
+            bike["service_access"].astype(np.float64) * DAILY_ACCESS_ACCESS_STEP,
+        )
+        best = np.maximum(walk_access, bike_access)
+        second = np.minimum(walk_access, bike_access)
+        access = np.minimum(
+            best + DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS * second * (1.0 - best),
+            1.0,
+        )
+        components = np.empty((len(CATEGORIES), *outside.shape), dtype=np.float64)
+        components[0] = DAILY_ACCESS_CATEGORY_MAX["shops"] * (
+            DAILY_ACCESS_SHOP_MIX["food"] * access[0]
+            + DAILY_ACCESS_SHOP_MIX["other_retail"] * access[1]
+        )
+        components[1] = DAILY_ACCESS_CATEGORY_MAX["transport"] * access[5]
+        components[2] = DAILY_ACCESS_CATEGORY_MAX["healthcare"] * (
+            DAILY_ACCESS_HEALTHCARE_MIX["primary_care"] * access[2]
+            + DAILY_ACCESS_HEALTHCARE_MIX["pharmacy"] * access[3]
+        )
+        components[3] = DAILY_ACCESS_CATEGORY_MAX["parks"] * access[4]
+        penalties = np.where(
+            walk["penalties"] == DAILY_ACCESS_UINT16_MISSING,
+            0.0,
+            walk["penalties"].astype(np.float64) * DAILY_ACCESS_SCORE_STEP,
+        )
+        total = np.clip(components.sum(axis=0) - penalties.sum(axis=0), 0.0, 100.0)
+        ok = (
+            (walk["network_status"] == NETWORK_STATUS_CODES["ok"])
+            | (bike["network_status"] == NETWORK_STATUS_CODES["ok"])
+        )
+        status = np.where(
+            outside,
+            NETWORK_STATUS_CODES["outside_mask"],
+            np.where(ok, NETWORK_STATUS_CODES["ok"], NETWORK_STATUS_CODES["no_walking_network"]),
+        ).astype(np.uint8)
+        cached = {
+            "total": self._quantize(total, DAILY_ACCESS_SCORE_STEP, missing=outside),
+            "components": self._quantize(components, DAILY_ACCESS_SCORE_STEP, missing=outside[None, ...]),
+            "penalties": self._quantize(penalties, DAILY_ACCESS_SCORE_STEP, missing=outside[None, ...]),
+            "service_access": self._quantize(access, DAILY_ACCESS_ACCESS_STEP, missing=outside[None, ...]),
+            "network_status": status,
+        }
+        return self._scores.put(cache_key, cached)
+
+    def _score(self, shard_id: str, mode: str = "walk") -> dict[str, np.ndarray]:
+        return self._mode_aware_score(shard_id) if mode == "mode_aware" else self._raw_score(shard_id, mode)
 
     @staticmethod
     def _shard_origin(x: float, y: float) -> tuple[int, int]:
@@ -195,8 +324,8 @@ class DailyAccessSurfaceRuntime:
         return int(math.floor(x / step) * step), int(math.floor(y / step) * step)
 
     def _channel_field(self, shard_id: str, channel: str) -> np.ndarray:
-        field, index, scale, _ = CHANNELS[channel]
-        raw = self._score(shard_id)[field]
+        mode, field, index, scale, _ = self.channels[channel]
+        raw = self._score(shard_id, mode)[field]
         return decode(raw if index < 0 else raw[index], scale)
 
     def aggregated(self, shard_id: str, resolution_m: int, channel: str) -> tuple[np.ndarray, np.ndarray]:
@@ -207,8 +336,9 @@ class DailyAccessSurfaceRuntime:
             return cached
         weights = np.asarray(self._shell(shard_id)["land_area_m2"], dtype=np.float64)
         factor = int(resolution_m) // CANONICAL_BASE_RESOLUTION_M
-        if channel == "network_coverage":
-            status = self._score(shard_id)["network_status"]
+        if channel in self.network_coverage_modes:
+            mode = self.network_coverage_modes[channel]
+            status = self._score(shard_id, mode)["network_status"]
             values = np.where(status == NETWORK_STATUS_CODES["outside_mask"], np.nan, (status == NETWORK_STATUS_CODES["ok"]).astype(np.float64))
         else:
             values = self._channel_field(shard_id, channel)
@@ -217,8 +347,12 @@ class DailyAccessSurfaceRuntime:
 
     # -- inspect -----------------------------------------------------------------
 
-    def _canonical(self, shard_id: str, row: int, col: int) -> dict[str, Any]:
-        score = self._score(shard_id)
+    @staticmethod
+    def _mode_channel(mode: str, channel: str) -> str:
+        return channel if mode == "walk" else f"{mode}_{channel}"
+
+    def _canonical_mode(self, shard_id: str, row: int, col: int, mode: str) -> dict[str, Any]:
+        score = self._score(shard_id, mode)
         status = _STATUS_BY_CODE.get(int(score["network_status"][row, col]), "outside_mask")
         land = float(self._shell(shard_id)["land_area_m2"][row, col])
         payload: dict[str, Any] = {
@@ -249,6 +383,18 @@ class DailyAccessSurfaceRuntime:
         )
         return payload
 
+    def _canonical(self, shard_id: str, row: int, col: int) -> dict[str, Any]:
+        modes = {
+            mode: self._canonical_mode(shard_id, row, col, mode)
+            for mode in self.available_modes
+        }
+        return {
+            **modes["walk"],
+            "available_modes": list(self.available_modes),
+            "default_mode": DAILY_ACCESS_DEFAULT_MODE,
+            "modes": modes,
+        }
+
     def _visible(self, metric_x: float, metric_y: float, resolution_m: int) -> dict[str, Any]:
         """Aggregate of the canonical cells of the visible cell (may span shards)."""
         cell_x = math.floor(metric_x / resolution_m) * resolution_m
@@ -258,15 +404,16 @@ class DailyAccessSurfaceRuntime:
         land_total = 0.0
         for shard_id, row0, row1, col0, col1 in self._windows(cell_x, cell_y, cell_x + resolution_m, cell_y + resolution_m):
             weights = np.asarray(self._shell(shard_id)["land_area_m2"][row0:row1, col0:col1], dtype=np.float64)
-            status = self._score(shard_id)["network_status"][row0:row1, col0:col1]
+            status = self._score(shard_id, "walk")["network_status"][row0:row1, col0:col1]
             weights = np.where(status == NETWORK_STATUS_CODES["outside_mask"], 0.0, weights)
             land_total += float(weights.sum())
-            covered = (status == NETWORK_STATUS_CODES["ok"]).astype(np.float64)
-            sums["network_coverage"] = sums.get("network_coverage", 0.0) + float((covered * weights).sum())
-            land_by_channel["network_coverage"] = land_by_channel.get("network_coverage", 0.0) + float(weights.sum())
-            for channel in CHANNELS:
-                field, index, scale, _ = CHANNELS[channel]
-                raw = self._score(shard_id)[field]
+            for coverage_channel, mode in self.network_coverage_modes.items():
+                mode_status = self._score(shard_id, mode)["network_status"][row0:row1, col0:col1]
+                covered = (mode_status == NETWORK_STATUS_CODES["ok"]).astype(np.float64)
+                sums[coverage_channel] = sums.get(coverage_channel, 0.0) + float((covered * weights).sum())
+                land_by_channel[coverage_channel] = land_by_channel.get(coverage_channel, 0.0) + float(weights.sum())
+            for channel, (mode, field, index, scale, _maximum) in self.channels.items():
+                raw = self._score(shard_id, mode)[field]
                 values = decode((raw if index < 0 else raw[index])[row0:row1, col0:col1], scale)
                 finite = np.isfinite(values)
                 sums[channel] = sums.get(channel, 0.0) + float(np.where(finite, values * weights, 0.0).sum())
@@ -277,6 +424,25 @@ class DailyAccessSurfaceRuntime:
             return sums[channel] / land if land > 0.0 else None
 
         coverage = mean("network_coverage")
+        modes: dict[str, dict[str, Any]] = {}
+        for mode in self.available_modes:
+            prefix = "" if mode == "walk" else f"{mode}_"
+            mode_coverage = mean(f"{prefix}network_coverage")
+            modes[mode] = {
+                "network_status": aggregate_status(mode_coverage, land_total),
+                "network_coverage_share": mode_coverage,
+                "total_score": mean(self._mode_channel(mode, "total")),
+                "component_scores": {
+                    category: mean(self._mode_channel(mode, category)) for category in CATEGORIES
+                },
+                "penalties": {
+                    penalty: mean(self._mode_channel(mode, penalty)) for penalty in PENALTIES
+                },
+                "service_access": {
+                    need: mean(self._mode_channel(mode, f"access_{need}"))
+                    for need in DAILY_ACCESS_NEEDS
+                },
+            }
         visible: dict[str, Any] = {
             "resolution_m": int(resolution_m),
             "cell_min_x_m": int(cell_x),
@@ -284,15 +450,9 @@ class DailyAccessSurfaceRuntime:
             "land_area_m2": land_total,
             "network_status": aggregate_status(coverage, land_total),
             "network_coverage_share": coverage,
-            "total_score": mean("total"),
-            "component_scores": None,
-            "penalties": None,
-            "service_access": None,
+            **modes["walk"],
+            "modes": modes,
         }
-        if land_total > 0.0:
-            visible["component_scores"] = {category: mean(category) for category in CATEGORIES}
-            visible["penalties"] = {penalty: mean(penalty) for penalty in PENALTIES}
-            visible["service_access"] = {need: mean(f"access_{need}") for need in DAILY_ACCESS_NEEDS}
         return visible
 
     def _windows(self, min_x: float, min_y: float, max_x: float, max_y: float) -> Iterator[tuple[str, int, int, int, int]]:
@@ -354,14 +514,18 @@ class DailyAccessSurfaceRuntime:
         """PNG of one channel (only that channel is aggregated and cached)."""
         from .surface import _metric_tile_bounds, _tile_pixel_metric_coordinates, colorize_scores, encode_png_rgba
 
-        if channel not in CHANNELS and channel != "network_coverage":
+        if channel not in self.channels and channel not in self.network_coverage_modes:
             raise ValueError(f"Unsupported daily access channel: {channel}")
         cache_path = None
         if self.tile_dir is not None:
             cache_path = self.tile_dir / "v4" / channel / str(int(resolution_m)) / str(int(z)) / str(int(x)) / f"{int(y)}.png"
             if cache_path.exists():
                 return cache_path.read_bytes()
-        max_value = 1.0 if channel == "network_coverage" else CHANNELS[channel][3]
+        max_value = (
+            1.0
+            if channel in self.network_coverage_modes
+            else self.channels[channel][4]
+        )
         bounds = _metric_tile_bounds(z, x, y)
         metric_x, metric_y = _tile_pixel_metric_coordinates(z, x, y)
         block = int(resolution_m)

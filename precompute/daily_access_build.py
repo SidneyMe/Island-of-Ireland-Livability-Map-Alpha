@@ -48,10 +48,12 @@ from config import (
     DAILY_ACCESS_CLASSIFICATION_VERSION,
     DAILY_ACCESS_DISTANCE_STEP_M,
     DAILY_ACCESS_GEOMETRY_VERSION,
+    DAILY_ACCESS_DEFAULT_MODE,
+    DAILY_ACCESS_MODES,
     DAILY_ACCESS_NEEDS,
     DAILY_ACCESS_REACH_BUFFER_M,
     DAILY_ACCESS_REACH_CACHE_VERSION,
-    DAILY_ACCESS_SEARCH_CUTOFF_M,
+    DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE,
     DAILY_ACCESS_SCORE_BLOCK_CELLS,
     DAILY_ACCESS_SCORE_MODEL,
     DAILY_ACCESS_SCORE_MODEL_VERSION,
@@ -79,6 +81,7 @@ from config import (
     WALKGRAPH_FORMAT_VERSION,
     daily_access_classification_params,
     daily_access_geometry_params,
+    daily_access_mode_aware_params,
     daily_access_score_params,
     hash_dict,
     normalize_build_profile,
@@ -200,6 +203,7 @@ def tier_keys(
     mask_identity: str,
     reach_inputs: str,
     score_inputs: str | None = None,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
 ) -> TierKeys:
     """Chained keys: shell <- geometry + mask, reach <- shell + inputs, score <- reach + model.
 
@@ -207,14 +211,18 @@ def tier_keys(
     (import / transit / Overture state and classification). ``score_inputs``
     defaults to the current weights, curves and penalty formulas.
     """
-    graph = hash_dict(
-        {
+    normalized_mode = str(mode).strip().lower()
+    if normalized_mode not in DAILY_ACCESS_MODES:
+        raise ValueError(f"Unsupported daily access mode: {mode!r}")
+    graph_payload = {
             "extract_fingerprint": extract_fingerprint,
             "bbox": [round(value, 8) for value in graph_bbox],
             "padding_m": graph_padding_m,
             "format_version": WALKGRAPH_FORMAT_VERSION,
-        }
-    )
+    }
+    if normalized_mode != DAILY_ACCESS_DEFAULT_MODE:
+        graph_payload["graph_profile"] = normalized_mode
+    graph = hash_dict(graph_payload)
     geometry = daily_access_geometry_params()
     shell = hash_dict(
         {
@@ -233,11 +241,21 @@ def tier_keys(
             "shell": shell,
             "geometry": geometry,
             "classification": daily_access_classification_params(),
+            **(
+                {
+                    "mode": normalized_mode,
+                    "search_cutoff_m": DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[normalized_mode],
+                }
+                if normalized_mode != DAILY_ACCESS_DEFAULT_MODE
+                else {}
+            ),
             "version": DAILY_ACCESS_REACH_CACHE_VERSION,
         }
     )
     if score_inputs is None:
-        score_inputs = hash_dict({"score": daily_access_score_params(), "penalties": penalty_params()})
+        score_inputs = hash_dict(
+            {"score": daily_access_score_params(normalized_mode), "penalties": penalty_params()}
+        )
     score = hash_dict({"inputs": score_inputs, "reach": reach, "version": DAILY_ACCESS_SCORE_SHARD_VERSION})
     return TierKeys(graph=graph, shell=shell, reach=reach, score=score)
 
@@ -501,6 +519,7 @@ def reach_tier_problems(
     directory: Path,
     *,
     key: str | None = None,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     verify_checksums: bool = True,
 ) -> list[str]:
     """Validate the complete immutable reach cache and its array contracts."""
@@ -569,7 +588,7 @@ def reach_tier_problems(
             need = service_kind_need(kind)
             expected_metadata = (
                 KIND_INDEX[kind], need, service_kind_quality(kind), service_kind_k(kind),
-                float(DAILY_ACCESS_SEARCH_CUTOFF_M[need]),
+                float(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE[mode][need]),
             )
             actual_metadata = (
                 int(item["kind_index"]), str(item["need"]), float(item["quality"]), k, float(item["cutoff_m"]),
@@ -880,6 +899,7 @@ def build_scores(
     penalty_fn,
     work_dir: Path,
     progress: ProgressFn,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     block_cells: int = DAILY_ACCESS_SCORE_BLOCK_CELLS,
 ) -> dict[str, Any]:
     from .daily_access_native import penalties_for_records
@@ -909,6 +929,7 @@ def build_scores(
             block_nodes,
             block_kinds,
             block_dir,
+            mode=mode,
             objects=objects,
             penalties=penalties_for_records(records, penalty_fn),
         )
@@ -950,6 +971,224 @@ def build_scores(
         "network_status_valid_cells": status_counts,
         "mean_total_ok_cells": round(total_sum / total_cells, 3) if total_cells else None,
         "peak_block_cells": peak_block_cells,
+    }
+
+
+def build_bike_tiers(
+    context: "BuildContext",
+    *,
+    entries: list[ShardEntry],
+    mask_path: Path,
+    work_dir: Path,
+    force: bool,
+    allow_missing_transport: bool,
+    progress: ProgressFn,
+) -> dict[str, Any]:
+    """Build the exact v4 pipeline on the bike graph; failures are publish-fatal."""
+    from db_postgis import load_railway_corridor_rows, load_road_rows
+    from db_postgis.daily_access_green import stage_green_sites, stage_park_approaches
+    from network import graph_meta_matches, run_walkgraph_build
+
+    from .daily_access_reference import load_reference_graph
+
+    keys = context.bike_keys
+    graph_dir = context.bike_graph_dir
+    shell_dir = context.bike_shell_dir
+    reach_dir = context.bike_reach_dir
+    score_dir = context.bike_score_dir
+    graph_padding_m = context.bike_graph_padding_m
+    if any(value is None for value in (keys, graph_dir, shell_dir, reach_dir, score_dir, graph_padding_m)):
+        raise DailyAccessBuildError("bike build context is incomplete")
+    assert keys is not None and graph_dir is not None and shell_dir is not None
+    assert reach_dir is not None and score_dir is not None and graph_padding_m is not None
+
+    if force or not graph_meta_matches(
+        graph_dir,
+        extract_fingerprint=context.source_state.extract_fingerprint,
+        bbox=context.graph_bbox,
+        bbox_padding_m=graph_padding_m,
+        graph_profile="bike",
+    ):
+        run_walkgraph_build(
+            Path(context.source_state.extract_path or OSM_EXTRACT_PATH),
+            graph_dir,
+            walkgraph_bin=WALKGRAPH_BIN,
+            bbox=context.graph_bbox,
+            bbox_padding_m=graph_padding_m,
+            extract_fingerprint=context.source_state.extract_fingerprint,
+            graph_profile="bike",
+        )
+
+    shard_ids = [entry.shard_id for entry in entries]
+    reach_buffer_m = max(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE["bike"].values())
+    common = {
+        "profile": context.profile,
+        "mode": "bike",
+        "graph_profile": "bike",
+        "resolution_m": CANONICAL_BASE_RESOLUTION_M,
+        "shard_size_m": SURFACE_SHARD_SIZE_M,
+        "quantization": QUANTIZATION,
+        "mask_identity": context.mask_identity,
+        "mask": "main-island land mask (sea/estuaries; inland water is not cut out), never clipped to the profile",
+        "study_area_bounds_metric": [round(value, 3) for value in context.study_area_metric.bounds],
+        "graph_bbox_wgs84": list(context.graph_bbox),
+        "graph_padding_m": graph_padding_m,
+        "reach_buffer_m": reach_buffer_m,
+        "import_fingerprint": context.source_state.import_fingerprint,
+        "transit_reality_fingerprint": context.reality_fingerprint,
+        "overture_dataset_signature": context.overture_dataset_signature,
+    }
+
+    if force or tier_problems(shell_dir, key=keys.shell, shard_ids=shard_ids, fields=SHELL_FIELDS):
+        begin_tier(shell_dir, "shell", keys.shell, {**common, "shards": shard_ids})
+        bike_shell_work = work_dir / "bike_shell"
+        bike_shell_work.mkdir(parents=True, exist_ok=True)
+        shell_stats = build_shells(
+            graph_dir=graph_dir,
+            land_mask=context.land_mask,
+            study_area_metric=context.study_area_metric,
+            entries=entries,
+            shell_dir=shell_dir,
+            work_dir=bike_shell_work,
+            progress=progress,
+        )
+        complete_tier(shell_dir, {"stats": shell_stats})
+    shell_manifest = _read_manifest(shell_dir) or {}
+    shell_stats = dict(shell_manifest.get("stats") or {})
+    if shell_stats.get("valid_land_without_origin"):
+        raise DailyAccessBuildError(
+            f"{shell_stats['valid_land_without_origin']} valid land cell(s) have no bike origin"
+        )
+
+    if force or reach_tier_problems(reach_dir, key=keys.reach, mode="bike"):
+        begin_tier(reach_dir, "reach", keys.reach, common)
+        graph = load_reference_graph(graph_dir, verify_components=False)
+        reach_metric = context.study_area_metric.envelope.buffer(reach_buffer_m).envelope
+        reach_area_wgs84 = transform(lambda x, y, z=None: TO_WGS84(x, y), reach_metric)
+        places, overture_green, stops, class_stats = load_v4_objects(
+            context.engine,
+            import_fingerprint=context.source_state.import_fingerprint,
+            reality_fingerprint=context.reality_fingerprint,
+            reach_area_wgs84=reach_area_wgs84,
+        )
+        with context.engine.begin() as connection:
+            green_sites, green_stats = stage_green_sites(
+                connection,
+                import_fingerprint=context.source_state.import_fingerprint,
+                study_area_wgs84=reach_area_wgs84,
+                overture_green_rows=overture_green,
+                buffer_m=0.0,
+            )
+            approaches, intervals, approach_stats = stage_park_approaches(
+                connection,
+                green_sites,
+                node_x=graph.node_x,
+                node_y=graph.node_y,
+                offsets=graph.offsets,
+                targets=graph.targets,
+                lengths=graph.lengths,
+                edge_flags=graph.edge_flags,
+            )
+        del graph
+        gc.collect()
+        sources = build_sources(
+            places=places,
+            green_sites=green_sites,
+            park_approaches=approaches,
+            park_intervals=intervals,
+            stops=stops,
+        )
+        objects = write_objects(sources, context.land_mask, reach_dir / "objects")
+        bike_work = work_dir / "bike_reach"
+        bike_work.mkdir(parents=True, exist_ok=True)
+        seeds, reasons = native_objects(graph_dir, mask_path, objects, bike_work)
+        seeds = merge_area_seeds(seeds, sources.area_seeds)
+        losses, warnings = loss_report(sources, reasons)
+        warnings = warnings + transport_gate(losses, allow_missing_transport=allow_missing_transport)
+        for warning in warnings:
+            progress(f"[daily-access bike] warning: {warning}")
+        labels = sources.labels.as_json()
+        del sources, places, green_sites, approaches, intervals, stops, overture_green
+        gc.collect()
+        origins = collect_origin_nodes(shell_dir, entries)
+        _, kinds = native_reach(
+            graph_dir,
+            seeds,
+            origins,
+            bike_work,
+            mode="bike",
+            load_results=False,
+        )
+        seed_counts = {kind: int(len(values)) for kind, values in seeds.items()}
+        del seeds
+        gc.collect()
+        save_reach_cache(reach_dir, origins, kinds, labels)
+        complete_tier(
+            reach_dir,
+            {
+                "origins": int(len(origins)),
+                "losses": losses,
+                "warnings": warnings,
+                "classification": class_stats,
+                "green": green_stats,
+                "park_approaches": approach_stats,
+                "seeds_by_kind": seed_counts,
+                "objects": objects.count,
+            },
+            shard_dir=None,
+            inventory_files=True,
+        )
+
+    if force or tier_problems(score_dir, key=keys.score, shard_ids=shard_ids, fields=SCORE_FIELDS):
+        begin_tier(
+            score_dir,
+            "score",
+            keys.score,
+            {
+                **common,
+                "shards": shard_ids,
+                "reach_key": keys.reach,
+                "shell_key": keys.shell,
+                "score_params": daily_access_score_params("bike"),
+                "penalty_params": penalty_params(),
+            },
+        )
+        penalty_fn = CellPenalties(
+            load_road_rows(context.engine, context.source_state.import_fingerprint),
+            load_railway_corridor_rows(context.engine, context.reality_fingerprint)
+            if context.reality_fingerprint and context.reality_fingerprint != "transit-unavailable"
+            else [],
+        )
+        score_stats = build_scores(
+            graph_dir=graph_dir,
+            mask_path=mask_path,
+            shell_dir=shell_dir,
+            reach_dir=reach_dir,
+            score_dir=score_dir,
+            entries=entries,
+            penalty_fn=penalty_fn,
+            work_dir=work_dir / "bike_score",
+            progress=progress,
+            mode="bike",
+        )
+        complete_tier(score_dir, {"stats": score_stats})
+
+    reach_manifest = _read_manifest(reach_dir) or {}
+    score_manifest = _read_manifest(score_dir) or {}
+    return {
+        "keys": keys.__dict__,
+        "paths": {
+            "graph": str(graph_dir),
+            "shell": str(shell_dir),
+            "reach": str(reach_dir),
+            "score": str(score_dir),
+        },
+        "shell": shell_stats,
+        "reach": {
+            key: reach_manifest.get(key)
+            for key in ("origins", "losses", "warnings", "park_approaches")
+        },
+        "score": dict(score_manifest.get("stats") or {}),
     }
 
 
@@ -1045,6 +1284,12 @@ class BuildContext:
     transit_analysis_window_days: int = GTFS_ANALYSIS_WINDOW_DAYS
     transit_service_desert_window_days: int = GTFS_SERVICE_DESERT_WINDOW_DAYS
     overture_dataset_signature: str = ""
+    bike_graph_padding_m: float | None = None
+    bike_keys: TierKeys | None = None
+    bike_graph_dir: Path | None = None
+    bike_shell_dir: Path | None = None
+    bike_reach_dir: Path | None = None
+    bike_score_dir: Path | None = None
 
 
 def resolve_build_context(profile: str | None, *, engine=None) -> BuildContext:
@@ -1098,6 +1343,19 @@ def resolve_build_context(profile: str | None, *, engine=None) -> BuildContext:
         mask_identity=mask_id,
         reach_inputs=reach_inputs,
     )
+    bike_graph_padding_m = float(
+        max(DAILY_ACCESS_SEARCH_CUTOFF_M_BY_MODE["bike"].values())
+        + DAILY_ACCESS_SNAP_RADIUS_M
+    )
+    bike_keys = tier_keys(
+        extract_fingerprint=source_state.extract_fingerprint,
+        graph_bbox=graph_bbox,
+        graph_padding_m=bike_graph_padding_m,
+        geo_hash=hashes.geo_hash,
+        mask_identity=mask_id,
+        reach_inputs=reach_inputs,
+        mode="bike",
+    )
     root = DAILY_ACCESS_CACHE_DIR
     return BuildContext(
         engine=engine,
@@ -1118,6 +1376,12 @@ def resolve_build_context(profile: str | None, *, engine=None) -> BuildContext:
         score_dir=root / f"score_{keys.score}",
         transit_reality_state=reality,
         overture_dataset_signature=overture_signature,
+        bike_graph_padding_m=bike_graph_padding_m,
+        bike_keys=bike_keys,
+        bike_graph_dir=root / f"graph_{bike_keys.graph}" / "bike_graph",
+        bike_shell_dir=root / f"shell_bike_{bike_keys.shell}",
+        bike_reach_dir=root / f"reach_bike_{bike_keys.reach}",
+        bike_score_dir=root / f"score_bike_{bike_keys.score}",
     )
 
 
@@ -1201,6 +1465,7 @@ def run_daily_access_build(
         "import_fingerprint": source_state.import_fingerprint,
         "transit_reality_fingerprint": reality_fingerprint,
         "keys": keys.__dict__,
+        "mode_aware": daily_access_mode_aware_params(),
         "shards": len(entries),
         "graph_dir": str(graph_dir),
     }
@@ -1324,10 +1589,35 @@ def run_daily_access_build(
             complete_tier(score_dir, {"stats": score_stats})
             lap("score")
         summary["score"] = (_read_manifest(score_dir) or {})["stats"]
-    summary["paths"] = {"shell": str(shell_dir), "reach": str(reach_dir), "score": str(score_dir)}
+        summary["bike"] = build_bike_tiers(
+            context,
+            entries=entries,
+            mask_path=mask_path,
+            work_dir=work_dir,
+            force=force,
+            allow_missing_transport=allow_missing_transport,
+            progress=progress,
+        )
+        lap("bike")
+    summary["paths"] = {
+        "shell": str(shell_dir),
+        "reach": str(reach_dir),
+        "score": str(score_dir),
+        "bike_shell": str(context.bike_shell_dir),
+        "bike_reach": str(context.bike_reach_dir),
+        "bike_score": str(context.bike_score_dir),
+    }
     summary["cache_bytes"] = {
         name: sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
-        for name, directory in (("shell", shell_dir), ("reach", reach_dir), ("score", score_dir))
+        for name, directory in (
+            ("shell", shell_dir),
+            ("reach", reach_dir),
+            ("score", score_dir),
+            ("bike_shell", context.bike_shell_dir),
+            ("bike_reach", context.bike_reach_dir),
+            ("bike_score", context.bike_score_dir),
+        )
+        if directory is not None
     }
     summary["timings_s"] = timings
     summary["peak_memory_gib"] = {
@@ -1351,6 +1641,7 @@ __all__ = [
     "SHELL_FIELDS",
     "BuildContext",
     "begin_tier",
+    "build_bike_tiers",
     "build_scores",
     "build_shells",
     "collect_origin_nodes",

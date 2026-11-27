@@ -22,6 +22,7 @@ import {
   activeGridLayerId,
   activeGridLifecycle,
   activeGridOutlineLayerId,
+  availableGridTravelModes,
   buildActiveGridLayers,
   buildStyle,
   debugGridVisibilityPlan,
@@ -36,8 +37,10 @@ import {
   gridScoreLayerField,
   gridScoreLayerLabel,
   gridScoreLayerOptions,
+  gridTravelModeLabel,
   noiseOutlineOpacity,
   normalizeGridScoreLayer,
+  normalizeGridTravelMode,
   resolutionForZoom,
   LANDUSE_CONTEXT_FILL_LAYER_ID,
   LANDUSE_CONTEXT_OUTLINE_LAYER_ID,
@@ -160,6 +163,8 @@ const devRuntime = {
   assert.equal(gridScoreLayerLabel("TRANSPORT"), "Transport");
   assert.equal(gridScoreLayerLabel("not-a-layer"), "Combined");
   assert.equal(gridScoreLayerField("parks"), "score_parks");
+  assert.equal(gridScoreLayerField("parks", "bike"), "bike_score_parks");
+  assert.equal(gridScoreLayerField("combined", "mode_aware"), "mode_aware_total_score");
   assert.equal(normalizeGridScoreLayer("healthcare"), "healthcare");
   assert.equal(normalizeGridScoreLayer("not-a-layer"), "combined");
   assert.deepEqual(gridFillColorExpression("healthcare"), [
@@ -172,6 +177,14 @@ const devRuntime = {
     75, "#5dc863",
     100, "#fde725"
   ]);
+  const modeRuntime = { daily_access: { available_modes: ["walk", "bike", "mode_aware"] } };
+  assert.deepEqual(
+    availableGridTravelModes(modeRuntime).map(function (option) { return option.value; }),
+    ["walk", "bike", "mode_aware"]
+  );
+  assert.equal(normalizeGridTravelMode("bike", modeRuntime), "bike");
+  assert.equal(normalizeGridTravelMode("bike", {}), "walk");
+  assert.equal(gridTravelModeLabel("mode_aware"), "Mode-aware");
 }
 
 {
@@ -543,5 +556,7 @@ console.log("frontend runtime contract checks passed");
   assert.deepEqual(legacyFieldsUnavailable({}), []);
   assert.equal(surfaceChannelForScoreLayer("combined"), "total");
   assert.equal(surfaceChannelForScoreLayer("Parks"), "parks");
+  assert.equal(surfaceChannelForScoreLayer("Parks", "bike"), "bike_parks");
+  assert.equal(surfaceChannelForScoreLayer("combined", "mode_aware"), "mode_aware_total");
   assert.equal(surfaceChannelForScoreLayer("nonsense"), "total");
 }

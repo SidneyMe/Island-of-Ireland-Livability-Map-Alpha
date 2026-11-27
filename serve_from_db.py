@@ -265,6 +265,10 @@ def _daily_access_state(summary_json: dict[str, Any], profile: str) -> tuple[str
     info = dict(summary_json.get("daily_access") or {})
     shell_dir = Path(str(info.get("shell_dir") or ""))
     score_dir = Path(str(info.get("score_dir") or ""))
+    modes = dict(info.get("modes") or {})
+    bike_info = dict(modes.get("bike") or {})
+    bike_shell_dir = Path(str(bike_info.get("shell_dir") or ""))
+    bike_score_dir = Path(str(bike_info.get("score_dir") or ""))
     warning = None
     try:
         from precompute.daily_access_build import surface_tier_problems
@@ -277,9 +281,25 @@ def _daily_access_state(summary_json: dict[str, Any], profile: str) -> tuple[str
             reach_key=keys.get("reach"),
             score_key=keys.get("score"),
         )
+        if bike_info:
+            bike_keys = bike_info.get("keys") or {}
+            bike_problems, bike_shards = surface_tier_problems(
+                bike_shell_dir,
+                bike_score_dir,
+                shell_key=bike_keys.get("shell"),
+                reach_key=bike_keys.get("reach"),
+                score_key=bike_keys.get("score"),
+            )
+            problems.extend(f"bike: {problem}" for problem in bike_problems)
+            if list(bike_shards) != list(_shard_ids):
+                problems.append("bike: shard inventory differs from walk")
+        elif "bike" in set(info.get("available_modes") or ()):
+            problems.append("bike: published mode metadata is missing")
     except Exception as exc:  # noqa: BLE001 - reported, never fatal for the map
         problems = [str(exc)]
     info["inspect_ready"] = not problems
+    info["bike_shell_dir"] = str(bike_shell_dir) if bike_info else None
+    info["bike_score_dir"] = str(bike_score_dir) if bike_info else None
     info["fine_png_enabled"] = bool(info["inspect_ready"] and profile_fine_surface_enabled(profile))
     if problems:
         warning = f"daily access v4 shards unavailable for inspect: {problems[:3]}"
@@ -966,6 +986,7 @@ class RuntimeService:
                     for key in (
                         "model", "score_model_version", "geometry_version", "classification_version",
                         "channels", "inspect_ready", "fine_png_enabled", "warnings",
+                        "available_modes", "default_mode", "mode_aware",
                     )
                 }
             ),
@@ -980,12 +1001,23 @@ class RuntimeService:
             raise RuntimeError("Daily access v4 shards are unavailable for this build.")
         with self._state_lock:
             runtime = self._daily_access_runtime
-            if runtime is None or runtime.score_dir != Path(str(info["score_dir"])):
+            if (
+                runtime is None
+                or runtime.score_dir != Path(str(info["score_dir"]))
+                or runtime.bike_score_dir
+                != (Path(str(info["bike_score_dir"])) if info.get("bike_score_dir") else None)
+            ):
                 runtime = DailyAccessSurfaceRuntime(
                     Path(str(info["shell_dir"])),
                     Path(str(info["score_dir"])),
                     state.surface_tile_dir,
                     profile=state.build_profile,
+                    bike_shell_dir=(
+                        Path(str(info["bike_shell_dir"])) if info.get("bike_shell_dir") else None
+                    ),
+                    bike_score_dir=(
+                        Path(str(info["bike_score_dir"])) if info.get("bike_score_dir") else None
+                    ),
                 )
                 self._daily_access_runtime = runtime
             return runtime

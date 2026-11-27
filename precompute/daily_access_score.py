@@ -17,8 +17,11 @@ from config import (
     DAILY_ACCESS_CATEGORY_MAX,
     DAILY_ACCESS_DISTANCE_MISSING,
     DAILY_ACCESS_DISTANCE_STEP_M,
+    DAILY_ACCESS_DEFAULT_MODE,
     DAILY_ACCESS_HEALTHCARE_MIX,
     DAILY_ACCESS_LIMITED_ACCESS_THRESHOLD,
+    DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS,
+    DAILY_ACCESS_MODE_SPEED_M_PER_MIN,
     DAILY_ACCESS_NEED_THRESHOLDS_MIN,
     DAILY_ACCESS_NEEDS,
     DAILY_ACCESS_SCORE_STEP,
@@ -26,7 +29,6 @@ from config import (
     DAILY_ACCESS_TOP3_WEIGHTS,
     DAILY_ACCESS_TOP_K,
     DAILY_ACCESS_UINT16_MISSING,
-    DAILY_ACCESS_WALK_SPEED_M_PER_MIN,
 )
 
 
@@ -42,17 +44,25 @@ class CellScore:
     penalties: dict[str, float]
 
 
-def need_thresholds_m(need: str) -> tuple[float, float]:
+def need_thresholds_m(
+    need: str,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
+) -> tuple[float, float]:
+    normalized_mode = str(mode).strip().lower()
+    try:
+        speed_m_per_min = float(DAILY_ACCESS_MODE_SPEED_M_PER_MIN[normalized_mode])
+    except KeyError as exc:
+        raise ValueError(f"Unsupported daily access mode: {mode!r}") from exc
     full_min, zero_min = DAILY_ACCESS_NEED_THRESHOLDS_MIN[need]
     return (
-        float(full_min) * DAILY_ACCESS_WALK_SPEED_M_PER_MIN,
-        float(zero_min) * DAILY_ACCESS_WALK_SPEED_M_PER_MIN,
+        float(full_min) * speed_m_per_min,
+        float(zero_min) * speed_m_per_min,
     )
 
 
-def decay(distance_m: float, need: str) -> float:
+def decay(distance_m: float, need: str, mode: str = DAILY_ACCESS_DEFAULT_MODE) -> float:
     """1 up to the full threshold, 0 after the zero threshold, smoothstep between."""
-    full_m, zero_m = need_thresholds_m(need)
+    full_m, zero_m = need_thresholds_m(need, mode)
     distance = float(distance_m)
     if distance <= full_m:
         return 1.0
@@ -68,7 +78,12 @@ def top3_access(contributions: Iterable[float]) -> float:
     return sum(weight * value for weight, value in zip(DAILY_ACCESS_TOP3_WEIGHTS, ordered))
 
 
-def need_access(need: str, options: Iterable[tuple[object, float, float]]) -> float:
+def need_access(
+    need: str,
+    options: Iterable[tuple[object, float, float]],
+    *,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
+) -> float:
     """Access in [0, 1] for one need from ``(label, quality, distance_m)`` options.
 
     Options sharing a label (one logical place / one green root) collapse to
@@ -77,7 +92,7 @@ def need_access(need: str, options: Iterable[tuple[object, float, float]]) -> fl
     """
     best_by_label: dict[object, float] = {}
     for label, quality, distance_m in options:
-        contribution = float(quality) * decay(distance_m, need)
+        contribution = float(quality) * decay(distance_m, need, mode)
         if contribution > best_by_label.get(label, -1.0):
             best_by_label[label] = contribution
     if not best_by_label:
@@ -120,15 +135,63 @@ def total_score(
 def score_cell_options(
     options_by_need: Mapping[str, Iterable[tuple[object, float, float]]],
     *,
+    mode: str = DAILY_ACCESS_DEFAULT_MODE,
     railway_penalty: float = 0.0,
     road_penalty: float = 0.0,
 ) -> CellScore:
     service_access = {
-        need: need_access(need, options_by_need.get(need, ())) for need in DAILY_ACCESS_NEEDS
+        need: need_access(need, options_by_need.get(need, ()), mode=mode)
+        for need in DAILY_ACCESS_NEEDS
     }
     components = category_components(service_access)
     return CellScore(
         total=total_score(components, railway_penalty=railway_penalty, road_penalty=road_penalty),
+        components=components,
+        service_access=service_access,
+        penalties={
+            "railway_proximity": max(float(railway_penalty), 0.0),
+            "road_proximity": max(float(road_penalty), 0.0),
+        },
+    )
+
+
+def combine_mode_access(
+    walk_access: Mapping[str, float],
+    bike_access: Mapping[str, float],
+    *,
+    secondary_bonus: float = DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS,
+) -> dict[str, float]:
+    """Combine independently scored access without ever reducing the best mode."""
+    bonus = min(max(float(secondary_bonus), 0.0), 1.0)
+    combined: dict[str, float] = {}
+    for need in DAILY_ACCESS_NEEDS:
+        walk = min(max(float(walk_access.get(need, 0.0)), 0.0), 1.0)
+        bike = min(max(float(bike_access.get(need, 0.0)), 0.0), 1.0)
+        best, second = max(walk, bike), min(walk, bike)
+        combined[need] = min(best + bonus * second * (1.0 - best), 1.0)
+    return combined
+
+
+def score_mode_access(
+    walk_access: Mapping[str, float],
+    bike_access: Mapping[str, float],
+    *,
+    railway_penalty: float = 0.0,
+    road_penalty: float = 0.0,
+    secondary_bonus: float = DAILY_ACCESS_MODE_AWARE_SECONDARY_BONUS,
+) -> CellScore:
+    service_access = combine_mode_access(
+        walk_access,
+        bike_access,
+        secondary_bonus=secondary_bonus,
+    )
+    components = category_components(service_access)
+    return CellScore(
+        total=total_score(
+            components,
+            railway_penalty=railway_penalty,
+            road_penalty=road_penalty,
+        ),
         components=components,
         service_access=service_access,
         penalties={
@@ -225,6 +288,7 @@ __all__ = [
     "PENALTIES",
     "access_status",
     "category_components",
+    "combine_mode_access",
     "decay",
     "dequantize_access",
     "dequantize_distance",
@@ -236,6 +300,7 @@ __all__ = [
     "quantize_distance",
     "quantize_score",
     "score_cell_options",
+    "score_mode_access",
     "top3_access",
     "total_score",
     "zero_cell_score",

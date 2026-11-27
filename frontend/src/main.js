@@ -41,6 +41,7 @@ import {
   landuseContextLayerMinZoom as runtimeLanduseContextLayerMinZoom,
   noiseOutlineOpacity as runtimeNoiseOutlineOpacity,
   activeGridLifecycle as runtimeActiveGridLifecycle,
+  availableGridTravelModes as runtimeAvailableGridTravelModes,
   activeDebugGridLayerId as runtimeActiveDebugGridLayerId,
   activeGridLayerId as runtimeActiveGridLayerId,
   activeGridOutlineLayerId as runtimeActiveGridOutlineLayerId,
@@ -54,6 +55,8 @@ import {
   legacyFieldsUnavailable as runtimeLegacyFieldsUnavailable,
   gridScoreLayerLabel as runtimeGridScoreLayerLabel,
   gridScoreLayerOptions as runtimeGridScoreLayerOptions,
+  gridTravelModeLabel as runtimeGridTravelModeLabel,
+  normalizeGridTravelMode as runtimeNormalizeGridTravelMode,
   normalizeGridScoreLayer as runtimeNormalizeGridScoreLayer,
   gridVisibilityPlan as runtimeGridVisibilityPlan,
   resolutionForZoom as runtimeResolutionForZoom
@@ -93,6 +96,7 @@ maplibregl.addProtocol("pmtiles", protocol.tile);
 const MIN_ZOOM = 5;
 const DEBUG_GRID_QUERY_PARAM = "debug-grid";
 const GRID_LAYER_STORAGE_KEY = "livability-grid-layer";
+const GRID_TRAVEL_MODE_STORAGE_KEY = "livability-grid-travel-mode";
 const RUNTIME_FETCH_TIMEOUT_MS = 45000;
 const RUNTIME_FETCH_RETRY_DELAY_MS = 1200;
 const RUNTIME_FETCH_MAX_ATTEMPTS = 2;
@@ -116,6 +120,7 @@ const elements = {
   noiseNote: document.getElementById("noise-note"),
   gridToggle: document.getElementById("grid-toggle"),
   gridLayerControls: document.getElementById("grid-layer-controls"),
+  gridTravelModeControls: document.getElementById("grid-travel-mode-controls"),
   gridLayerNote: document.getElementById("grid-layer-note"),
   landuseControls: document.getElementById("landuse-controls"),
   landuseNote: document.getElementById("landuse-note"),
@@ -153,6 +158,7 @@ const state = {
   popup: null,
   panelHidden: false,
   selectedGridLayer: "combined",
+  selectedGridTravelMode: "walk",
   enabledAmenityCategories: new Set(),
   enabledAmenityTiers: new Map(),
   landuseVisible: false,
@@ -226,7 +232,8 @@ function activeGridLifecycle() {
     state.runtime || {},
     state.activeGridResolutionM,
     zoom,
-    state.selectedGridLayer
+    state.selectedGridLayer,
+    state.selectedGridTravelMode
   );
 }
 
@@ -263,9 +270,33 @@ function saveGridLayerSelection(value) {
   }
 }
 
+function readSavedGridTravelMode() {
+  try {
+    return runtimeNormalizeGridTravelMode(
+      window.sessionStorage.getItem(GRID_TRAVEL_MODE_STORAGE_KEY),
+      state.runtime
+    );
+  } catch (error) {
+    return "walk";
+  }
+}
+
+function saveGridTravelMode(value) {
+  try {
+    window.sessionStorage.setItem(
+      GRID_TRAVEL_MODE_STORAGE_KEY,
+      runtimeNormalizeGridTravelMode(value, state.runtime)
+    );
+  } catch (error) {
+    // Session storage is best-effort only.
+  }
+}
+
 function updateGridLayerNote() {
   if (!elements.gridLayerNote) return;
-  elements.gridLayerNote.textContent = "Active layer: " + runtimeGridScoreLayerLabel(state.selectedGridLayer);
+  elements.gridLayerNote.textContent =
+    "Active layer: " + runtimeGridTravelModeLabel(state.selectedGridTravelMode) +
+    " · " + runtimeGridScoreLayerLabel(state.selectedGridLayer);
 }
 
 function applyGridLayerSelection() {
@@ -278,7 +309,7 @@ function applyGridLayerSelection() {
     state.map.setPaintProperty(
       layerId,
       "fill-color",
-      runtimeGridFillColorExpression(state.selectedGridLayer)
+      runtimeGridFillColorExpression(state.selectedGridLayer, state.selectedGridTravelMode)
     );
   }
   updateGridLayerNote();
@@ -321,6 +352,38 @@ function buildGridLayerControls() {
     label.appendChild(textWrap);
     label.appendChild(input);
     elements.gridLayerControls.appendChild(label);
+  });
+  updateGridLayerNote();
+}
+
+function buildGridTravelModeControls() {
+  if (!elements.gridTravelModeControls) return;
+  elements.gridTravelModeControls.replaceChildren();
+  const options = runtimeAvailableGridTravelModes(state.runtime);
+  elements.gridTravelModeControls.hidden = options.length <= 1;
+  options.forEach(function (option) {
+    const label = document.createElement("label");
+    label.className = "toggle-row grid-layer-row";
+    label.htmlFor = "grid-travel-mode-" + option.value;
+
+    const title = document.createElement("strong");
+    title.textContent = option.label;
+
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "grid-travel-mode";
+    input.id = "grid-travel-mode-" + option.value;
+    input.checked = state.selectedGridTravelMode === option.value;
+    input.addEventListener("change", function () {
+      if (!input.checked) return;
+      state.selectedGridTravelMode = option.value;
+      saveGridTravelMode(option.value);
+      applyGridLayerSelection();
+    });
+
+    label.appendChild(title);
+    label.appendChild(input);
+    elements.gridTravelModeControls.appendChild(label);
   });
   updateGridLayerNote();
 }
@@ -519,7 +582,8 @@ function ensureActiveGridLayers() {
   runtimeBuildActiveGridLayers(
     state.runtime || {},
     lifecycle.resolutionM,
-    state.selectedGridLayer
+    state.selectedGridLayer,
+    state.selectedGridTravelMode
   ).forEach(function (layer) {
     state.map.addLayer(layer, beforeLayerId);
   });
@@ -2036,7 +2100,8 @@ function initializeMap() {
     container: elements.map,
     style: buildRuntimeStyle(state.runtime, {
       windowOrigin: window.location.origin,
-      selectedGridLayer: state.selectedGridLayer
+      selectedGridLayer: state.selectedGridLayer,
+      selectedGridTravelMode: state.selectedGridTravelMode
     }),
     center: [state.runtime.map_center.lon, state.runtime.map_center.lat],
     zoom: state.runtime.default_zoom || 6,
@@ -2182,7 +2247,7 @@ function initializeMap() {
         const payload = await fetchInspect(event.lngLat);
         state.popup
           .setLngLat(event.lngLat)
-          .setHTML(inspectPopupHtml(payload))
+          .setHTML(inspectPopupHtml(payload, { selectedMode: state.selectedGridTravelMode }))
           .addTo(state.map);
       } catch (error) {
         if (error && error.name === "AbortError") {
@@ -2200,7 +2265,10 @@ function initializeMap() {
         .setHTML(coarseGridPopupHtml(
           clickAction.features[0].properties || {},
           resolutionForZoom(state.map.getZoom()),
-          { legacyUnavailable: runtimeLegacyFieldsUnavailable(state.runtime).length > 0 }
+          {
+            legacyUnavailable: runtimeLegacyFieldsUnavailable(state.runtime).length > 0,
+            selectedMode: state.selectedGridTravelMode
+          }
         ))
         .addTo(state.map);
     }
@@ -2256,6 +2324,7 @@ function initializeApp(runtime) {
   state.gridDebug = createGridDebugState(DEBUG_GRID_ENABLED);
   state.gridDebugSnapshotFallbackText = "";
   state.selectedGridLayer = readSavedGridLayer();
+  state.selectedGridTravelMode = readSavedGridTravelMode();
   state.enabledAmenityCategories = new Set();
   state.enabledAmenityTiers = new Map(
     Object.entries(defaultAmenityTierSelections(runtime)).map(function (entry) {
@@ -2288,6 +2357,7 @@ function initializeApp(runtime) {
   }
   state.selectedNoiseBands = new Set(noiseDefaults.bands || []);
   buildGridLayerControls();
+  buildGridTravelModeControls();
   buildAmenityControls();
   buildLanduseControls();
   buildNoiseControls();
